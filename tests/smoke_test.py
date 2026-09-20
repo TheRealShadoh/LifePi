@@ -4,6 +4,7 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 tmp = tempfile.mkdtemp()
 for k in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
     os.environ[k] = os.path.join(tmp, k)
+shots = os.environ.get("LIFEPI_SHOTS", tmp); os.makedirs(shots, exist_ok=True)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pygame, lifepi
 from types import SimpleNamespace as NS
@@ -77,15 +78,15 @@ for _ in range(100):
     if grid["status"] == "" : break
     time.sleep(0.05)
 assert len(grid["items"]) == 8, grid
-app.render(); pygame.image.save(app.canvas, os.path.join(tmp, "grid.png"))
+app.render(); pygame.image.save(app.canvas, os.path.join(shots, "grid.png"))
 app.grid_pick(grid, grid["items"][0]); assert app.players[1]["art"] and "Some Artist" in app.players[1]["credit"]
 app.players[3]["counters"]["poison"] = 4; app.players[3]["life"] = 0
-app.render(); pygame.image.save(app.canvas, os.path.join(tmp, "game.png"))
+app.render(); pygame.image.save(app.canvas, os.path.join(shots, "game.png"))
 for kind, kw in (("menu", {}), ("newgame", dict(n=4, life=40)), ("dice", dict(result="17", sub="d20")),
                  ("player", dict(idx=1, angle=0)), ("keyboard", dict(title="Player name", text="Chr", cb=print))):
-    app.push(kind, **kw); app.render(); pygame.image.save(app.canvas, os.path.join(tmp, kind + ".png")); app.pop()
+    app.push(kind, **kw); app.render(); pygame.image.save(app.canvas, os.path.join(shots, kind + ".png")); app.pop()
 for n in range(1, 7):
     app.start_game(n, 40); app.render()
 app.save_state(); app2 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
 assert len(app2.players) == 6 and "Chris" in app2.profiles
-print("modals / scryfall / persistence ok"); print("SHOTS", tmp)
+print("modals / scryfall / persistence ok"); print("SHOTS", shots)

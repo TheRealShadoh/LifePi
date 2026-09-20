@@ -1,5 +1,7 @@
 # LifePi
 
+[![CI](https://github.com/TheRealShadoh/LifePi/actions/workflows/ci.yml/badge.svg)](https://github.com/TheRealShadoh/LifePi/actions/workflows/ci.yml)
+
 A touch-first **Magic: The Gathering life counter that runs natively on a Raspberry Pi** —
 no Android, no Waydroid, no browser. One Python file on top of pygame/SDL2, so it runs on
 any ARM (or x86) Linux box.
@@ -49,7 +51,7 @@ Keys (optional, a keyboard is never required): `Esc` menu/back · `R` rotate · 
 
 ## Tests
 
-`SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` — headless; covers rotation/touch mapping, tap/hold, modals, persistence and a mocked Scryfall search.
+`SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` — headless; covers rotation/touch mapping, tap/hold, modals, persistence and a mocked Scryfall search. CI runs it on x86_64 and arm64 (the Pi's architecture), plus `tests/live_scryfall.py` against the real API.
 
 ## Legal
 

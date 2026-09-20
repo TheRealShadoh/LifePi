@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: smoke (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]   # arm64 = same architecture as a 64-bit Pi
+        python: ["3.11", "3.13"]               # 3.11 = Pi OS Bookworm, 3.13 = Trixie
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install pygame
+      - run: python -m py_compile lifepi.py
+      - name: Headless smoke test
+        env:
+          SDL_VIDEODRIVER: dummy
+          LIFEPI_SHOTS: ${{ runner.temp }}/shots
+        run: python tests/smoke_test.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots-${{ matrix.os }}-py${{ matrix.python }}
+          path: ${{ runner.temp }}/shots/*.png
+
+  distro-pygame:
+    name: apt python3-pygame on arm64 (what install.sh uses)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y python3-pygame
+      - env:
+          SDL_VIDEODRIVER: dummy
+        run: /usr/bin/python3 tests/smoke_test.py
+
+  scryfall-live:
+    name: live Scryfall search (non-blocking)
+    runs-on: ubuntu-24.04
+    continue-on-error: true                    # a Scryfall outage must not fail the build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pygame
+      - env:
+          SDL_VIDEODRIVER: dummy
+          LIFEPI_SHOTS: ${{ runner.temp }}/shots
+        run: python tests/live_scryfall.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots-scryfall-live
+          path: ${{ runner.temp }}/shots/*.png
