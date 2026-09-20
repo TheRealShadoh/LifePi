@@ -1,0 +1,14 @@
+{
+  // Open this repo in GitHub Codespaces and LifePi starts in a browser tab.
+  "name": "LifePi (browser)",
+  "image": "mcr.microsoft.com/devcontainers/base:debian",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "forwardPorts": [8080],
+  "portsAttributes": {
+    "8080": { "label": "LifePi", "onAutoForward": "openBrowser" }
+  },
+  "postStartCommand": "bash .devcontainer/start.sh",
+  "hostRequirements": { "cpus": 2 }
+}

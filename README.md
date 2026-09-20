@@ -57,6 +57,14 @@ Open **http://localhost:8080**. Clicks and touches act as taps (one pointer at a
 VNC has no multi-touch). `/data` keeps the saved game, profiles, cached art and
 `share/lifepi/images` for your own backgrounds.
 
+### Zero-install: GitHub Codespaces
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/TheRealShadoh/LifePi)
+
+Click the badge, wait for the build (~2 min the first time) and LifePi opens in a browser
+tab. The forwarded URL (PORTS tab -> LifePi) also works from a **phone** signed in to the
+same GitHub account. Stop the codespace when you're done - free accounts get a monthly quota.
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `RESOLUTION` | `1280x720` | virtual screen size; `800x480` mimics the official 7" Pi display |
