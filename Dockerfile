@@ -17,7 +17,8 @@ COPY docker/index.html /usr/share/novnc/index.html
 RUN chmod +x /app/entrypoint.sh
 
 USER lifepi
-ENV RESOLUTION=1280x720 \
+ENV DISPLAY=:0 \
+    RESOLUTION=1280x720 \
     ROTATE= \
     VNC_PASSWORD= \
     PORT=8080 \
