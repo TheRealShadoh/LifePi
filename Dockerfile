@@ -6,10 +6,11 @@ FROM debian:trixie-slim
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      python3 python3-pygame xvfb x11vnc novnc websockify scrot ca-certificates tini \
+      python3 python3-pygame xvfb x11vnc novnc websockify scrot ca-certificates tini procps \
  && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -u 1000 lifepi && mkdir -p /data /app && chown lifepi:lifepi /data
+RUN useradd -m -u 1000 lifepi && mkdir -p /data /app /tmp/.X11-unix \
+ && chown lifepi:lifepi /data && chmod 1777 /tmp/.X11-unix
 COPY lifepi.py /app/lifepi.py
 COPY docker/entrypoint.sh /app/entrypoint.sh
 COPY docker/index.html /usr/share/novnc/index.html

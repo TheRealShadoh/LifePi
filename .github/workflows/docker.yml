@@ -30,11 +30,12 @@ jobs:
       - name: Wait for the web UI and the app
         run: |
           for i in $(seq 1 30); do
-            if curl -fsS -o /dev/null http://127.0.0.1:8080/vnc.html && docker exec lifepi pgrep -f lifepi.py >/dev/null; then
-              echo "up after ${i}s"; exit 0; fi
+            web=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/vnc.html || true)
+            app=$(docker exec lifepi pgrep -f lifepi.py >/dev/null 2>&1 && echo up || echo down)
+            if [ "$web" = "200" ] && [ "$app" = "up" ]; then echo "up after ${i}s"; exit 0; fi
             sleep 1
           done
-          docker logs lifepi; exit 1
+          echo "web=$web app=$app"; docker ps -a; docker logs lifepi; docker exec lifepi ps aux || true; exit 1
       - name: WebSocket endpoint upgrades
         run: |
           curl -s -i -m 5 -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" \
