@@ -1,0 +1,88 @@
+name: Web container
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/therealshadoh/lifepi-web
+
+jobs:
+  test:
+    name: build + run (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t lifepi-web .
+      - name: Start container (800x480, like the 7" Pi screen)
+        run: docker run -d --name lifepi -p 8080:8080 -e RESOLUTION=800x480 lifepi-web
+      - name: Wait for the web UI and the app
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/vnc.html && docker exec lifepi pgrep -f lifepi.py >/dev/null; then
+              echo "up after ${i}s"; exit 0; fi
+            sleep 1
+          done
+          docker logs lifepi; exit 1
+      - name: WebSocket endpoint upgrades
+        run: |
+          curl -s -i -m 5 -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" \
+               -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Protocol: binary" \
+               http://127.0.0.1:8080/websockify > ws.txt || true
+          head -1 ws.txt; head -1 ws.txt | grep -q "101"
+      - name: Screenshot the virtual display
+        run: |
+          sleep 2
+          docker exec lifepi scrot -o /tmp/screen.png
+          docker cp lifepi:/tmp/screen.png screen-${{ matrix.os }}.png
+          test "$(stat -c %s screen-${{ matrix.os }}.png)" -gt 3000   # not a blank frame
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: web-screenshot-${{ matrix.os }}
+          path: screen-*.png
+      - if: failure()
+        run: docker logs lifepi
+
+  publish:
+    name: publish multi-arch image to GHCR
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=sha
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

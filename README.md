@@ -43,6 +43,27 @@ Keys (optional, a keyboard is never required): `Esc` menu/back · `R` rotate · 
 `SDL_VIDEODRIVER=kmsdrm python3 lifepi.py`. If touch lands in the wrong place because the
 *OS* is also rotating the display, remove the OS rotation and use LifePi's instead.
 
+## Run it in a browser (Docker)
+
+No Pi handy, or want it on a tablet/phone? The container runs the real app on a virtual
+display and streams it to any browser with noVNC. Images are multi-arch (amd64 + arm64).
+
+```bash
+docker run -d --name lifepi -p 8080:8080 -v lifepi-data:/data ghcr.io/therealshadoh/lifepi-web
+# or, from a clone:  docker compose up -d --build
+```
+
+Open **http://localhost:8080**. Clicks and touches act as taps (one pointer at a time -
+VNC has no multi-touch). `/data` keeps the saved game, profiles, cached art and
+`share/lifepi/images` for your own backgrounds.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RESOLUTION` | `1280x720` | virtual screen size; `800x480` mimics the official 7" Pi display |
+| `ROTATE` | *(unset)* | start rotated: 0 / 90 / 180 / 270 |
+| `VNC_PASSWORD` | *(unset)* | **set this if anyone else can reach the port** - there is no auth otherwise |
+| `PORT` | `8080` | HTTP/WebSocket port inside the container |
+
 ## Controls
 
 - Middle of a panel: left half −, right half + (hold for ±10)
