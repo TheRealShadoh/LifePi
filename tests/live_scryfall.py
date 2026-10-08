@@ -12,6 +12,9 @@ import pygame, lifepi
 from types import SimpleNamespace as NS
 
 app = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
+guesses = app.suggest_cards("lightning bo")
+print("autocomplete:", guesses[:3])
+assert "Lightning Bolt" in guesses, guesses
 app.open_art_search(0, "lightning bolt", 0)
 grid = app.modals[-1]
 deadline = time.time() + 90

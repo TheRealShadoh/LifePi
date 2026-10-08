@@ -16,6 +16,7 @@ Unofficial fan content. Not affiliated with Wizards of the Coast, Scryfall or
 any other life counter app.  MIT licensed - see LICENSE.
 """
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -36,6 +37,11 @@ CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / APP
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / APP / "art"
 IMAGE_DIR = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / APP / "images"
 STATE_FILE = CONFIG_DIR / "state.json"
+SEARCH_DIR = CACHE_DIR.parent / "search"            # cached Scryfall search results
+SUGGEST_FILE = CACHE_DIR.parent / "autocomplete.json"
+SEARCH_TTL = 7 * 86400                              # re-ask Scryfall after a week
+SUGGEST_TTL = 30 * 86400
+SUGGEST_DELAY = 0.3                                 # pause in typing before asking Scryfall
 USER_AGENT = f"LifePi/{VERSION} (+https://github.com/TheRealShadoh/LifePi)"
 
 WHITE = (255, 255, 255)
@@ -59,6 +65,30 @@ def http_get(url, timeout=10):
         "User-Agent": USER_AGENT, "Accept": "application/json;q=0.9,*/*;q=0.8"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
+
+
+_api_lock, _api_last = threading.Lock(), [0.0]
+
+
+def scryfall(path, **params):
+    """GET a Scryfall API endpoint as JSON, at most ~10 requests/s as Scryfall asks."""
+    with _api_lock:
+        wait = _api_last[0] + 0.1 - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _api_last[0] = time.time()
+    return json.loads(http_get("https://api.scryfall.com" + path + "?" + urllib.parse.urlencode(params)))
+
+
+def search_cache_path(query):
+    key = hashlib.sha1(" ".join(query.lower().split()).encode()).hexdigest()[:16]
+    return SEARCH_DIR / f"{key}.json"
+
+
+def write_atomic(path, text):
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 
 def unrotate(px, py, disp_w, disp_h, rot):
@@ -106,12 +136,12 @@ class View:
         self.surf = pygame.Surface(self.rect.size)
         self.w, self.h = self.rect.size
 
-    def zone(self, r, tap=None, hold=None, repeat=0.15):
+    def zone(self, r, tap=None, hold=None, repeat=0.15, drag=None):
         r = pygame.Rect(r)
         if self.angle == 180:
             r = pygame.Rect(self.w - r.right, self.h - r.bottom, r.w, r.h)
         r.move_ip(self.rect.topleft)
-        self.app.zones.append((r, tap, hold, repeat))
+        self.app.zones.append((r, tap, hold, repeat, drag))
 
     def finish(self):
         s = self.surf if self.angle == 0 else pygame.transform.flip(self.surf, True, True)
@@ -122,13 +152,16 @@ class View:
 class App:
     def __init__(self, args):
         self.args = args
-        for d in (CONFIG_DIR, CACHE_DIR, IMAGE_DIR):
+        for d in (CONFIG_DIR, CACHE_DIR, SEARCH_DIR, IMAGE_DIR):
             d.mkdir(parents=True, exist_ok=True)
         self.settings = {"rotation": 0, "seating": "table", "cmd_hits_life": True,
                          "start_life": 40}
         self.players = [new_player(i, 40) for i in range(4)]
         self.profiles = {}
         self.load_state()
+        self.cache_lock = threading.Lock()
+        self.ac_cache, self.ac_dirty, self.known_names = {}, False, set()
+        self.load_caches()
         if args.rotate is not None:
             self.settings["rotation"] = args.rotate % 360 // 90 * 90
 
@@ -144,6 +177,7 @@ class App:
         self.fonts, self.img_cache = {}, {}
         self.zones, self.pointers, self.modals, self.fx = [], {}, [], {}
         self.dirty, self.state_dirty, self.last_save = True, False, 0.0
+        self.seats = []
         self.running = True
         self.make_canvas()
 
@@ -173,6 +207,38 @@ class App:
         except OSError as e:
             print("save failed:", e, file=sys.stderr)
         self.state_dirty, self.last_save = False, time.time()
+        self.save_caches()
+
+    def load_caches(self):
+        """Autocomplete answers + card names from earlier searches (for offline guesses)."""
+        try:
+            data = json.loads(SUGGEST_FILE.read_text())
+            if isinstance(data, dict):
+                self.ac_cache = data
+        except (OSError, ValueError):
+            pass
+        for entry in self.ac_cache.values():
+            try:
+                self.known_names.update(entry[1])
+            except (IndexError, TypeError):
+                pass
+        for f in SEARCH_DIR.glob("*.json"):
+            try:
+                self.known_names.update(c["name"] for c in json.loads(f.read_text())["cards"])
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+
+    def save_caches(self):
+        with self.cache_lock:
+            if not self.ac_dirty:
+                return
+            keep = sorted(self.ac_cache.items(), key=lambda kv: kv[1][0])[-1000:]
+            self.ac_cache, self.ac_dirty = dict(keep), False
+            text = json.dumps(self.ac_cache)
+        try:
+            write_atomic(SUGGEST_FILE, text)
+        except OSError as e:
+            print("cache save failed:", e, file=sys.stderr)
 
     def changed(self):
         self.dirty = self.state_dirty = True
@@ -287,6 +353,25 @@ class App:
         self.make_canvas()
         self.changed()
 
+    def swap_seats(self, a, b):
+        """Swap two players' seats; commander damage is indexed by seat, so it follows."""
+        P = self.players
+        P[a], P[b] = P[b], P[a]
+        for p in P:
+            p["cmd"][a], p["cmd"][b] = p["cmd"][b], p["cmd"][a]
+        fa, fb = self.fx.pop(a, None), self.fx.pop(b, None)
+        if fa:
+            self.fx[b] = fa
+        if fb:
+            self.fx[a] = fb
+        self.changed()
+
+    def seat_at(self, pos):
+        for k, (rect, _) in enumerate(self.seats):
+            if rect.collidepoint(pos):
+                return k
+        return None
+
     def remember_profile(self, p):
         if not p["name"].startswith("Player "):
             self.profiles[p["name"]] = {k: p[k] for k in ("color", "art", "credit")}
@@ -301,8 +386,33 @@ class App:
             self.modals.pop()
         self.dirty = True
 
-    def ask_text(self, title, initial, cb, angle=0):
-        self.push("keyboard", title=title, text=initial, cb=cb, angle=angle)
+    def ask_text(self, title, initial, cb, angle=0, **kw):
+        """On-screen keyboard. Optional kw: local(text) -> instant suggestions,
+        suggest(text) -> slower suggestions (run on a thread after a pause in typing),
+        pick(suggestion) -> called when a suggestion is tapped, hint -> shown when none."""
+        self.push("keyboard", title=title, text="", cb=cb, angle=angle, sugg=[], sugg_due=None, **kw)
+        self.set_text(self.modals[-1], initial)
+
+    def set_text(self, m, t):
+        m["text"] = t[:40]
+        if m.get("local"):
+            m["sugg"] = m["local"](m["text"])
+        if m.get("suggest"):
+            m["sugg_due"] = time.time() + SUGGEST_DELAY
+        self.dirty = True
+
+    def tick_suggest(self):
+        m = self.modals[-1] if self.modals else None
+        if not m or m["kind"] != "keyboard" or not m.get("sugg_due") or time.time() < m["sugg_due"]:
+            return
+        m["sugg_due"], t = None, m["text"]
+
+        def work():
+            names = m["suggest"](t)
+            if m["text"] == t:                       # still what's on screen?
+                m["sugg"] = names
+                self.dirty = True
+        threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------------ player panel
     def draw_panel(self, i, rect, angle):
@@ -352,7 +462,7 @@ class App:
         v.zone((w // 2, top, w - w // 2, mid), lambda: self.change_life(i, 1),
                lambda: self.change_life(i, 10), 0.5)
         opener = lambda: self.push("player", idx=i, angle=angle)
-        v.zone((0, 0, w, top), opener)
+        v.zone((0, 0, w, top), opener, drag=i)       # hold + drag the name to swap seats
         v.zone((0, h - bot, w, bot), opener)
         v.finish()
 
@@ -489,8 +599,20 @@ class App:
             self.remember_profile(p)
             self.changed()
 
-        acts = [("Rename", lambda: self.ask_text("Player name", "" if p["name"].startswith("Player ") else p["name"], rename, ang)),
-                ("Card art", lambda: self.ask_text("Search Scryfall for a card", "", search, ang)),
+        def pick_name(name):
+            if name in self.profiles:
+                self.load_profile(i, name)
+            else:
+                rename(name)
+
+        acts = [("Rename", lambda: self.ask_text(
+                    "Player name", "" if p["name"].startswith("Player ") else p["name"], rename, ang,
+                    local=self.profile_names, pick=pick_name, hint="Saved profiles appear here")),
+                ("Card art", lambda: self.ask_text(
+                    "Search Scryfall for a card", "", search, ang,
+                    local=self.local_card_names, suggest=self.suggest_cards,
+                    hint="Type 2+ letters for suggestions",
+                    pick=lambda name: self.open_art_search(i, f'!"{name}"', ang, label=name))),
                 ("Local image", lambda: self.open_local_images(i, ang)),
                 ("Colour", recolor),
                 ("Profiles", lambda: self.open_profiles(i, ang))]
@@ -534,17 +656,26 @@ class App:
         pygame.draw.rect(v.surf, (36, 38, 50), box, border_radius=8)
         self.text(v.surf, m["text"] + "|", u * 0.6, maxw=box.w - 20, shadow=False, midleft=(box.x + 12, box.centery))
         rows = ["1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm,.-"]
-        kh = (H - 2 * u - 8) // 5
         y = 2 * u + 8
+        if "pick" in m:                               # suggestion strip
+            sh = int(u * 0.75)
+            cols = 3 if W < 1000 else 4
+            sugg = m.get("sugg") or []
+            for k, name in enumerate(sugg[:cols]):
+                self.button(v, (k * W // cols, y, W // cols, sh), name,
+                            lambda name=name: self.keyboard_pick(m, name),
+                            bg=BTN_ON if k == 0 else BTN, size=sh * 0.5)
+            if not sugg and m.get("hint"):
+                self.text(v.surf, m["hint"], sh * 0.4, GREY, shadow=False, center=(W // 2, y + sh // 2))
+            y += sh
+        kh = (H - y) // 5
 
         def add(ch):
             t = m["text"]
-            m["text"] = (t + (ch.upper() if not t or t.endswith(" ") else ch))[:40]
-            self.dirty = True
+            self.set_text(m, t + (ch.upper() if not t or t.endswith(" ") else ch))
 
         def back():
-            m["text"] = m["text"][:-1]
-            self.dirty = True
+            self.set_text(m, m["text"][:-1])
 
         for ri, keys in enumerate(rows):
             for ci, ch in enumerate(keys):
@@ -560,6 +691,12 @@ class App:
     def keyboard_ok(self, m):
         self.pop()
         m["cb"](m["text"])
+        self.save_caches()
+
+    def keyboard_pick(self, m, choice):
+        self.pop()
+        m["pick"](choice)
+        self.save_caches()
 
     def draw_grid(self, m):
         """Generic 3x2 paged picker. items: {label, img, value}; may grow from a thread."""
@@ -609,35 +746,102 @@ class App:
         self.remember_profile(p)
         self.changed()
 
-    def open_art_search(self, i, query, angle):
-        grid = dict(title=f"Card art: {query}", items=[], page=0, status="Searching Scryfall...", angle=angle,
-                    on_pick=lambda it: self.set_art(i, it["img"], it["value"]))
+    def search_cards(self, query):
+        """Scryfall art search, cached on disk for SEARCH_TTL so repeating a search costs
+        no API calls. Falls back to saved (even stale) results when offline.
+        Returns (cards, note); raises on network errors with nothing cached."""
+        path = search_cache_path(query)
+        try:
+            cached = json.loads(path.read_text())
+            if time.time() - cached["t"] < SEARCH_TTL:
+                return cached["cards"], ""
+        except (OSError, ValueError, KeyError, TypeError):
+            cached = None
+        try:
+            data = scryfall("/cards/search", q=query, unique="art", order="edhrec").get("data", [])
+        except Exception as e:
+            if isinstance(e, urllib.error.HTTPError) and e.code == 404:
+                data = []                              # Scryfall's "no cards matched"
+            elif cached:
+                return cached["cards"], "Offline - showing saved results"
+            else:
+                raise
+        cards = []
+        for c in data[:18]:
+            uris = c.get("image_uris") or (c.get("card_faces") or [{}])[0].get("image_uris") or {}
+            if uris.get("art_crop"):
+                cards.append({"id": c["id"], "name": c.get("name", "?"), "set": c.get("set", ""),
+                              "artist": c.get("artist", "unknown"), "art": uris["art_crop"]})
+        try:
+            write_atomic(path, json.dumps({"q": query, "t": time.time(), "cards": cards}))
+        except OSError:
+            pass
+        with self.cache_lock:
+            self.known_names.update(c["name"] for c in cards)
+        return cards, ""
+
+    def suggest_cards(self, text):
+        """Card-name guesses from Scryfall autocomplete (cached); local guesses if offline.
+        Runs on a worker thread."""
+        q = " ".join(text.lower().split())
+        if len(q) < 2:
+            return []
+        with self.cache_lock:
+            hit = self.ac_cache.get(q)
+        if hit and time.time() - hit[0] < SUGGEST_TTL:
+            return hit[1]
+        try:
+            names = scryfall("/cards/autocomplete", q=q).get("data", [])[:20]
+        except Exception:
+            return hit[1] if hit else self.local_card_names(text)
+        with self.cache_lock:
+            self.ac_cache[q] = [time.time(), names]
+            self.ac_dirty = True
+            self.known_names.update(names)
+        return names
+
+    def local_card_names(self, text):
+        """Instant guesses from card names seen before (no network)."""
+        q = " ".join(text.lower().split())
+        if len(q) < 2:
+            return []
+        with self.cache_lock:
+            names = list(self.known_names)
+        starts = sorted(n for n in names if n.lower().startswith(q))
+        inside = sorted(n for n in names if q in n.lower() and not n.lower().startswith(q))
+        return (starts + inside)[:12]
+
+    def profile_names(self, text):
+        t = text.strip().lower()
+        return [n for n in sorted(self.profiles) if n.lower().startswith(t)]
+
+    def open_art_search(self, i, query, angle, label=None):
+        grid = dict(title=f"Card art: {label or query}", items=[], page=0, status="Searching Scryfall...",
+                    angle=angle, on_pick=lambda it: self.set_art(i, it["img"], it["value"]))
         self.push("grid", **grid)
         grid = self.modals[-1]
 
         def work():
             try:
-                url = "https://api.scryfall.com/cards/search?" + urllib.parse.urlencode(
-                    {"q": query, "unique": "art", "order": "edhrec"})
-                cards = json.loads(http_get(url)).get("data", [])[:18]
+                cards, note = self.search_cards(query)
                 for c in cards:
-                    uris = c.get("image_uris") or (c.get("card_faces") or [{}])[0].get("image_uris") or {}
-                    if not uris.get("art_crop"):
-                        continue
                     path = CACHE_DIR / f"{c['id']}.jpg"
-                    if not path.exists():
-                        time.sleep(0.1)                       # be polite to the API
-                        tmp = path.with_suffix(".part")
-                        tmp.write_bytes(http_get(uris["art_crop"]))
-                        os.replace(tmp, path)
-                    credit = f"{c.get('name', '')} - illus. {c.get('artist', 'unknown')} - (c) Wizards of the Coast"
-                    grid["items"].append({"label": f"{c.get('name', '?')} ({c.get('set', '').upper()})",
+                    if not path.exists():                 # art is cached on disk by card id
+                        try:
+                            tmp = path.with_suffix(".part")
+                            tmp.write_bytes(http_get(c["art"]))
+                            os.replace(tmp, path)
+                            time.sleep(0.05)              # be polite to the image CDN
+                        except Exception:
+                            continue                      # offline: show what we have
+                    credit = f"{c['name']} - illus. {c['artist']} - (c) Wizards of the Coast"
+                    grid["items"].append({"label": f"{c['name']} ({c['set'].upper()})",
                                           "img": str(path), "value": credit})
                     grid["status"] = "Loading..."
                     self.dirty = True
-                grid["status"] = "" if grid["items"] else "No cards found"
+                grid["status"] = note if grid["items"] else "No cards found"
             except urllib.error.HTTPError as e:
-                grid["status"] = "No cards found" if e.code == 404 else f"Scryfall error {e.code}"
+                grid["status"] = f"Scryfall error {e.code}"
             except Exception as e:                            # offline, DNS, timeout...
                 grid["status"] = f"Network problem: {e}"
             self.dirty = True
@@ -656,20 +860,23 @@ class App:
                   "bg": PALETTE[pr.get("color", 0) % len(PALETTE)]}
                  for name, pr in sorted(self.profiles.items())]
 
-        def pick(it):
-            p = self.players[i]
-            p["name"] = it["value"]
-            p.update(self.profiles[it["value"]])
-            self.changed()
         self.push("grid", title="Load profile", items=items, page=0, angle=angle,
-                  status="" if items else "No profiles yet - rename a player to create one", on_pick=pick)
+                  status="" if items else "No profiles yet - rename a player to create one",
+                  on_pick=lambda it: self.load_profile(i, it["value"]))
+
+    def load_profile(self, i, name):
+        p = self.players[i]
+        p["name"] = name
+        p.update(self.profiles[name])
+        self.changed()
 
     # ------------------------------------------------------------------ render
     def render(self):
         self.zones = []
         self.canvas.fill(DARK)
         n = len(self.players)
-        for i, (rect, angle) in enumerate(layout(n, self.W, self.H, self.settings["seating"])):
+        self.seats = layout(n, self.W, self.H, self.settings["seating"])
+        for i, (rect, angle) in enumerate(self.seats):
             self.draw_panel(i, rect, angle)
         r = max(22, min(self.W, self.H) // 22)
         c = (self.W // 2, self.H // 2) if n > 1 else (self.W - r - 10, self.H - r - 10)
@@ -679,7 +886,8 @@ class App:
             pygame.draw.line(self.canvas, WHITE, (c[0] - r // 2, c[1] + dy), (c[0] + r // 2, c[1] + dy), 2)
         hit = pygame.Rect(0, 0, int(r * 2.6), int(r * 2.6))
         hit.center = c
-        self.zones.append((hit, lambda: self.push("menu"), None, 0))
+        self.zones.append((hit, lambda: self.push("menu"), None, 0, None))
+        self.draw_drags()
 
         if self.modals:
             self.zones = []
@@ -692,6 +900,30 @@ class App:
         pygame.display.flip()
         self.dirty = False
 
+    def draw_drags(self):
+        """Seat-swap drag feedback: dim the source, outline the target, float the name."""
+        for ptr in self.pointers.values():
+            src = ptr.get("drag")
+            if src is None or src >= len(self.seats):
+                continue
+            srect, sang = self.seats[src]
+            shade = pygame.Surface(srect.size)
+            shade.set_alpha(140)
+            self.canvas.blit(shade, srect)
+            dst = self.seat_at(ptr["pos"])
+            if dst is not None and dst != src:
+                pygame.draw.rect(self.canvas, (255, 230, 120), self.seats[dst][0], 6)
+            p = self.players[src]
+            size = max(20, min(self.W, self.H) // 12)
+            img = self.font(size).render(p["name"], True, WHITE)
+            chip = pygame.Surface((img.get_width() + size, int(size * 1.4)))
+            chip.fill(PALETTE[p["color"] % len(PALETTE)])
+            pygame.draw.rect(chip, (255, 230, 120), chip.get_rect(), 3)
+            chip.blit(img, img.get_rect(center=chip.get_rect().center))
+            if sang == 180:
+                chip = pygame.transform.flip(chip, True, True)
+            self.canvas.blit(chip, chip.get_rect(center=ptr["pos"]))
+
     # ------------------------------------------------------------------ input
     def to_canvas(self, sx, sy):
         sw, sh = self.screen.get_size()
@@ -700,19 +932,36 @@ class App:
     def pointer_down(self, pid, pos):
         for z in reversed(self.zones):
             if z[0].collidepoint(pos):
-                self.pointers[pid] = {"zone": z, "t": time.time(), "held": False, "next": 0}
+                self.pointers[pid] = {"zone": z, "t": time.time(), "held": False, "next": 0, "pos": pos}
                 return
+
+    def pointer_move(self, pid, pos):
+        ptr = self.pointers.get(pid)
+        if ptr:
+            ptr["pos"] = pos
+            if ptr.get("drag") is not None:
+                self.dirty = True
 
     def pointer_up(self, pid, pos):
         ptr = self.pointers.pop(pid, None)
-        if ptr and not ptr["held"] and ptr["zone"][1] and ptr["zone"][0].collidepoint(pos):
+        if ptr and ptr.get("drag") is not None:
+            dst = self.seat_at(pos)
+            if dst is not None and dst != ptr["drag"] and not self.modals:
+                self.swap_seats(ptr["drag"], dst)
+            self.dirty = True
+        elif ptr and not ptr["held"] and ptr["zone"][1] and ptr["zone"][0].collidepoint(pos):
             ptr["zone"][1]()
             self.dirty = True
 
     def tick_holds(self):
         now = time.time()
         for ptr in list(self.pointers.values()):
-            rect, _, hold, repeat = ptr["zone"]
+            rect, _, hold, repeat, drag = ptr["zone"]
+            if drag is not None:
+                if not ptr["held"] and now - ptr["t"] >= HOLD_DELAY:
+                    ptr["held"], ptr["drag"] = True, drag    # long-press on a name: start drag
+                    self.dirty = True
+                continue
             if not hold:
                 continue
             if not ptr["held"] and now - ptr["t"] >= HOLD_DELAY:
@@ -729,23 +978,29 @@ class App:
         elif e.type == pygame.FINGERDOWN:
             pygame.mouse.set_visible(False)
             self.pointer_down(("f", e.finger_id), self.to_canvas(e.x * sw, e.y * sh))
+        elif e.type == pygame.FINGERMOTION:
+            self.pointer_move(("f", e.finger_id), self.to_canvas(e.x * sw, e.y * sh))
         elif e.type == pygame.FINGERUP:
             self.pointer_up(("f", e.finger_id), self.to_canvas(e.x * sw, e.y * sh))
         elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and not getattr(e, "touch", False):
             self.pointer_down("mouse", self.to_canvas(*e.pos))
         elif e.type == pygame.MOUSEBUTTONUP and e.button == 1 and not getattr(e, "touch", False):
             self.pointer_up("mouse", self.to_canvas(*e.pos))
+        elif e.type == pygame.MOUSEMOTION and not getattr(e, "touch", False):
+            self.pointer_move("mouse", self.to_canvas(*e.pos))
         elif e.type == pygame.KEYDOWN:
             m = self.modals[-1] if self.modals else None
             if m and m["kind"] == "keyboard":
-                if e.key == pygame.K_RETURN:
+                if e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                     self.keyboard_ok(m)
                 elif e.key == pygame.K_ESCAPE:
                     self.pop()
+                elif e.key == pygame.K_TAB and m.get("sugg") and "pick" in m:
+                    self.keyboard_pick(m, m["sugg"][0])   # accept the first guess
                 elif e.key == pygame.K_BACKSPACE:
-                    m["text"] = m["text"][:-1]
+                    self.set_text(m, m["text"][:-1])
                 elif e.unicode and e.unicode.isprintable():
-                    m["text"] = (m["text"] + e.unicode)[:40]
+                    self.set_text(m, m["text"] + e.unicode)
                 self.dirty = True
             elif e.key == pygame.K_ESCAPE:
                 self.pop() if self.modals else self.push("menu")
@@ -763,6 +1018,7 @@ class App:
             for e in pygame.event.get():
                 self.handle(e)
             self.tick_holds()
+            self.tick_suggest()
             now = time.time()
             if any(now - fx["t"] < 1.9 for fx in self.fx.values()):
                 self.dirty = True

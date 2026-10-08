@@ -15,7 +15,7 @@ life counter — released under the MIT licence so anyone can use, fork and impr
 - 1–6 players; **table seating** (far row flipped 180° so everyone reads their own panel) or **upright** seating for a monitor on a stand
 - Tap **−/+** for 1, **hold** for 10; running delta ("−7") while you tap; true multi-touch, so two players can tap at once
 - Poison, commander tax, energy, experience; **commander damage per opponent** (optionally also subtracts life); automatic KO dimming at 0 life / 10 poison / 21 commander damage
-- **Images:** search any card on Scryfall with the on-screen keyboard and use its art as your background (cached on disk, works offline afterwards), or drop your own PNG/JPGs in `~/.local/share/lifepi/images`
+- **Images:** search any card on Scryfall with the on-screen keyboard - card names are suggested as you type - and use its art as your background, or drop your own PNG/JPGs in `~/.local/share/lifepi/images`. Searches, suggestions and art are cached on disk, so repeat searches cost no API calls and work offline
 - **Player profiles** – name + art/colour are remembered and reloadable
 - Dice (d4–d20), coin flip, random player
 - **Manual screen rotation: 0 / 90 / 180 / 270°**, from the menu, the `R` key, or `--rotate`. It is done inside the app (render + touch remap), so it behaves identically on X11, Wayland (labwc/wayfire) and bare KMS/DRM, and doesn't touch the rest of the OS
@@ -50,7 +50,7 @@ display and streams it to any browser with noVNC. Images are multi-arch (amd64 +
 
 ```bash
 docker run -d --name lifepi -p 8080:8080 -v lifepi-data:/data ghcr.io/therealshadoh/lifepi-web
-# or, from a clone:  docker compose up -d --build
+# or, from a clone:  docker compose up -d --build   (LIFEPI_PORT=8090 to use another host port)
 ```
 
 Open **http://localhost:8080**. Clicks and touches act as taps (one pointer at a time -
@@ -75,6 +75,7 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 ## Controls
 
 - Middle of a panel: left half −, right half + (hold for ±10)
+- **Hold a player's name and drag it** onto another panel to swap seats (commander damage follows the players)
 - Name strip or counter strip of a panel: opens that player's sheet (rename, card art, local image, colour, profiles, counters, commander damage) — oriented toward that player
 - Round button in the centre: main menu (new game, reset, dice, rotate, seating)
 

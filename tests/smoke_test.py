@@ -85,8 +85,78 @@ app.render(); pygame.image.save(app.canvas, os.path.join(shots, "game.png"))
 for kind, kw in (("menu", {}), ("newgame", dict(n=4, life=40)), ("dice", dict(result="17", sub="d20")),
                  ("player", dict(idx=1, angle=0)), ("keyboard", dict(title="Player name", text="Chr", cb=print))):
     app.push(kind, **kw); app.render(); pygame.image.save(app.canvas, os.path.join(shots, kind + ".png")); app.pop()
+
+# search results are cached: repeating a search makes no API calls, and art isn't re-downloaded
+calls = []
+def counting(url, timeout=10):
+    calls.append(url)
+    if "cards/autocomplete" in url:
+        return json.dumps({"object": "catalog", "data": ["Lightning Bolt", "Lightning Helix"]}).encode()
+    return fake(url)
+lifepi.http_get = counting
+def wait_grid(g):
+    for _ in range(100):
+        if g["status"] in ("", "No cards found") or g["status"].startswith(("Offline", "Network")): return
+        time.sleep(0.05)
+app.open_art_search(1, "  CARD ", 0); grid = app.modals[-1]; wait_grid(grid)
+assert len(grid["items"]) == 8 and calls == [], calls
+app.pop()
+# stale cache + no network -> saved results with a note
+cache = lifepi.search_cache_path("card"); d = json.loads(cache.read_text()); d["t"] = 0; cache.write_text(json.dumps(d))
+def offline(url, timeout=10): raise lifepi.urllib.error.URLError("no network")
+lifepi.http_get = offline
+app.open_art_search(1, "card", 0); grid = app.modals[-1]; wait_grid(grid)
+assert len(grid["items"]) == 8 and grid["status"].startswith("Offline"), grid["status"]
+app.pop(); lifepi.http_get = counting
+print("search cache ok")
+
+# guess-as-you-type: Card art keyboard asks Scryfall autocomplete after a pause, cached
+def typed(m, text):
+    app.set_text(m, text); time.sleep(lifepi.SUGGEST_DELAY + 0.05); app.tick_suggest()
+    for _ in range(50):
+        if m["sugg"] and m["sugg"][0] == "Lightning Bolt": break
+        time.sleep(0.02)
+app.push("player", idx=1, angle=0); app.render()
+app.zones[2][1]()            # "Card art"
+m = app.modals[-1]; assert m["kind"] == "keyboard" and "pick" in m
+assert app.local_card_names("car")[0] == "Card 0"       # instant local guess from the cached search
+app.set_text(m, "L"); app.set_text(m, "Li"); typed(m, "Lig")
+assert m["sugg"][:2] == ["Lightning Bolt", "Lightning Helix"], m["sugg"]
+assert len([c for c in calls if "autocomplete" in c]) == 1, calls   # debounced: one request
+app.render(); pygame.image.save(app.canvas, os.path.join(shots, "keyboard_suggest.png"))
+calls.clear(); typed(m, "x"); typed(m, "Lig"); assert not [c for c in calls if "autocomplete" in c]
+assert "Lightning Bolt" in app.local_card_names("bolt")
+app.keyboard_pick(m, "Lightning Bolt"); grid = app.modals[-1]; wait_grid(grid)
+assert grid["title"] == "Card art: Lightning Bolt"
+assert any("cards/search" in c and "%21%22Lightning+Bolt%22" in c for c in calls), calls  # exact-name search
+app.modals.clear()
+# rename keyboard suggests saved profiles; picking one loads it
+app.push("player", idx=2, angle=0); app.render(); app.zones[1][1]()
+m = app.modals[-1]; assert "Chris" in m["sugg"]
+app.keyboard_pick(m, "Chris"); assert app.players[2]["name"] == "Chris" and app.players[2]["art"]
+app.players[2]["name"] = "Player 3"; app.modals.clear()
+print("suggestions ok")
+
+# long-press a name strip and drag it onto another seat to swap
+app.render()
+app.players[0]["cmd"][2], app.players[2]["cmd"][0] = 5, 7
+n0, n2, life0 = app.players[0]["name"], app.players[2]["name"], app.players[0]["life"]
+app.pointer_down("d", (200, 220))                    # seat 0 (flipped) name strip
+end = time.time() + lifepi.HOLD_DELAY + 0.1
+while time.time() < end: app.tick_holds(); time.sleep(0.01)
+app.pointer_move("d", (600, 400)); app.render()      # over seat 2
+pygame.image.save(app.canvas, os.path.join(shots, "drag.png"))
+assert not app.modals                                # a hold must not open the sheet
+app.pointer_up("d", (600, 400)); app.render()
+assert app.players[2]["name"] == n0 and app.players[0]["name"] == n2
+assert app.players[2]["life"] == life0
+assert app.players[2]["cmd"][0] == 5 and app.players[0]["cmd"][2] == 7   # damage follows the players
+tap((200, 220)); assert app.modals and app.modals[-1]["kind"] == "player" and app.modals[-1]["idx"] == 0
+app.modals.clear()
+print("seat drag ok")
 for n in range(1, 7):
     app.start_game(n, 40); app.render()
 app.save_state(); app2 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
 assert len(app2.players) == 6 and "Chris" in app2.profiles
+assert "Lightning Helix" in app2.local_card_names("helix")   # autocomplete cache persisted
 print("modals / scryfall / persistence ok"); print("SHOTS", shots)
