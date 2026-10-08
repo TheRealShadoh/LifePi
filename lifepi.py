@@ -47,14 +47,19 @@ USER_AGENT = f"LifePi/{VERSION} (+https://github.com/TheRealShadoh/LifePi)"
 WHITE = (255, 255, 255)
 GREY = (170, 170, 180)
 DARK = (18, 18, 24)
+HEADER = (30, 31, 42)
+GOOD = (40, 150, 80)
+BAD = (190, 50, 50)
 BTN = (58, 60, 74)
 BTN_ON = (70, 120, 200)
 BTN_BAD = (150, 50, 50)
 BTN_OK = (50, 130, 80)
 PALETTE = [(46, 78, 140), (150, 42, 42), (38, 108, 62), (176, 150, 84),
            (62, 52, 76), (118, 58, 140), (196, 106, 38), (36, 116, 126)]
-COUNTERS = [("poison", "Poison", "PSN"), ("tax", "Cmdr tax", "TAX"),
-            ("energy", "Energy", "NRG"), ("exp", "Experience", "EXP")]
+COUNTERS = [("poison", "Poison", "Poison"), ("tax", "Cmdr tax", "Tax"),
+            ("energy", "Energy", "Energy"), ("exp", "Experience", "Exp")]
+CHIP_COLORS = {"poison": (40, 130, 70), "tax": (150, 110, 40), "energy": (175, 135, 20),
+               "exp": (80, 85, 175), "cmd": (165, 45, 45)}
 ROWS = {1: [1], 2: [1, 1], 3: [2, 1], 4: [2, 2], 5: [3, 2], 6: [3, 3]}
 HOLD_DELAY = 0.45
 
@@ -269,7 +274,7 @@ class App:
         if shadow:
             sh = f.render(s, True, (0, 0, 0))
             sh.set_alpha(min(alpha, 170))
-            off = max(1, size // 28)
+            off = max(1, size // 36)
             surf.blit(sh, r.move(off, off))
         if alpha < 255:
             img.set_alpha(alpha)
@@ -302,10 +307,75 @@ class App:
 
     def button(self, v, rect, label, tap, hold=None, bg=BTN, fg=WHITE, size=None, repeat=0.15):
         rect = pygame.Rect(rect).inflate(-6, -6)
-        pygame.draw.rect(v.surf, bg, rect, border_radius=max(4, rect.h // 6))
+        rad = max(4, min(rect.h // 6, 14))
+        pygame.draw.rect(v.surf, bg, rect, border_radius=rad)
+        pygame.draw.rect(v.surf, tuple(min(255, c + 24) for c in bg), rect, 1, border_radius=rad)
         self.text(v.surf, label, size or rect.h * 0.5, fg, maxw=rect.w - 10,
                   shadow=False, center=rect.center)
         v.zone(rect, tap, hold, repeat)
+
+    def shade(self, w, h, top, mid, bot):
+        """Cached black vertical gradient overlay: alpha top -> mid (centre) -> bottom."""
+        key = ("shade", w, h, top, mid, bot)
+        if key not in self.img_cache:
+            col = pygame.Surface((1, 3), pygame.SRCALPHA)
+            for y, a in enumerate((top, mid, bot)):
+                col.set_at((0, y), (0, 0, 0, a))
+            self.img_cache[key] = pygame.transform.smoothscale(col, (w, h))
+        return self.img_cache[key]
+
+    def corners(self, w, h, rad):
+        """Cached mask that paints DARK outside a rounded rect (rounds a panel's corners)."""
+        key = ("corners", w, h, rad)
+        if key not in self.img_cache:
+            m = pygame.Surface((w, h))
+            m.fill(DARK)
+            m.set_colorkey((255, 0, 255))
+            pygame.draw.rect(m, (255, 0, 255), m.get_rect(), border_radius=rad)
+            self.img_cache[key] = m
+        return self.img_cache[key]
+
+    def sign(self, plus, size):
+        """Translucent -/+ hint glyph."""
+        size = max(8, int(size))
+        key = ("sign", plus, size)
+        if key not in self.img_cache:
+            g = pygame.Surface((size, size), pygame.SRCALPHA)
+            th = max(3, size // 6)
+            pygame.draw.rect(g, (255, 255, 255, 110), (0, (size - th) // 2, size, th), border_radius=th // 2)
+            if plus:
+                pygame.draw.rect(g, (255, 255, 255, 110), ((size - th) // 2, 0, th, (size - th) // 2),
+                                 border_radius=th // 2)
+                pygame.draw.rect(g, (255, 255, 255, 110), ((size - th) // 2, (size + th) // 2, th,
+                                 size - (size + th) // 2), border_radius=th // 2)
+            self.img_cache[key] = g
+        return self.img_cache[key]
+
+    def make_pill(self, label, size, fg=WHITE, bg=(0, 0, 0), alpha=170, outline=None):
+        f = self.font(size)
+        img = f.render(label, True, fg)
+        ph = int(f.get_height() * 1.3)
+        pill = pygame.Surface((img.get_width() + ph, ph), pygame.SRCALPHA)
+        pygame.draw.rect(pill, (*bg, alpha), pill.get_rect(), border_radius=ph // 2)
+        if outline:
+            pygame.draw.rect(pill, outline, pill.get_rect(), 2, border_radius=ph // 2)
+        pill.blit(img, img.get_rect(center=pill.get_rect().center))
+        return pill
+
+    def pill_row(self, surf, items, size, center, maxw):
+        """A centred row of pills [(label, bg)]; shrinks to fit maxw."""
+        size = int(size)
+        while True:
+            pills = [self.make_pill(label, size, bg=bg, alpha=225) for label, bg in items]
+            gap = size // 3
+            total = sum(p.get_width() for p in pills) + gap * (len(pills) - 1)
+            if total <= maxw or size <= 10:
+                break
+            size = int(size * 0.9)
+        x = center[0] - total // 2
+        for pl in pills:
+            surf.blit(pl, pl.get_rect(midleft=(x, center[1])))
+            x += pl.get_width() + gap
 
     # ------------------------------------------------------------------ game actions
     def change_life(self, i, d):
@@ -332,8 +402,17 @@ class App:
             self.change_life(i, -applied)
         self.changed()
 
+    def ko_reason(self, p):
+        if p["counters"]["poison"] >= 10:
+            return "poison"
+        if max(p["cmd"]) >= 21:
+            return "commander"
+        if p["life"] <= 0:
+            return "life"
+        return ""
+
     def is_dead(self, p):
-        return p["life"] <= 0 or p["counters"]["poison"] >= 10 or max(p["cmd"]) >= 21
+        return bool(self.ko_reason(p))
 
     def start_game(self, n, life):
         self.settings["start_life"] = life
@@ -417,44 +496,56 @@ class App:
     # ------------------------------------------------------------------ player panel
     def draw_panel(self, i, rect, angle):
         p = self.players[i]
-        v = View(self, rect, angle)
+        gap = max(2, min(self.W, self.H) // 160)
+        v = View(self, pygame.Rect(rect).inflate(-2 * gap, -2 * gap), angle)
         s, w, h = v.surf, v.w, v.h
-        bg = self.cover(p["art"], w, h, dim=105) if p["art"] else None
+        bg = self.cover(p["art"], w, h) if p["art"] else None
         if bg:
             s.blit(bg, (0, 0))
+            s.blit(self.shade(w, h, 210, 150, 220), (0, 0))   # darker where the text sits
         else:
             s.fill(PALETTE[p["color"] % len(PALETTE)])
+            s.blit(self.shade(w, h, 0, 25, 95), (0, 0))
         top, bot = int(h * 0.2), int(h * 0.22)
         self.text(s, p["name"], top * 0.6, maxw=w * 0.85, center=(w // 2, top // 2))
 
         size = int(min(h * 0.56, w * 0.5))
         self.text(s, str(p["life"]), size, maxw=w * 0.62, center=(w // 2, h // 2))
-        self.text(s, "-", size * 0.5, alpha=110, center=(int(w * 0.09), h // 2))
-        self.text(s, "+", size * 0.5, alpha=110, center=(int(w * 0.91), h // 2))
+        for plus, x in ((False, w * 0.08), (True, w * 0.92)):
+            g = self.sign(plus, min(size * 0.2, w * 0.07, 44))
+            s.blit(g, g.get_rect(center=(int(x), h // 2)))
 
         fx = self.fx.get(i)
         if fx and fx["d"]:
             age = time.time() - fx["t"]
             if age < 1.8:
-                a = 255 if age < 1.2 else int(255 * (1.8 - age) / 0.6)
-                self.text(s, f"{fx['d']:+d}", size * 0.3, (255, 230, 120), alpha=a,
-                          center=(w // 2, h // 2 - int(size * 0.47)))
+                pl = self.make_pill(f"{fx['d']:+d}", size * 0.24, bg=GOOD if fx["d"] > 0 else BAD, alpha=235)
+                if age > 1.2:
+                    pl.set_alpha(int(255 * (1.8 - age) / 0.6))
+                s.blit(pl, pl.get_rect(center=(w // 2, h // 2 - int(size * 0.5))))
 
-        chips = [f"{short} {p['counters'][k]}" for k, _, short in COUNTERS if p["counters"][k]]
+        chips = [(f"{short} {p['counters'][k]}", CHIP_COLORS[k]) for k, _, short in COUNTERS if p["counters"][k]]
         if max(p["cmd"]):
-            chips.append(f"CMD {max(p['cmd'])}")
-        self.text(s, "   ".join(chips) if chips else "counters", bot * 0.42,
-                  WHITE if chips else GREY, alpha=255 if chips else 120, maxw=w * 0.9,
-                  center=(w // 2, h - bot // 2 - bot // 8))
+            chips.append((f"Cmdr {max(p['cmd'])}", CHIP_COLORS["cmd"]))
+        cy = h - bot // 2 - bot // 8
+        if chips:
+            self.pill_row(s, chips, bot * 0.38, (w // 2, cy), w * 0.9)
+        else:
+            pl = self.make_pill("counters", bot * 0.34, fg=(200, 200, 210), alpha=70,
+                                outline=(255, 255, 255, 50))
+            s.blit(pl, pl.get_rect(center=(w // 2, cy)))
         if bg and p["credit"]:
-            self.text(s, p["credit"], max(11, h * 0.05), GREY, maxw=w * 0.95,
+            self.text(s, p["credit"], max(11, h * 0.05), GREY, maxw=w * 0.9,
                       midbottom=(w // 2, h - 3))
-        if self.is_dead(p):
+        why = self.ko_reason(p)
+        if why:
             shade = pygame.Surface((w, h))
-            shade.set_alpha(165)
+            shade.fill((25, 0, 0))
+            shade.set_alpha(170)
             s.blit(shade, (0, 0))
-            self.text(s, "KO", size * 0.35, (230, 80, 80), center=(w // 2, h // 2 + int(size * 0.45)))
-        pygame.draw.rect(s, (0, 0, 0), s.get_rect(), 2)
+            pl = self.make_pill("KO" if why == "life" else f"KO - {why}", size * 0.2, bg=BAD, alpha=240)
+            s.blit(pl, pl.get_rect(center=(w // 2, h // 2 + int(size * 0.47))))
+        s.blit(self.corners(w, h, max(6, min(w, h) // 14)), (0, 0))
 
         mid = h - top - bot
         v.zone((0, top, w // 2, mid), lambda: self.change_life(i, -1),
@@ -467,10 +558,11 @@ class App:
         v.finish()
 
     # ------------------------------------------------------------------ modals
-    def modal_view(self, m, title):
+    def modal_view(self, m, title, accent=HEADER):
         v = View(self, (0, 0, self.W, self.H), m.get("angle", 0))
         v.surf.fill(DARK)
         v.u = max(40, self.H // 8)               # basic row height
+        pygame.draw.rect(v.surf, accent, (0, 0, self.W, v.u))
         self.text(v.surf, title, v.u * 0.55, maxw=self.W - v.u * 3, shadow=False,
                   midleft=(16, v.u // 2))
         return v
@@ -576,7 +668,7 @@ class App:
         if i >= len(self.players):
             return self.pop()
         p, ang = self.players[i], m.get("angle", 0)
-        v = self.modal_view(m, p["name"])
+        v = self.modal_view(m, p["name"], tuple(c * 3 // 4 for c in PALETTE[p["color"] % len(PALETTE)]))
         u, W, H = v.u, self.W, self.H
         self.button(v, (W - 2 * u, 0, 2 * u, u), "Done", self.pop, bg=BTN_ON)
 
@@ -729,9 +821,11 @@ class App:
             m["page"] = (m["page"] + d) % pages
             self.dirty = True
         y = H - u
-        self.button(v, (0, y, W // 4, u), "< Prev", lambda: page(-1))
-        self.text(v.surf, f"{m['page'] + 1} / {pages}", u * 0.4, GREY, shadow=False, center=(W * 3 // 8, y + u // 2))
-        self.button(v, (W // 2, y, W // 4, u), "Next >", lambda: page(1))
+        if pages > 1:
+            self.button(v, (0, y, W // 4, u), "< Prev", lambda: page(-1))
+            self.text(v.surf, f"{m['page'] + 1} / {pages}", u * 0.4, GREY, shadow=False,
+                      center=(W * 3 // 8, y + u // 2))
+            self.button(v, (W // 2, y, W // 4, u), "Next >", lambda: page(1))
         self.button(v, (3 * W // 4, y, W // 4, u), "Cancel", self.pop, bg=BTN_BAD)
         v.finish()
 
@@ -878,16 +972,17 @@ class App:
         self.seats = layout(n, self.W, self.H, self.settings["seating"])
         for i, (rect, angle) in enumerate(self.seats):
             self.draw_panel(i, rect, angle)
+        self.draw_drags()
         r = max(22, min(self.W, self.H) // 22)
-        c = (self.W // 2, self.H // 2) if n > 1 else (self.W - r - 10, self.H - r - 10)
-        pygame.draw.circle(self.canvas, (12, 12, 16), c, r)
-        pygame.draw.circle(self.canvas, GREY, c, r, 2)
+        c = self.menu_pos(r)
+        pygame.draw.circle(self.canvas, (0, 0, 0), (c[0], c[1] + 2), r + 2)
+        pygame.draw.circle(self.canvas, (24, 24, 32), c, r)
+        pygame.draw.circle(self.canvas, (210, 210, 220), c, r, 2)
         for dy in (-r // 3, 0, r // 3):
             pygame.draw.line(self.canvas, WHITE, (c[0] - r // 2, c[1] + dy), (c[0] + r // 2, c[1] + dy), 2)
         hit = pygame.Rect(0, 0, int(r * 2.6), int(r * 2.6))
         hit.center = c
         self.zones.append((hit, lambda: self.push("menu"), None, 0, None))
-        self.draw_drags()
 
         if self.modals:
             self.zones = []
@@ -899,6 +994,17 @@ class App:
         self.screen.blit(out, (0, 0))
         pygame.display.flip()
         self.dirty = False
+
+    def menu_pos(self, r):
+        """Menu button spot on the row divider, as clear of the (centred) names as possible."""
+        n = len(self.players)
+        if n == 1:
+            return (self.W - r - 10, self.H - r - 10)
+        xs = [(ci + 0.5) * self.W / cnt for cnt in ROWS[n] for ci in range(cnt)]
+        clear = self.W * 0.12 + r
+        x = min(range(self.W // 2 % 2, self.W, 2), key=lambda x: (
+            -min(clear, min(abs(x - c) for c in xs)), abs(x - self.W // 2)))
+        return (x, self.H // 2)
 
     def draw_drags(self):
         """Seat-swap drag feedback: dim the source, outline the target, float the name."""
