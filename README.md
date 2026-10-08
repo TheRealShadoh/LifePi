@@ -53,7 +53,7 @@ docker run -d --name lifepi -p 8080:8080 -v lifepi-data:/data ghcr.io/therealsha
 # or, from a clone:  docker compose up -d --build   (LIFEPI_PORT=8090 to use another host port)
 ```
 
-Open **http://localhost:8080**. Clicks and touches act as taps (one pointer at a time -
+Open **http://localhost:8080** - the app fills the page (the full noVNC client is at `/vnc.html` if you need its toolbar). Clicks and touches act as taps (one pointer at a time -
 VNC has no multi-touch). `/data` keeps the saved game, profiles, cached art and
 `share/lifepi/images` for your own backgrounds.
 

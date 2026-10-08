@@ -1,7 +1,74 @@
 <!doctype html>
+<!-- LifePi kiosk viewer: noVNC's core client only (no noVNC UI). The stock client is
+     still available at /vnc.html for debugging. -->
 <meta charset="utf-8">
 <title>LifePi</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=1&resize=scale&reconnect=1&reconnect_delay=1500&show_dot=1">
-<body style="background:#121218;color:#ccc;font-family:sans-serif">
-<p>Opening LifePi… <a href="vnc.html?autoconnect=1&resize=scale&reconnect=1">click here</a> if nothing happens.</p>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#121218">
+<style>
+  html, body { margin: 0; height: 100%; background: #121218; overflow: hidden; }
+  #screen { position: fixed; inset: 0; touch-action: none; }
+  #status { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+            color: #aab; font: 600 18px system-ui, sans-serif; pointer-events: none; }
+  #status[hidden], #auth[hidden] { display: none; }
+  #auth { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+          background: #121218; }
+  #auth form { display: flex; gap: 8px; }
+  #auth input, #auth button { font: 18px system-ui, sans-serif; padding: 10px 14px; border-radius: 8px;
+                              border: 1px solid #445; background: #262838; color: #fff; }
+  #auth button { background: #327a50; border-color: #327a50; }
+</style>
+<div id="screen"></div>
+<div id="status">Connecting to LifePi…</div>
+<div id="auth" hidden>
+  <form><input type="password" placeholder="Password" autocomplete="current-password"><button>Open</button></form>
+</div>
+<script type="module">
+  import RFB from "./core/rfb.js";
+
+  const screen = document.getElementById("screen");
+  const status = document.getElementById("status");
+  const auth = document.getElementById("auth");
+  const form = auth.querySelector("form");
+  const field = auth.querySelector("input");
+  const base = location.pathname.replace(/[^/]*$/, "");
+  const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + base + "websockify";
+  let password = sessionStorage.getItem("lifepi-pw") || "";
+  let rfb, retry = 0;
+
+  function connect() {
+    rfb = new RFB(screen, url, { credentials: { password } });
+    rfb.scaleViewport = true;        // fit the app to the window, keep aspect ratio
+    rfb.resizeSession = false;
+    rfb.showDotCursor = true;        // touch devices get a small dot, not an arrow
+    rfb.focusOnClick = true;
+    rfb.background = "#121218";
+    rfb.addEventListener("connect", () => { retry = 0; status.hidden = true; auth.hidden = true; });
+    rfb.addEventListener("credentialsrequired", () => {
+      if (password) { rfb.sendCredentials({ password }); return; }
+      status.hidden = true; auth.hidden = false; field.focus();
+    });
+    rfb.addEventListener("securityfailure", () => {
+      sessionStorage.removeItem("lifepi-pw"); password = "";
+    });
+    rfb.addEventListener("disconnect", () => {
+      if (!auth.hidden) return;
+      status.textContent = retry ? "Reconnecting…" : "Connecting to LifePi…";
+      status.hidden = false;
+      setTimeout(connect, Math.min(5000, 500 * 2 ** retry++));   // the app restarts on Quit
+    });
+  }
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    password = field.value;
+    sessionStorage.setItem("lifepi-pw", password);
+    field.value = "";
+    auth.hidden = true;
+    rfb.sendCredentials({ password });
+  });
+
+  connect();
+</script>
