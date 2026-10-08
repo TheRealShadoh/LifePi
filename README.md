@@ -14,7 +14,7 @@ life counter — released under the MIT licence so anyone can use, fork and impr
 
 - 1–6 players; **table seating** (far row flipped 180° so everyone reads their own panel) or **upright** seating for a monitor on a stand
 - Tap **−/+** for 1, **hold** for 10; running delta ("−7") while you tap; true multi-touch, so two players can tap at once
-- Poison, commander tax, energy, experience; **commander damage per opponent** (optionally also subtracts life); automatic KO dimming at 0 life / 10 poison / 21 commander damage
+- Poison, commander tax, energy, experience; **commander damage per commander, your own included** - each source shows on your panel as a mini tile of that player's art (or colour) with the amount (optionally also subtracts life); automatic KO dimming at 0 life / 10 poison / 21 commander damage
 - **Images:** search any card on Scryfall with the on-screen keyboard - card names are suggested as you type - and use its art as your background, or drop your own PNG/JPGs in `~/.local/share/lifepi/images`. Searches, suggestions and art are cached on disk, so repeat searches cost no API calls and work offline
 - **Player profiles** – name + art/colour are remembered and reloadable
 - Dice (d4–d20), coin flip, random player

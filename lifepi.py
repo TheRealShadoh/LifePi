@@ -362,20 +362,86 @@ class App:
         pill.blit(img, img.get_rect(center=pill.get_rect().center))
         return pill
 
-    def pill_row(self, surf, items, size, center, maxw):
-        """A centred row of pills [(label, bg)]; shrinks to fit maxw."""
-        size = int(size)
-        while True:
-            pills = [self.make_pill(label, size, bg=bg, alpha=225) for label, bg in items]
-            gap = size // 3
-            total = sum(p.get_width() for p in pills) + gap * (len(pills) - 1)
-            if total <= maxw or size <= 10:
-                break
-            size = int(size * 0.9)
-        x = center[0] - total // 2
-        for pl in pills:
-            surf.blit(pl, pl.get_rect(midleft=(x, center[1])))
-            x += pl.get_width() + gap
+    def cmd_tile(self, j, dmg, side, number=True):
+        """Mini portrait of seat j's commander (art, else colour) with the damage it dealt."""
+        side = max(12, int(side))
+        src = self.players[j]
+        col = PALETTE[src["color"] % len(PALETTE)]
+        key = ("tile", src["art"], col, side)
+        if key not in self.img_cache:
+            t = pygame.Surface((side, side), pygame.SRCALPHA)
+            art = self.cover(src["art"], side, side) if src["art"] else None
+            if art:
+                t.blit(art, (0, 0))
+                t.blit(self.shade(side, side, 60, 90, 150), (0, 0))
+            else:
+                t.fill((*col, 255))
+                t.blit(self.shade(side, side, 0, 30, 90), (0, 0))
+            rad = max(3, side // 5)
+            mask = pygame.Surface((side, side), pygame.SRCALPHA)
+            pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=rad)
+            t.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+            pygame.draw.rect(t, tuple(min(255, c + 70) for c in col), t.get_rect(), max(1, side // 18),
+                             border_radius=rad)
+            self.img_cache[key] = t
+        t = self.img_cache[key].copy()
+        if dmg >= 21:
+            pygame.draw.rect(t, (255, 70, 70), t.get_rect(), max(2, side // 10), border_radius=max(3, side // 5))
+        if number:
+            self.text(t, str(dmg), side * 0.62, (255, 120, 120) if dmg >= 21 else WHITE,
+                      maxw=side * 0.9, center=(side // 2, side // 2 + 1))
+        return t
+
+    def draw_strip(self, surf, area, extra, cmds, chips):
+        """Panel bottom strip: commander-damage tiles [(seat, dmg)], then counter pills
+        [(label, colour)]. One line if that fits at >= 75% of the strip height; otherwise the
+        strip grows `extra` px upward and the tiles get their own grid (1 or 2 rows, whichever
+        gives bigger tiles) with the pills on a line below."""
+        def tiles(side):
+            return [self.cmd_tile(j, d, side) for j, d in cmds]
+
+        def pills(rh):
+            return [self.make_pill(label, rh * 0.5, bg=c, alpha=225) for label, c in chips]
+
+        def width(items, gap):
+            return sum(it.get_width() for it in items) + gap * (len(items) - 1)
+
+        rh = area.h
+        while rh >= area.h * 0.75:
+            items, gap = tiles(rh) + pills(rh), max(3, rh // 6)
+            if width(items, gap) <= area.w:
+                return self.place(surf, area, [(items, rh, gap)])
+            rh = int(rh * 0.92)
+
+        area = pygame.Rect(area.x, area.y - extra, area.w, area.h + extra)
+        pill_h = int(area.h * 0.36) if chips else 0
+        lines = []
+        if cmds:
+            th, n, gap = area.h - (pill_h + 3 if chips else 0), len(cmds), 4
+            side, rows = max(((min((th - 3 * (r - 1)) // r, (area.w - gap * (-(-n // r) - 1)) // -(-n // r)), r)
+                              for r in (1, 2)), key=lambda sr: (sr[0], -sr[1]))
+            cols = -(-n // rows)
+            ts = tiles(side)
+            lines += [(ts[k:k + cols], side, gap) for k in range(0, n, cols)]
+        if chips:
+            ph = pill_h
+            while True:
+                ps, gap = pills(ph), max(3, ph // 6)
+                if width(ps, gap) <= area.w or ph <= 12:
+                    break
+                ph = int(ph * 0.9)
+            lines.append((ps, ph, gap))
+        self.place(surf, area, lines)
+
+    def place(self, surf, area, lines):
+        """Blit lines [(surfaces, row_height, gap)] centred in area."""
+        y = area.centery - (sum(rh for _, rh, _ in lines) + 3 * (len(lines) - 1)) // 2
+        for items, rh, gap in lines:
+            x = area.centerx - (sum(it.get_width() for it in items) + gap * (len(items) - 1)) // 2
+            for it in items:
+                surf.blit(it, it.get_rect(midleft=(x, y + rh // 2)))
+                x += it.get_width() + gap
+            y += rh + 3
 
     # ------------------------------------------------------------------ game actions
     def change_life(self, i, d):
@@ -525,11 +591,12 @@ class App:
                 s.blit(pl, pl.get_rect(center=(w // 2, h // 2 - int(size * 0.5))))
 
         chips = [(f"{short} {p['counters'][k]}", CHIP_COLORS[k]) for k, _, short in COUNTERS if p["counters"][k]]
-        if max(p["cmd"]):
-            chips.append((f"Cmdr {max(p['cmd'])}", CHIP_COLORS["cmd"]))
+        cmds = [(j, d) for j, d in enumerate(p["cmd"][:len(self.players)]) if d]   # includes self
         cy = h - bot // 2 - bot // 8
-        if chips:
-            self.pill_row(s, chips, bot * 0.38, (w // 2, cy), w * 0.9)
+        if chips or cmds:
+            credit_h = int(max(11, h * 0.05)) + 3 if bg and p["credit"] else 0
+            area = pygame.Rect(int(w * 0.04), h - bot, int(w * 0.92), bot - credit_h - 3)
+            self.draw_strip(s, area, int(bot * 0.3), cmds, chips)
         else:
             pl = self.make_pill("counters", bot * 0.34, fg=(200, 200, 210), alpha=70,
                                 outline=(255, 255, 255, 50))
@@ -711,16 +778,21 @@ class App:
         for k, (label, fn) in enumerate(acts):
             self.button(v, (k * W // len(acts), u, W // len(acts), u), label, fn, size=u * 0.38)
 
-        others = [j for j in range(len(self.players)) if j != i]
-        nrows = max(len(COUNTERS), len(others), 1)
+        sources = range(len(self.players))          # commander damage, own commander included
+        nrows = max(len(COUNTERS), len(sources))
         rh = (H - 2 * u - u // 3) // (nrows + 1)
         y0 = 2 * u + u // 6
-        cols = 2 if others else 1
-        cw = W // cols
+        cw = W // 2
 
-        def row(x, y, label, value, minus, plus, warn=False):
+        def row(x, y, label, value, minus, plus, warn=False, tile=None):
             b = min(rh, cw // 5)
-            self.text(v.surf, label, rh * 0.42, maxw=cw - 3 * b - 24, shadow=False, midleft=(x + 14, y + rh // 2))
+            lx = x + 14
+            if tile is not None:
+                t = self.cmd_tile(tile, value, rh * 0.82, number=False)
+                v.surf.blit(t, t.get_rect(midleft=(lx, y + rh // 2)))
+                lx += t.get_width() + 10
+            self.text(v.surf, label, rh * 0.42, maxw=x + cw - 3 * b - 10 - lx, shadow=False,
+                      midleft=(lx, y + rh // 2))
             self.button(v, (x + cw - 3 * b - 8, y, b, rh), "-", minus, hold=minus, size=rh * 0.7)
             self.text(v.surf, str(value), rh * 0.6, (255, 110, 110) if warn else WHITE, shadow=False,
                       center=(x + cw - 2 * b - 8 + b // 2, y + rh // 2))
@@ -732,13 +804,13 @@ class App:
                 lambda key=key: self.change_counter(i, key, -1),
                 lambda key=key: self.change_counter(i, key, 1),
                 warn=key == "poison" and p["counters"][key] >= 10)
-        if others:
-            self.text(v.surf, "Commander damage from", rh * 0.4, GREY, shadow=False,
-                      midleft=(cw + 14, y0 + rh // 2))
-            for k, j in enumerate(others):
-                row(cw, y0 + (k + 1) * rh, self.players[j]["name"], p["cmd"][j],
-                    lambda j=j: self.change_cmd(i, j, -1), lambda j=j: self.change_cmd(i, j, 1),
-                    warn=p["cmd"][j] >= 21)
+        self.text(v.surf, "Commander damage from", rh * 0.4, GREY, shadow=False,
+                  midleft=(cw + 14, y0 + rh // 2))
+        for k, j in enumerate(sources):
+            name = self.players[j]["name"] + (" (you)" if j == i else "")
+            row(cw, y0 + (k + 1) * rh, name, p["cmd"][j],
+                lambda j=j: self.change_cmd(i, j, -1), lambda j=j: self.change_cmd(i, j, 1),
+                warn=p["cmd"][j] >= 21, tile=j)
         v.finish()
 
     def draw_keyboard(self, m):

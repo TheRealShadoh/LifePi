@@ -53,8 +53,17 @@ app.push("player", idx=0, angle=180); app.render()
 plus = [z for z in app.zones if z[2]]           # zones with hold = -/+ buttons
 life0 = app.players[0]["life"]
 app.change_cmd(0, 1, 3); assert app.players[0]["life"] == life0 - 3 and app.players[0]["cmd"][1] == 3
-assert len(plus) == 2 * (4 + 3)
+assert len(plus) == 2 * (4 + 4)                 # 4 counters + commander damage from all 4 seats
 app.pop()
+# a player's own commander counts too (e.g. after an opponent steals it)
+life0 = app.players[0]["life"]
+app.change_cmd(0, 0, 2); assert app.players[0]["cmd"][0] == 2 and app.players[0]["life"] == life0 - 2
+app.change_cmd(0, 0, 19); assert app.ko_reason(app.players[0]) == "commander"
+app.change_cmd(0, 0, -21); assert app.players[0]["cmd"][0] == 0 and app.players[0]["life"] == life0
+app.players[2]["cmd"][:4] = [4, 9, 2, 21]       # several sources incl. self -> grid of mini tiles
+app.render(); pygame.image.save(app.canvas, os.path.join(shots, "cmd_tiles.png"))
+assert app.ko_reason(app.players[2]) == "commander"
+app.players[2]["cmd"] = [0] * 6; app.players[2]["life"] = 41 - 20
 
 # keyboard -> rename -> profile
 app.push("player", idx=1, angle=0); app.render()
