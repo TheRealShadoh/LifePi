@@ -25,7 +25,15 @@ websockify --web "$NOVNC_DIR" "$PORT" 127.0.0.1:5900 >/dev/null 2>&1 &
 
 echo "LifePi is up on container port ${PORT} (open the host port you published)  (screen ${RESOLUTION}${ROTATE:+, rotated $ROTATE})"
 # Keep the app alive: "Quit" in the menu simply restarts it.
-while :; do
-  python3 /app/lifepi.py ${ROTATE:+--rotate "$ROTATE"} || true
-  sleep 1
+# On docker stop/restart (SIGTERM from tini) pass the signal on to LifePi and wait for it
+# to save the game - otherwise this shell exits first and LifePi is SIGKILLed unsaved.
+stop=0 app=
+trap 'stop=1; [ -n "$app" ] && kill -TERM "$app" 2>/dev/null' TERM INT HUP
+while [ "$stop" = 0 ]; do
+  python3 /app/lifepi.py ${ROTATE:+--rotate "$ROTATE"} &
+  app=$!
+  wait "$app" || true                  # returns early when a trapped signal arrives...
+  wait "$app" 2>/dev/null || true      # ...so wait again until LifePi has saved and exited
+  app=
+  if [ "$stop" = 0 ]; then sleep 1; fi
 done

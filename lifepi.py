@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import random
+import signal
 import sys
 import threading
 import time
@@ -37,6 +38,8 @@ CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / APP
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / APP / "art"
 IMAGE_DIR = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / APP / "images"
 STATE_FILE = CONFIG_DIR / "state.json"
+BACKUP_FILE = CONFIG_DIR / "state.json.bak"         # the save before the latest one
+SAVE_INTERVAL = 0.5                                 # max seconds of play a power cut can lose
 SEARCH_DIR = CACHE_DIR.parent / "search"            # cached Scryfall search results
 SUGGEST_FILE = CACHE_DIR.parent / "autocomplete.json"
 SEARCH_TTL = 7 * 86400                              # re-ask Scryfall after a week
@@ -90,10 +93,34 @@ def search_cache_path(query):
     return SEARCH_DIR / f"{key}.json"
 
 
-def write_atomic(path, text):
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(text)
+def write_atomic(path, text, durable=False):
+    """Write via a temp file + rename, so a crash never leaves a half-written file.
+    durable=True also fsyncs, so the data survives a power cut (Pi SD cards)."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        if durable:
+            f.flush()
+            os.fsync(f.fileno())
     os.replace(tmp, path)
+    if durable:
+        fsync_dir(path.parent)
+
+
+def fsync_dir(d):
+    if hasattr(os, "O_DIRECTORY"):           # POSIX: make the rename itself durable
+        fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def as_int(v, default=0):
+    try:
+        return int(v)
+    except (TypeError, ValueError, OverflowError):
+        return default
 
 
 def unrotate(px, py, disp_w, disp_h, rot):
@@ -188,30 +215,85 @@ class App:
 
     # ------------------------------------------------------------------ state
     def load_state(self):
-        try:
-            data = json.loads(STATE_FILE.read_text())
-            self.settings.update(data.get("settings", {}))
-            self.profiles = data.get("profiles", {})
-            players = data.get("players") or []
-            if 1 <= len(players) <= 6:
-                base = [new_player(i, self.settings["start_life"]) for i in range(len(players))]
-                for b, p in zip(base, players):
-                    b.update({k: p[k] for k in b if k in p and k not in ("counters", "cmd")})
-                    b["counters"].update(p.get("counters", {}))
-                    b["cmd"] = (list(p.get("cmd", [])) + [0] * 6)[:6]
-                self.players = base
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
+        """Restore the saved game. Falls back to the previous save if the latest is damaged;
+        a damaged file is kept aside (state.json.corrupt) rather than silently overwritten."""
+        for path in (STATE_FILE, BACKUP_FILE):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                settings, players, profiles = self.parse_state(data)
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+                print(f"ignoring unreadable {path.name}: {e}", file=sys.stderr)
+                if path == STATE_FILE:
+                    try:
+                        os.replace(STATE_FILE, STATE_FILE.with_name("state.json.corrupt"))
+                    except OSError:
+                        pass
+                continue
+            self.settings.update(settings)
+            self.profiles = profiles
+            if players:
+                self.players = players
+            return
+
+    def parse_state(self, data):
+        """Validate saved JSON field by field, so one bad value can't sink the whole game."""
+        s = data.get("settings", {})
+        settings = {}
+        if as_int(s.get("rotation"), -1) in (0, 90, 180, 270):
+            settings["rotation"] = as_int(s["rotation"])
+        if s.get("seating") in ("table", "upright"):
+            settings["seating"] = s["seating"]
+        if isinstance(s.get("cmd_hits_life"), bool):
+            settings["cmd_hits_life"] = s["cmd_hits_life"]
+        if as_int(s.get("start_life"), 0) > 0:
+            settings["start_life"] = as_int(s["start_life"])
+        start = settings.get("start_life", self.settings["start_life"])
+
+        players = []
+        raw = data.get("players") or []
+        if 1 <= len(raw) <= 6:
+            for i, p in enumerate(raw):
+                b = new_player(i, start)
+                if isinstance(p.get("name"), str) and p["name"].strip():
+                    b["name"] = p["name"][:18]
+                b["life"] = as_int(p.get("life"), start)
+                b["color"] = as_int(p.get("color"), b["color"]) % len(PALETTE)
+                if isinstance(p.get("art"), str):
+                    b["art"] = p["art"]
+                if isinstance(p.get("credit"), str):
+                    b["credit"] = p["credit"]
+                c = p.get("counters") or {}
+                b["counters"] = {k: max(0, as_int(c.get(k))) for k, _, _ in COUNTERS}
+                b["cmd"] = [max(0, as_int(x)) for x in (list(p.get("cmd") or []) + [0] * 6)[:6]]
+                players.append(b)
+
+        profiles = {}
+        for name, pr in (data.get("profiles") or {}).items():
+            if isinstance(name, str) and isinstance(pr, dict):
+                profiles[name] = {"color": as_int(pr.get("color")) % len(PALETTE),
+                                  "art": pr["art"] if isinstance(pr.get("art"), str) else None,
+                                  "credit": pr["credit"] if isinstance(pr.get("credit"), str) else ""}
+        return settings, players, profiles
 
     def save_state(self):
+        """Durably save the game. The previous save is kept as state.json.bak."""
         data = {"settings": self.settings, "players": self.players, "profiles": self.profiles}
-        tmp = STATE_FILE.with_suffix(".tmp")
         try:
-            tmp.write_text(json.dumps(data, indent=1))
+            tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=1))
+                f.flush()
+                os.fsync(f.fileno())
+            if STATE_FILE.exists():
+                os.replace(STATE_FILE, BACKUP_FILE)
             os.replace(tmp, STATE_FILE)
+            fsync_dir(STATE_FILE.parent)
+            self.state_dirty = False            # only once it's really on disk
         except OSError as e:
             print("save failed:", e, file=sys.stderr)
-        self.state_dirty, self.last_save = False, time.time()
+        self.last_save = time.time()
         self.save_caches()
 
     def load_caches(self):
@@ -1190,27 +1272,37 @@ class App:
             self.make_canvas()
 
     # ------------------------------------------------------------------ main loop
+    def stop(self, *_):
+        self.running = False
+
     def run(self, max_frames=None):
+        # docker stop / systemd / shutdown send SIGTERM, a closed terminal SIGHUP, Ctrl+C
+        # SIGINT: leave the loop normally so the game is saved instead of dying mid-throttle
+        for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+            if hasattr(signal, name):
+                signal.signal(getattr(signal, name), self.stop)
         frames = 0
-        while self.running:
-            for e in pygame.event.get():
-                self.handle(e)
-            self.tick_holds()
-            self.tick_suggest()
-            now = time.time()
-            if any(now - fx["t"] < 1.9 for fx in self.fx.values()):
-                self.dirty = True
-            if self.dirty:
-                self.render()
-            if self.state_dirty and now - self.last_save > 1.0:
+        try:
+            while self.running:
+                for e in pygame.event.get():
+                    self.handle(e)
+                self.tick_holds()
+                self.tick_suggest()
+                now = time.time()
+                if any(now - fx["t"] < 1.9 for fx in self.fx.values()):
+                    self.dirty = True
+                if self.dirty:
+                    self.render()
+                if self.state_dirty and now - self.last_save > SAVE_INTERVAL:
+                    self.save_state()
+                self.clock.tick(self.args.fps)
+                frames += 1
+                if max_frames and frames >= max_frames:
+                    break
+        finally:                                # also on a crash
+            if self.state_dirty:
                 self.save_state()
-            self.clock.tick(self.args.fps)
-            frames += 1
-            if max_frames and frames >= max_frames:
-                break
-        if self.state_dirty:
-            self.save_state()
-        pygame.quit()
+            pygame.quit()
 
 
 def main():

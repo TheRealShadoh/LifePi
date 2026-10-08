@@ -168,4 +168,48 @@ for n in range(1, 7):
 app.save_state(); app2 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
 assert len(app2.players) == 6 and "Chris" in app2.profiles
 assert "Lightning Helix" in app2.local_card_names("helix")   # autocomplete cache persisted
-print("modals / scryfall / persistence ok"); print("SHOTS", shots)
+print("modals / scryfall / persistence ok")
+
+# --- everything tracked survives a restart -----------------------------------------
+import signal, threading
+def fresh(): return lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
+def snapshot(a): return json.loads(json.dumps({"players": a.players, "settings": a.settings, "profiles": a.profiles}))
+
+a = fresh(); a.start_game(4, 40); a.save_state()
+a.change_life(0, -7); a.change_cmd(1, 2, 5); a.change_cmd(1, 1, 2)     # incl. own commander
+a.change_counter(3, "poison", 3); a.change_counter(2, "energy", 4); a.swap_seats(0, 3)
+a.players[2]["name"] = "Sam"; a.toggle_seating(); a.changed()
+want = snapshot(a)
+# a stop signal (docker stop, shutdown, kill) right after the changes - inside the save
+# throttle - must still save them before exiting
+threading.Timer(0.2, lambda: signal.raise_signal(signal.SIGTERM)).start()
+a.running = True; a.run()
+assert snapshot(fresh()) == want, "changes lost on SIGTERM"
+for name in ("SIGTERM", "SIGINT") + (("SIGHUP",) if hasattr(signal, "SIGHUP") else ()):
+    signal.signal(getattr(signal, name), signal.SIG_DFL)
+print("restart after SIGTERM ok")
+
+# a crash mid-game still saves
+a = fresh(); a.change_life(1, -4); want = snapshot(a)
+def boom(): raise RuntimeError("boom")
+a.render = boom; a.dirty = True
+try: a.run()
+except RuntimeError: pass
+assert snapshot(fresh()) == want, "changes lost on crash"
+print("restart after crash ok")
+
+# a damaged save falls back to the previous one, and is kept aside, not overwritten
+a = fresh(); a.change_life(2, -1); a.save_state(); prev = snapshot(a)
+a.change_life(2, -1); a.save_state()
+lifepi.STATE_FILE.write_text('{"players": [{"life": 3')            # truncated by a power cut
+assert snapshot(fresh()) == prev
+assert lifepi.STATE_FILE.with_name("state.json.corrupt").exists()
+# bad values are repaired field by field instead of discarding the whole game
+d = json.loads(lifepi.BACKUP_FILE.read_text())
+d["players"][0].update(life="x", cmd=[1, "y"], counters={"poison": None})
+d["players"][1]["life"] = 17; d["settings"]["rotation"] = 45
+lifepi.STATE_FILE.write_text(json.dumps(d))
+b = fresh()
+assert b.players[1]["life"] == 17 and b.players[0]["cmd"] == [1, 0, 0, 0, 0, 0]
+assert b.players[0]["counters"]["poison"] == 0 and b.settings["rotation"] == 0
+print("corrupt / partial saves ok"); print("SHOTS", shots)

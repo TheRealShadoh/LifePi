@@ -19,7 +19,7 @@ life counter — released under the MIT licence so anyone can use, fork and impr
 - **Player profiles** – name + art/colour are remembered and reloadable
 - Dice (d4–d20), coin flip, random player
 - **Manual screen rotation: 0 / 90 / 180 / 270°**, from the menu, the `R` key, or `--rotate`. It is done inside the app (render + touch remap), so it behaves identically on X11, Wayland (labwc/wayfire) and bare KMS/DRM, and doesn't touch the rest of the OS
-- Crash-safe: game state autosaves to `~/.config/lifepi/state.json`
+- Survives restarts: life, counters, commander damage, seats, names, art, profiles and settings autosave to `~/.config/lifepi/state.json` within half a second, are flushed to disk (safe against pulling the Pi's plug), saved on shutdown / `docker stop` / Ctrl+C / crashes, and the previous save is kept as `state.json.bak` in case the latest is damaged
 
 ## Install (Raspberry Pi OS Bookworm or newer)
 
