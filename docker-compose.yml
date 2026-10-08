@@ -3,7 +3,7 @@ services:
     build: .
     image: ghcr.io/therealshadoh/lifepi-web:latest
     ports:
-      - "8080:8080"
+      - "${LIFEPI_PORT:-8080}:8080"   # host port; e.g. LIFEPI_PORT=8090 if 8080 is taken
     environment:
       RESOLUTION: ${RESOLUTION:-1280x720}   # 800x480 mimics the official 7" Pi touchscreen
       ROTATE: ${ROTATE:-}                   # start rotated: 90 / 180 / 270

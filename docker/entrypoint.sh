@@ -23,7 +23,7 @@ fi
 x11vnc -display :0 -forever -shared -quiet -localhost -rfbport 5900 -noxdamage $AUTH >/dev/null 2>&1 &
 websockify --web "$NOVNC_DIR" "$PORT" 127.0.0.1:5900 >/dev/null 2>&1 &
 
-echo "LifePi is up: http://localhost:${PORT}  (screen ${RESOLUTION}${ROTATE:+, rotated $ROTATE})"
+echo "LifePi is up on container port ${PORT} (open the host port you published)  (screen ${RESOLUTION}${ROTATE:+, rotated $ROTATE})"
 # Keep the app alive: "Quit" in the menu simply restarts it.
 while :; do
   python3 /app/lifepi.py ${ROTATE:+--rotate "$ROTATE"} || true
