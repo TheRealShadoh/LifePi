@@ -26,6 +26,11 @@ jobs:
           SDL_VIDEODRIVER: dummy
           LIFEPI_SHOTS: ${{ runner.temp }}/shots
         run: python tests/smoke_test.py
+      - name: Phones / TV companion server
+        env:
+          SDL_VIDEODRIVER: dummy
+          LIFEPI_SHOTS: ${{ runner.temp }}/shots
+        run: pip install qrcode && python tests/companion_test.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -37,10 +42,10 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y python3-pygame
+      - run: sudo apt-get update && sudo apt-get install -y python3-pygame python3-qrcode
       - env:
           SDL_VIDEODRIVER: dummy
-        run: /usr/bin/python3 tests/smoke_test.py
+        run: /usr/bin/python3 tests/smoke_test.py && /usr/bin/python3 tests/companion_test.py
 
   scryfall-live:
     name: live Scryfall search (non-blocking)

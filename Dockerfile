@@ -7,6 +7,7 @@ FROM debian:trixie-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       python3 python3-pygame xvfb x11vnc novnc websockify scrot ca-certificates tini procps \
+      python3-qrcode python3-pychromecast \
  && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 1000 lifepi && mkdir -p /data /app /tmp/.X11-unix \
@@ -22,9 +23,11 @@ ENV DISPLAY=:0 \
     ROTATE= \
     VNC_PASSWORD= \
     PORT=8080 \
+    LIFEPI_PUBLIC_URL= \
     XDG_CONFIG_HOME=/data/config XDG_CACHE_HOME=/data/cache XDG_DATA_HOME=/data/share
 VOLUME /data
-EXPOSE 8080
+# 8080: the app in a browser (noVNC)   8765: phones + TV view (companion)
+EXPOSE 8080 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
   CMD python3 -c "import urllib.request,os;urllib.request.urlopen('http://127.0.0.1:%s/'%os.environ.get('PORT','8080'),timeout=3)" && pgrep -f lifepi.py >/dev/null
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]

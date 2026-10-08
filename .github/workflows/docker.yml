@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -t lifepi-web .
       - name: Start container (800x480, like the 7" Pi screen)
-        run: docker run -d --name lifepi -p 8080:8080 -e RESOLUTION=800x480 lifepi-web
+        run: docker run -d --name lifepi -p 8080:8080 -p 8765:8765 -e RESOLUTION=800x480 lifepi-web
       - name: Wait for the web UI and the app
         run: |
           for i in $(seq 1 30); do
@@ -42,6 +42,14 @@ jobs:
                -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Protocol: binary" \
                http://127.0.0.1:8080/websockify > ws.txt || true
           head -1 ws.txt; head -1 ws.txt | grep -q "101"
+      - name: Phones / TV pages are served and the API needs the PIN
+        run: |
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/)" = 200
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/tv)" = 200
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/api/state)" = 401
+          pin=$(docker exec lifepi python3 -c "import json;print(json.load(open('/data/config/lifepi/state.json'))['settings']['companion_pin'])")
+          curl -sf "http://127.0.0.1:8765/api/state?k=$pin" | python3 -c "import json,sys;assert len(json.load(sys.stdin)['players'])==4"
+          docker exec lifepi python3 -c "import qrcode, pychromecast"
       - name: Screenshot the virtual display
         run: |
           sleep 2

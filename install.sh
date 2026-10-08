@@ -6,6 +6,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 sudo apt-get update
 sudo apt-get install -y python3-pygame
+# optional: QR code for phones to join, casting to Chromecast / Google TV / Shield
+sudo apt-get install -y python3-qrcode python3-pychromecast \
+  || echo "(optional packages unavailable - phones can still join by typing the address)"
 install -Dm755 lifepi.py "$HOME/.local/bin/lifepi"
 mkdir -p "$HOME/.local/share/lifepi/images" "$HOME/.local/share/applications"
 cat > "$HOME/.local/share/applications/lifepi.desktop" <<DESK

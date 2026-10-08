@@ -212,4 +212,7 @@ lifepi.STATE_FILE.write_text(json.dumps(d))
 b = fresh()
 assert b.players[1]["life"] == 17 and b.players[0]["cmd"] == [1, 0, 0, 0, 0, 0]
 assert b.players[0]["counters"]["poison"] == 0 and b.settings["rotation"] == 0
+# hand-edited on Windows: a UTF-8 BOM must not make the save "unreadable"
+lifepi.STATE_FILE.write_bytes(b"\xef\xbb\xbf" + json.dumps(d).encode())
+assert fresh().players[1]["life"] == 17
 print("corrupt / partial saves ok"); print("SHOTS", shots)

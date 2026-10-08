@@ -17,16 +17,22 @@ any other life counter app.  MIT licensed - see LICENSE.
 """
 import argparse
 import hashlib
+import hmac
+import http.server
 import json
 import os
+import queue
 import random
+import secrets
 import signal
+import socket
 import sys
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from math import ceil
 from pathlib import Path
 
 import pygame
@@ -40,6 +46,7 @@ IMAGE_DIR = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / APP /
 STATE_FILE = CONFIG_DIR / "state.json"
 BACKUP_FILE = CONFIG_DIR / "state.json.bak"         # the save before the latest one
 SAVE_INTERVAL = 0.5                                 # max seconds of play a power cut can lose
+COMPANION_PORT = 8765                               # phones + TV view, on the local network
 SEARCH_DIR = CACHE_DIR.parent / "search"            # cached Scryfall search results
 SUGGEST_FILE = CACHE_DIR.parent / "autocomplete.json"
 SEARCH_TTL = 7 * 86400                              # re-ask Scryfall after a week
@@ -159,6 +166,205 @@ def layout(n, w, h, seating):
     return out
 
 
+def lan_ip():
+    """This machine's address on the local network: the interface of the default route
+    (where phones on the same Wi-Fi are). UDP connect() sends no packets."""
+    for target in ("192.0.2.1", "10.255.255.255"):    # TEST-NET-1 follows the default route
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect((target, 1))
+            return s.getsockname()[0]
+        except OSError:
+            pass
+        finally:
+            s.close()
+    return "127.0.0.1"
+
+
+def qr_matrix(text):
+    """QR code modules for text, or None without the optional qrcode package."""
+    try:
+        import qrcode
+    except ImportError:
+        return None
+    q = qrcode.QRCode(border=0, error_correction=qrcode.constants.ERROR_CORRECT_M)
+    q.add_data(text)
+    q.make(fit=True)
+    return q.get_matrix()
+
+
+class Companion:
+    """Web server for phones (/) and TVs (/tv) on the local network.
+
+    Runs on its own threads; it never touches game state directly. Requests that change
+    the game are queued and applied by the main loop (App.tick_remote), and the main loop
+    publishes a JSON snapshot that is served to /api/state and streamed to /api/events."""
+
+    MAX_FAILS = 10                         # wrong PINs per address before a lock-out...
+    LOCKOUT = 60                           # ...of this many seconds
+
+    def __init__(self, app, port):
+        self.app, self.port = app, port
+        self.actions = queue.Queue()
+        self.cond = threading.Condition()
+        self.snap, self.version = b"{}", 0
+        self.clients, self.fails = 0, {}
+        self.httpd, self.error = None, ""
+
+    @property
+    def running(self):
+        return self.httpd is not None
+
+    def start(self):
+        try:
+            self.httpd = http.server.ThreadingHTTPServer(("", self.port), make_handler(self))
+        except OSError as e:
+            self.error = f"Port {self.port} is in use ({e.strerror})" if e.errno in (48, 98, 10048) \
+                else f"Could not start: {e}"
+            return False
+        self.httpd.daemon_threads = True
+        self.port, self.error = self.httpd.server_address[1], ""
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        return True
+
+    def stop(self):
+        httpd, self.httpd = self.httpd, None
+        if httpd:
+            with self.cond:
+                self.cond.notify_all()             # let event streams finish
+            httpd.shutdown()
+            httpd.server_close()
+
+    def publish(self, data):
+        body = json.dumps(data, separators=(",", ":")).encode()
+        with self.cond:
+            if body != self.snap:
+                self.snap, self.version = body, self.version + 1
+                self.cond.notify_all()
+
+    def check_key(self, addr, key):
+        now = time.time()
+        n, until = self.fails.get(addr, (0, 0))
+        if until > now:
+            return "locked"
+        if key and hmac.compare_digest(key.encode(), self.app.settings["companion_pin"].encode()):
+            self.fails.pop(addr, None)
+            return "ok"
+        n += 1
+        self.fails[addr] = (0, now + self.LOCKOUT) if n >= self.MAX_FAILS else (n, 0)
+        return "bad"
+
+
+def make_handler(comp):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        server_version = f"LifePi/{VERSION}"
+
+        def log_message(self, *_):
+            pass
+
+        def send(self, code, body=b"", ctype="application/json", extra=()):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            for k, v in dict([("Cache-Control", "no-store")] + list(extra)).items():
+                self.send_header(k, v)
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def authed(self, q):
+            verdict = comp.check_key(self.client_address[0], (q.get("k") or [""])[0])
+            if verdict != "ok":
+                self.send(429 if verdict == "locked" else 401,
+                          json.dumps({"error": verdict}).encode())
+            return verdict == "ok"
+
+        def do_GET(self):
+            url = urllib.parse.urlsplit(self.path)
+            q = urllib.parse.parse_qs(url.query)
+            if url.path in ("/", "/index.html"):
+                return self.send(200, PHONE_HTML.encode(), "text/html; charset=utf-8")
+            if url.path in ("/tv", "/tv/"):
+                return self.send(200, TV_HTML.encode(), "text/html; charset=utf-8")
+            if not self.authed(q):
+                return
+            if url.path == "/api/state":
+                with comp.cond:
+                    body = comp.snap
+                return self.send(200, body)
+            if url.path == "/api/events":
+                return self.events()
+            if url.path.startswith("/art/"):
+                return self.art(url.path[5:])
+            self.send(404, b'{"error":"not found"}')
+
+        def do_POST(self):
+            url = urllib.parse.urlsplit(self.path)
+            if url.path != "/api/act":
+                return self.send(404, b'{"error":"not found"}')
+            if not self.authed(urllib.parse.parse_qs(url.query)):
+                return
+            n = as_int(self.headers.get("Content-Length"), 0)
+            try:
+                if not 0 < n <= 4096:
+                    raise ValueError
+                action = json.loads(self.rfile.read(n))
+                if not isinstance(action, dict):
+                    raise ValueError
+            except ValueError:
+                return self.send(400, b'{"error":"bad request"}')
+            comp.actions.put(action)
+            self.send(202, b'{"ok":true}')
+
+        def events(self):
+            """Server-sent events: the full state whenever it changes, plus keep-alives."""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with comp.cond:
+                comp.clients += 1
+            comp.app.dirty = True
+            last = -1
+            try:
+                while comp.running:
+                    with comp.cond:
+                        # keep-alives every 5 s also notice phones that left (for the count)
+                        comp.cond.wait_for(lambda: comp.version != last or not comp.running, timeout=5)
+                        version, body = comp.version, comp.snap
+                    if not comp.running:
+                        break
+                    if version == last:
+                        self.wfile.write(b": ping\n\n")
+                    else:
+                        self.wfile.write(b"data: " + body + b"\n\n")
+                        last = version
+                    self.wfile.flush()
+            except OSError:                     # phone went away
+                pass
+            finally:
+                with comp.cond:
+                    comp.clients -= 1
+                comp.app.dirty = True
+
+        def art(self, seat):
+            players = comp.app.players
+            i = as_int(seat.split("?")[0], -1)
+            path = players[i]["art"] if 0 <= i < len(players) else None
+            try:
+                f = Path(path).resolve()
+                if not any(f.is_relative_to(d.resolve()) for d in (CACHE_DIR, IMAGE_DIR)):
+                    raise ValueError
+                body = f.read_bytes()
+            except (TypeError, ValueError, OSError):
+                return self.send(404, b'{"error":"no art"}')
+            ctype = {".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+                     ".bmp": "image/bmp"}.get(f.suffix.lower(), "image/jpeg")
+            self.send(200, body, ctype, [("Cache-Control", "max-age=86400")])
+
+    return Handler
+
+
 class View:
     """An off-screen surface drawn upright, then placed on the canvas at 0/180 deg.
     Touch zones registered through it are transformed to canvas coordinates."""
@@ -187,10 +393,13 @@ class App:
         for d in (CONFIG_DIR, CACHE_DIR, SEARCH_DIR, IMAGE_DIR):
             d.mkdir(parents=True, exist_ok=True)
         self.settings = {"rotation": 0, "seating": "table", "cmd_hits_life": True,
-                         "start_life": 40}
+                         "start_life": 40, "companion": True, "companion_pin": ""}
         self.players = [new_player(i, 40) for i in range(4)]
         self.profiles = {}
         self.load_state()
+        self.state_dirty = self.snap_dirty = False
+        if not self.settings["companion_pin"]:
+            self.new_pin()
         self.cache_lock = threading.Lock()
         self.ac_cache, self.ac_dirty, self.known_names = {}, False, set()
         self.load_caches()
@@ -208,9 +417,19 @@ class App:
         self.clock = pygame.time.Clock()
         self.fonts, self.img_cache = {}, {}
         self.zones, self.pointers, self.modals, self.fx = [], {}, [], {}
-        self.dirty, self.state_dirty, self.last_save = True, False, 0.0
+        self.dirty, self.last_save = True, 0.0
         self.seats = []
+        self.toast = ("", 0.0)
+        self.qr_cache = (None, None)
         self.running = True
+        # phones / TV: off unless a port is given (main() always gives one)
+        self.companion = None
+        port = getattr(args, "companion_port", None)
+        if port is not None:
+            self.companion = Companion(self, port)
+            if self.settings["companion"]:
+                self.companion.start()
+        self.publish()
         self.make_canvas()
 
     # ------------------------------------------------------------------ state
@@ -219,7 +438,7 @@ class App:
         a damaged file is kept aside (state.json.corrupt) rather than silently overwritten."""
         for path in (STATE_FILE, BACKUP_FILE):
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
+                data = json.loads(path.read_text(encoding="utf-8-sig"))   # -sig: tolerate a BOM from Windows editors
                 settings, players, profiles = self.parse_state(data)
             except FileNotFoundError:
                 continue
@@ -249,6 +468,11 @@ class App:
             settings["cmd_hits_life"] = s["cmd_hits_life"]
         if as_int(s.get("start_life"), 0) > 0:
             settings["start_life"] = as_int(s["start_life"])
+        if isinstance(s.get("companion"), bool):
+            settings["companion"] = s["companion"]
+        pin = s.get("companion_pin")
+        if isinstance(pin, str) and len(pin) == 6 and pin.isdigit():
+            settings["companion_pin"] = pin
         start = settings.get("start_life", self.settings["start_life"])
 
         players = []
@@ -327,8 +551,108 @@ class App:
         except OSError as e:
             print("cache save failed:", e, file=sys.stderr)
 
+    # ------------------------------------------------------------------ phones / TV
+    def new_pin(self):
+        """A fresh 6-digit PIN; phones using the old one are locked out."""
+        self.settings["companion_pin"] = f"{secrets.randbelow(10 ** 6):06d}"
+        self.state_dirty = True
+        self.qr_cache = (None, None)
+
+    def companion_base(self, refresh=False):
+        """Address phones use to reach us (LIFEPI_PUBLIC_URL overrides, e.g. in Docker)."""
+        if refresh or not getattr(self, "_base", None):
+            env = os.environ.get("LIFEPI_PUBLIC_URL", "").rstrip("/")
+            self._base = env or f"http://{lan_ip()}:{self.companion.port}"
+        return self._base
+
+    def snapshot(self):
+        n = len(self.players)
+        out = []
+        for i, p in enumerate(self.players):
+            art = None
+            if p["art"] and os.path.isfile(p["art"]):
+                art = f"/art/{i}?v={hashlib.sha1(p['art'].encode()).hexdigest()[:10]}"
+            out.append({"seat": i, "name": p["name"], "life": p["life"],
+                        "color": "#%02x%02x%02x" % PALETTE[p["color"] % len(PALETTE)],
+                        "art": art, "credit": p["credit"] if art else "",
+                        "counters": dict(p["counters"]), "cmd": p["cmd"][:n], "ko": self.ko_reason(p)})
+        return {"players": out, "start_life": self.settings["start_life"],
+                "cmd_hits_life": self.settings["cmd_hits_life"],
+                "counters": [[k, label] for k, label, _ in COUNTERS],
+                "join": self.companion_base() if self.companion and self.companion.running else ""}
+
+    def publish(self):
+        if self.companion and self.companion.running:
+            self.companion.publish(self.snapshot())
+
+    def tick_remote(self):
+        """Apply actions queued by phones (main thread only), then publish the new state."""
+        if not self.companion:
+            return
+        acted = False
+        while True:
+            try:
+                a = self.companion.actions.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self.apply_remote(a)
+                acted = True
+            except (KeyError, TypeError, ValueError, IndexError) as e:
+                print("ignored phone action", a, e, file=sys.stderr)
+        if acted or self.snap_dirty:
+            self.snap_dirty = False
+            self.publish()
+
+    def apply_remote(self, a):
+        def num(key, lo, hi):
+            v = a.get(key)
+            if not isinstance(v, int) or isinstance(v, bool):
+                raise ValueError(key)
+            return max(lo, min(hi, v))
+
+        n, op = len(self.players), a.get("op")
+        if op in ("life", "counter", "cmd", "name", "color"):
+            seat = num("seat", -1, 99)
+            if not 0 <= seat < n:
+                return
+        if op == "life":
+            self.change_life(seat, num("d", -999, 999))
+        elif op == "counter" and a.get("key") in self.players[0]["counters"]:
+            self.change_counter(seat, a["key"], num("d", -99, 99))
+        elif op == "cmd":
+            src = num("src", -1, 99)
+            if 0 <= src < n:
+                self.change_cmd(seat, src, num("d", -99, 99))
+        elif op == "name" and isinstance(a.get("name"), str):
+            self.rename_player(seat, a["name"])
+        elif op == "color":
+            self.recolor_player(seat)
+        elif op == "newgame":
+            self.start_game(num("n", 1, 6), num("life", 1, 9999))
+        elif op == "reset":
+            self.start_game(n, self.settings["start_life"])
+        elif op == "cmd_hits_life" and isinstance(a.get("on"), bool):
+            self.settings["cmd_hits_life"] = a["on"]
+            self.changed()
+
+    def toggle_companion(self):
+        if self.companion.running:
+            self.companion.stop()
+            self.settings["companion"] = False
+        else:
+            self.settings["companion"] = self.companion.start()
+        self.companion_base(refresh=True)
+        self.qr_cache = (None, None)
+        self.changed()
+        self.publish()
+
+    def say(self, text):
+        self.toast = (text, time.time())
+        self.dirty = True
+
     def changed(self):
-        self.dirty = self.state_dirty = True
+        self.dirty = self.state_dirty = self.snap_dirty = True
 
     # ------------------------------------------------------------------ drawing utils
     def make_canvas(self):
@@ -580,6 +904,23 @@ class App:
         self.make_canvas()
         self.changed()
 
+    def rename_player(self, i, t):
+        p = self.players[i]
+        if t.strip():
+            p["name"] = t.strip()[:18]
+            prof = self.profiles.get(p["name"])
+            if prof and not p["art"]:
+                p.update(prof)
+            self.remember_profile(p)
+            self.changed()
+
+    def recolor_player(self, i):
+        p = self.players[i]
+        p["color"] = (p["color"] + 1) % len(PALETTE)
+        p["art"], p["credit"] = None, ""
+        self.remember_profile(p)
+        self.changed()
+
     def swap_seats(self, a, b):
         """Swap two players' seats; commander damage is indexed by seat, so it follows."""
         P = self.players
@@ -727,10 +1068,12 @@ class App:
             (f"Rotate screen ({st['rotation']} deg)", self.rotate_screen, BTN_ON),
             (f"Seating: {st['seating']}", self.toggle_seating, BTN),
             (f"Cmdr dmg hits life: {'on' if st['cmd_hits_life'] else 'off'}", self.toggle_cmd, BTN),
+            ("Phones & TV", self.open_remote, BTN_ON),
+            ("Cast to TV", self.open_cast, BTN),
             ("Back to game", self.pop, BTN),
             ("Quit", self.quit, BTN_BAD),
         ]
-        rh = (self.H - u - u // 2) // 4
+        rh = (self.H - u - u // 2) // ((len(items) + 1) // 2)
         for k, (label, fn, bg) in enumerate(items):
             r = (k % 2 * W // 2, u + k // 2 * rh, W // 2, rh)
             self.button(v, r, label, fn, bg=bg, size=min(rh * 0.42, W * 0.035))
@@ -738,6 +1081,130 @@ class App:
                   "Card art via Scryfall.", u * 0.3, GREY, maxw=W - 20, shadow=False,
                   midbottom=(W // 2, self.H - 4))
         v.finish()
+
+    def open_remote(self):
+        if self.companion and self.companion.running:
+            self.companion_base(refresh=True)          # the Wi-Fi address may have changed
+        self.push("remote")
+
+    def draw_remote(self, m):
+        v = self.modal_view(m, "Phones & TV")
+        u, W, H = v.u, self.W, self.H
+        comp = self.companion
+        on = bool(comp and comp.running)
+        bh = u
+        body = pygame.Rect(0, u, W, H - u - bh)
+        side = min(body.h - 24, int(W * 0.42))
+        qr_box = pygame.Rect(16, body.y + (body.h - side) // 2, side, side)
+        x0, tw = qr_box.right + 24, W - qr_box.right - 40
+        lines = []                                  # (text, size, colour)
+        if on:
+            base = self.companion_base()
+            join = f"{base}/?k={self.settings['companion_pin']}"
+            if self.qr_cache[0] != join:
+                self.qr_cache = (join, qr_matrix(join))
+            mat = self.qr_cache[1]
+            if mat:
+                pygame.draw.rect(v.surf, WHITE, qr_box, border_radius=8)
+                cells = len(mat) + 4                 # quiet zone of 2 modules each side
+                cell = side / cells
+                for y, row in enumerate(mat):
+                    for x, dark in enumerate(row):
+                        if dark:
+                            pygame.draw.rect(v.surf, (0, 0, 0), (qr_box.x + round((x + 2) * cell),
+                                             qr_box.y + round((y + 2) * cell), ceil(cell), ceil(cell)))
+            else:
+                pygame.draw.rect(v.surf, HEADER, qr_box, border_radius=8)
+                self.text(v.surf, "Install python3-qrcode", u * 0.32, GREY, maxw=side - 16, shadow=False,
+                          center=(qr_box.centerx, qr_box.centery - u * 0.25))
+                self.text(v.surf, "to show a QR code here", u * 0.32, GREY, maxw=side - 16, shadow=False,
+                          center=(qr_box.centerx, qr_box.centery + u * 0.25))
+            n = comp.clients
+            lines += [("Scan with a phone camera, or open", u * 0.32, GREY),
+                      (base, u * 0.5, WHITE),
+                      (f"PIN  {self.settings['companion_pin']}", u * 0.5, (255, 230, 120)),
+                      ("", u * 0.2, GREY),
+                      ("TV / big screen: open", u * 0.32, GREY),
+                      (f"{base}/tv?k={self.settings['companion_pin']}", u * 0.36, WHITE),
+                      ("Roku: mirror a phone that has that page open", u * 0.28, GREY),
+                      ("", u * 0.2, GREY),
+                      (f"{n} device{'s' if n != 1 else ''} connected", u * 0.34, GOOD if n else GREY)]
+            if os.path.exists("/.dockerenv") and not os.environ.get("LIFEPI_PUBLIC_URL"):
+                lines.append(("In Docker: set LIFEPI_PUBLIC_URL to the host's address", u * 0.28, BAD))
+        else:
+            pygame.draw.rect(v.surf, HEADER, qr_box, border_radius=8)
+            why = ("Started with --no-companion" if not comp else comp.error or "Phones & TV are switched off")
+            lines += [(why, u * 0.4, WHITE),
+                      ("Turn it on to control LifePi from phones", u * 0.32, GREY),
+                      ("on the same Wi-Fi and show it on a TV.", u * 0.32, GREY)]
+        y = body.y + (body.h - sum(int(s * 1.25) for _, s, _ in lines)) // 2
+        for text, size, col in lines:
+            if text:
+                self.text(v.surf, text, size, col, maxw=tw, shadow=False, topleft=(x0, y))
+            y += int(size * 1.25)
+
+        y = H - bh
+        if comp:
+            self.button(v, (0, y, W // 4, bh), "Turn off" if on else "Turn on", self.toggle_companion,
+                        bg=BTN if on else BTN_OK)
+        if on:
+            self.button(v, (W // 4, y, W // 4, bh), "New PIN", lambda: (self.new_pin(), self.say(
+                "New PIN - phones must scan again")))
+            self.button(v, (W // 2, y, W // 4, bh), "Cast to TV", self.open_cast)
+        self.button(v, (3 * W // 4, y, W // 4, bh), "Close", self.pop, bg=BTN_ON)
+        v.finish()
+
+    def open_cast(self):
+        """Find Google Cast devices (Chromecast, Google TV, Nvidia Shield...) and cast /tv."""
+        if not (self.companion and self.companion.running):
+            return self.say("Turn on Phones & TV first (menu > Phones & TV)")
+        grid = dict(title="Cast the TV view to...", items=[], page=0, angle=0,
+                    status="Looking for Chromecast / Google TV / Shield...",
+                    on_pick=lambda it: self.cast_to(it["value"], it["label"]))
+        self.push("grid", **grid)
+        grid = self.modals[-1]
+
+        def work():
+            try:
+                import pychromecast
+            except ImportError:
+                grid["status"] = "Casting needs pychromecast: sudo apt install python3-pychromecast"
+                self.dirty = True
+                return
+            try:
+                casts, browser = pychromecast.get_chromecasts(timeout=6)
+                try:
+                    browser.stop_discovery()
+                except AttributeError:                  # pychromecast < 10
+                    pychromecast.discovery.stop_discovery(browser)
+                for c in casts:
+                    info = getattr(c, "cast_info", None)
+                    name = getattr(info, "friendly_name", None) or getattr(c, "name", None) or "Cast device"
+                    grid["items"].append({"label": name, "value": c, "bg": BTN})
+                grid["status"] = "" if casts else ("No Cast devices found. Roku / Fire TV / smart TV: "
+                                                   "open the TV address from Phones & TV instead.")
+            except Exception as e:
+                grid["status"] = f"Cast search failed: {e}"
+            self.dirty = True
+        threading.Thread(target=work, daemon=True).start()
+
+    def cast_to(self, cast, name):
+        url = f"{self.companion_base()}/tv?k={self.settings['companion_pin']}"
+        self.say(f"Casting to {name}...")
+
+        def work():
+            try:
+                from pychromecast.controllers.dashcast import DashCastController
+                cast.wait(timeout=10)
+                dash = DashCastController()
+                cast.register_handler(dash)
+                # force: open the page directly - the DashCast receiver is https, and an
+                # http LAN page inside its iframe would be blocked as mixed content
+                dash.load_url(url, force=True)
+                self.say(f"Showing LifePi on {name}")
+            except Exception as e:
+                self.say(f"Cast failed: {e}")
+        threading.Thread(target=work, daemon=True).start()
 
     def toggle_seating(self):
         self.settings["seating"] = "upright" if self.settings["seating"] == "table" else "table"
@@ -822,23 +1289,14 @@ class App:
         self.button(v, (W - 2 * u, 0, 2 * u, u), "Done", self.pop, bg=BTN_ON)
 
         def rename(t):
-            if t.strip():
-                p["name"] = t.strip()[:18]
-                prof = self.profiles.get(p["name"])
-                if prof and not p["art"]:
-                    p.update(prof)
-                self.remember_profile(p)
-                self.changed()
+            self.rename_player(i, t)
 
         def search(t):
             if t.strip():
                 self.open_art_search(i, t.strip(), ang)
 
         def recolor():
-            p["color"] = (p["color"] + 1) % len(PALETTE)
-            p["art"], p["credit"] = None, ""
-            self.remember_profile(p)
-            self.changed()
+            self.recolor_player(i)
 
         def pick_name(name):
             if name in self.profiles:
@@ -1142,6 +1600,14 @@ class App:
             self.zones = []
             m = self.modals[-1]
             getattr(self, "draw_" + m["kind"])(m)
+        text, t = self.toast
+        age = time.time() - t
+        if text and age < 3.2:
+            pl = self.make_pill(text, max(16, min(self.W, self.H) // 22), bg=(30, 31, 42), alpha=235,
+                                outline=(255, 255, 255, 60))
+            if age > 2.6:
+                pl.set_alpha(int(255 * (3.2 - age) / 0.6))
+            self.canvas.blit(pl, pl.get_rect(midbottom=(self.W // 2, self.H - 12)))
 
         rot = self.settings["rotation"]
         out = self.canvas if rot == 0 else pygame.transform.rotate(self.canvas, -rot)
@@ -1288,7 +1754,10 @@ class App:
                     self.handle(e)
                 self.tick_holds()
                 self.tick_suggest()
+                self.tick_remote()
                 now = time.time()
+                if self.toast[0] and now - self.toast[1] < 3.2:
+                    self.dirty = True
                 if any(now - fx["t"] < 1.9 for fx in self.fx.values()):
                     self.dirty = True
                 if self.dirty:
@@ -1302,7 +1771,475 @@ class App:
         finally:                                # also on a crash
             if self.state_dirty:
                 self.save_state()
+            if self.companion:
+                self.companion.stop()
             pygame.quit()
+
+
+# --------------------------------------------------------------------------- web pages
+# Served by Companion. Kept in this file so LifePi stays a single file to install.
+CLIENT_JS = r"""
+const qs = new URLSearchParams(location.search);
+let KEY = qs.get("k") || "";
+try { if (KEY) localStorage.setItem("lifepi-k", KEY); else KEY = localStorage.getItem("lifepi-k") || ""; } catch (e) {}
+let state = null, onState = () => {}, onStatus = () => {}, es = null;
+const api = p => p + (p.includes("?") ? "&" : "?") + "k=" + encodeURIComponent(KEY);
+
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") e.className = v;
+    else if (k === "style") Object.assign(e.style, v);
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) e.append(c instanceof Node ? c : String(c));
+  return e;
+}
+function cardBg(p, shade) {
+  const img = p.art ? `linear-gradient(${shade}), url("${api(p.art)}")` : `linear-gradient(${shade})`;
+  return { backgroundImage: img, backgroundColor: p.color };
+}
+async function act(a) {
+  try {
+    const r = await fetch(api("/api/act"), { method: "POST", headers: { "Content-Type": "application/json" },
+                                             body: JSON.stringify(a) });
+    if (r.status === 401 || r.status === 429) onStatus("auth", r.status);
+  } catch (e) { onStatus("offline"); }
+}
+async function start() {
+  if (es) { es.close(); es = null; }
+  try {
+    const r = await fetch(api("/api/state"));
+    if (r.status === 401 || r.status === 429) return onStatus("auth", r.status);
+    state = await r.json(); trackDeltas(state); onState(state);
+  } catch (e) { onStatus("offline"); setTimeout(start, 2000); return; }
+  es = new EventSource(api("/api/events"));
+  es.onopen = () => onStatus("online");
+  es.onmessage = (e) => { state = JSON.parse(e.data); trackDeltas(state); onStatus("online"); onState(state); };
+  es.onerror = () => {                          // the browser retries by itself unless refused
+    onStatus("offline");
+    if (es && es.readyState === 2) { es = null; setTimeout(start, 2000); }
+  };
+}
+function setKey(k) { KEY = k.trim(); try { localStorage.setItem("lifepi-k", KEY); } catch (e) {} start(); }
+
+// running "+3" / "-7" per seat, like the device shows
+const prev = {}, deltas = {};
+function trackDeltas(s) {
+  const now = Date.now();
+  for (const p of s.players) {
+    const old = prev[p.seat];
+    if (old && old.name === p.name && old.life !== p.life) {
+      const d = deltas[p.seat];
+      deltas[p.seat] = { d: (d && now - d.t < 1800 ? d.d : 0) + p.life - old.life, t: now };
+      setTimeout(() => onState(state), 1850);
+    }
+    prev[p.seat] = { name: p.name, life: p.life };
+  }
+}
+function deltaOf(seat) {
+  const d = deltas[seat];
+  return d && d.d && Date.now() - d.t < 1800 ? d.d : 0;
+}
+const fmt = (d) => (d > 0 ? "+" : "−") + Math.abs(d);
+"""
+
+PHONE_HTML = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#121218">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>LifePi</title>
+<style>
+  :root { --bg:#121218; --card:#1d1e29; --line:#2c2e3d; --text:#f2f2f6; --dim:#9a9cae;
+          --accent:#4678c8; --good:#32a050; --bad:#c23b3b; --warn:#ffe678; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { margin:0; background:var(--bg); color:var(--text);
+               font:16px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { padding:0 0 calc(76px + env(safe-area-inset-bottom)); min-height:100vh; }
+  header { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:10px;
+           padding:calc(10px + env(safe-area-inset-top)) 16px 10px; background:rgba(18,18,24,.92);
+           backdrop-filter:blur(8px); border-bottom:1px solid var(--line); }
+  header b { font-size:18px; letter-spacing:.3px; }
+  #dot { width:9px; height:9px; border-radius:50%; background:var(--bad); }
+  #dot.on { background:var(--good); }
+  #who { margin-left:auto; color:var(--dim); font-size:14px; }
+  main { padding:14px 14px 0; max-width:640px; margin:0 auto; }
+  nav { position:fixed; left:0; right:0; bottom:0; z-index:5; display:flex; background:#181923;
+        border-top:1px solid var(--line); padding-bottom:env(safe-area-inset-bottom); }
+  nav button { flex:1; height:62px; background:none; border:0; color:var(--dim); font:600 15px system-ui, sans-serif; }
+  nav button.on { color:var(--text); box-shadow:inset 0 3px 0 var(--accent); }
+  button { font:inherit; color:inherit; cursor:pointer; touch-action:manipulation; }
+  h2 { font-size:15px; font-weight:600; color:var(--dim); margin:22px 4px 10px; text-transform:uppercase; letter-spacing:.6px; }
+  .hero { position:relative; border-radius:20px; padding:16px 16px 18px; overflow:hidden;
+          background-size:cover; background-position:center; box-shadow:0 6px 24px rgba(0,0,0,.35); }
+  .hero .top { display:flex; gap:8px; align-items:center; }
+  .hero .name { flex:1; text-align:left; background:none; border:0; font-size:22px; font-weight:700; padding:4px 0;
+                text-shadow:0 1px 3px rgba(0,0,0,.6); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hero .name small { font-weight:500; color:var(--dim); font-size:13px; margin-left:6px; }
+  .chipbtn { background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.18); border-radius:999px;
+             padding:6px 12px; font-size:13px; }
+  .life { text-align:center; font-size:min(34vw, 150px); font-weight:800; line-height:1; margin:34px 0 4px;
+          font-variant-numeric:tabular-nums; text-shadow:0 3px 10px rgba(0,0,0,.55); }
+  .delta { position:absolute; left:50%; top:58px; transform:translateX(-50%); padding:4px 14px; border-radius:999px;
+           font-weight:800; font-size:20px; background:var(--good); }
+  .delta.neg { background:var(--bad); }
+  .ko { display:block; width:max-content; margin:0 auto 8px; padding:4px 14px; border-radius:999px; background:var(--bad);
+        font-weight:800; letter-spacing:.5px; }
+  .dead { filter:saturate(.35) brightness(.7); }
+  .steps { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-top:12px; }
+  .steps button, .stepper button { height:64px; border-radius:16px; border:1px solid rgba(255,255,255,.14);
+           background:rgba(10,10,16,.55); font-size:24px; font-weight:700; }
+  .steps button:active, .stepper button:active, .tcard button:active { transform:scale(.96); background:rgba(255,255,255,.18); }
+  .rows { background:var(--card); border-radius:16px; overflow:hidden; border:1px solid var(--line); }
+  .row { display:flex; align-items:center; gap:12px; padding:10px 12px; border-top:1px solid var(--line); min-height:66px; }
+  .row:first-child { border-top:0; }
+  .row .label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
+  .row .label small { color:var(--dim); font-weight:500; }
+  .stepper { display:flex; align-items:center; gap:8px; }
+  .stepper button { width:52px; height:48px; font-size:24px; background:#2a2c3b; }
+  .stepper .v { min-width:42px; text-align:center; font-size:22px; font-weight:800; font-variant-numeric:tabular-nums; }
+  .stepper .v.warn { color:#ff7a7a; }
+  .tile { width:44px; height:44px; border-radius:10px; flex:none; background-size:cover; background-position:center;
+          border:2px solid rgba(255,255,255,.35); }
+  .seats { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:12px; }
+  .seat { height:120px; border-radius:18px; border:0; padding:12px; text-align:left; display:flex; flex-direction:column;
+          justify-content:space-between; background-size:cover; background-position:center; box-shadow:0 4px 16px rgba(0,0,0,.3); }
+  .seat b { font-size:18px; text-shadow:0 1px 3px rgba(0,0,0,.7); }
+  .seat span { font-size:38px; font-weight:800; text-shadow:0 2px 6px rgba(0,0,0,.6); }
+  .tgrid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .tcard { position:relative; border-radius:18px; padding:10px; background-size:cover; background-position:center;
+           min-height:150px; display:flex; flex-direction:column; box-shadow:0 4px 16px rgba(0,0,0,.3); }
+  .tcard .tname { background:none; border:0; text-align:left; font-weight:700; padding:2px; font-size:16px;
+                  text-shadow:0 1px 3px rgba(0,0,0,.7); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tcard .tname small { color:var(--warn); font-weight:600; }
+  .tcard .tlife { text-align:center; font-size:46px; font-weight:800; flex:1; display:flex; align-items:center;
+                  justify-content:center; text-shadow:0 2px 8px rgba(0,0,0,.6); font-variant-numeric:tabular-nums; }
+  .tcard .tbtn { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .tcard .tbtn button { height:46px; border-radius:12px; border:1px solid rgba(255,255,255,.14); background:rgba(10,10,16,.55);
+                        font-size:22px; font-weight:700; }
+  .tcard .delta { top:40px; font-size:15px; padding:2px 10px; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; }
+  .chips.six { display:grid; grid-template-columns:repeat(6, 1fr); }
+  .chips.six button { min-width:0; padding:0; }
+  .switch .label { white-space:normal; }
+  .chips button { min-width:56px; height:48px; border-radius:12px; border:1px solid var(--line); background:#2a2c3b;
+                  font-size:18px; font-weight:700; padding:0 14px; }
+  .chips button.on { background:var(--accent); border-color:var(--accent); }
+  .chips input { width:110px; height:48px; border-radius:12px; border:1px solid var(--line); background:#2a2c3b;
+                 color:var(--text); font-size:18px; padding:0 12px; }
+  .big { width:100%; height:58px; border-radius:16px; border:0; font-size:18px; font-weight:700; margin-top:12px; background:#2a2c3b; }
+  .big.go { background:var(--good); } .big.danger { background:var(--bad); }
+  .switch { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .switch i { width:52px; height:30px; border-radius:15px; background:#3a3c4c; position:relative; flex:none; }
+  .switch i::after { content:""; position:absolute; top:3px; left:3px; width:24px; height:24px; border-radius:50%;
+                     background:#fff; transition:left .15s; }
+  .switch.on i { background:var(--good); } .switch.on i::after { left:25px; }
+  .link { display:block; text-align:center; color:var(--dim); margin:18px 0 6px; font-size:14px; }
+  a { color:#8fb4ff; }
+  .muted { color:var(--dim); font-size:14px; margin:6px 4px; }
+  .overlay { position:fixed; inset:0; z-index:9; background:rgba(8,8,12,.86); display:flex; align-items:center;
+             justify-content:center; padding:24px; }
+  .overlay[hidden] { display:none; }
+  .panel { width:100%; max-width:380px; background:var(--card); border:1px solid var(--line); border-radius:20px; padding:20px; }
+  .panel h3 { margin:0 0 6px; font-size:20px; }
+  .panel input { width:100%; height:54px; margin:14px 0 4px; border-radius:14px; border:1px solid var(--line);
+                 background:#2a2c3b; color:var(--text); font-size:22px; padding:0 14px; }
+  .panel .acts { display:flex; gap:10px; } .panel .acts .big { flex:1; }
+</style>
+</head><body>
+<header><span id="dot"></span><b>LifePi</b><span id="who"></span></header>
+<main id="view"><p class="muted">Connecting...</p></main>
+<nav>
+  <button data-tab="me">Me</button><button data-tab="table">Table</button><button data-tab="game">Game</button>
+</nav>
+<div class="overlay" id="pin" hidden><form class="panel">
+  <h3>Join the game</h3>
+  <div class="muted" id="pinwhy">Enter the PIN shown on LifePi under Menu &gt; Phones &amp; TV.</div>
+  <input inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit PIN">
+  <button class="big go">Join</button>
+</form></div>
+<div class="overlay" id="ask" hidden><form class="panel">
+  <h3 id="asktitle">Rename</h3>
+  <input id="askin" maxlength="18" autocomplete="off">
+  <div class="acts"><button type="button" class="big" id="askno">Cancel</button><button class="big go">Save</button></div>
+</form></div>
+<script>
+/*CLIENT*/
+if (qs.get("k")) history.replaceState(null, "", location.pathname);   // keep the PIN out of the address bar
+const store = { get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
+                set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
+let tab = store.get("lifepi-tab", "me");
+let me = +store.get("lifepi-seat", "-1"), myName = store.get("lifepi-name", "");
+let viewing = -1, confirmAt = "";
+const ng = { n: null, life: null };
+
+function setMe(seat) {
+  me = seat; myName = seat >= 0 && state ? state.players[seat].name : "";
+  store.set("lifepi-seat", String(me)); store.set("lifepi-name", myName);
+}
+// seats can be swapped on the device: follow "me" by name
+function followMe(s) {
+  if (me < 0) return;
+  const at = s.players[me];
+  if (at && at.name === myName) return;
+  const moved = s.players.findIndex((p) => p.name === myName);
+  if (moved >= 0) setMe(moved);
+  else if (!at) setMe(-1);
+  else { myName = at.name; store.set("lifepi-name", myName); }   // renamed in place
+}
+
+// tap = one step; press and hold repeats
+let holdTimer = null;
+function stopHold() { clearTimeout(holdTimer); clearInterval(holdTimer); holdTimer = null; }
+addEventListener("pointerup", stopHold); addEventListener("pointercancel", stopHold); addEventListener("blur", stopHold);
+function rep(label, fn) {
+  return el("button", { type: "button", onpointerdown: (e) => {
+    e.preventDefault(); stopHold(); fn();
+    holdTimer = setTimeout(() => { holdTimer = setInterval(fn, 150); }, 450);
+  }, oncontextmenu: (e) => e.preventDefault() }, label);
+}
+function stepper(value, minus, plus, warn) {
+  return el("div", { class: "stepper" }, rep("−", minus),
+            el("span", { class: "v" + (warn ? " warn" : "") }, value), rep("+", plus));
+}
+function ask(title, value, cb) {
+  const box = document.getElementById("ask"), input = document.getElementById("askin");
+  document.getElementById("asktitle").textContent = title;
+  input.value = value; box.hidden = false; setTimeout(() => input.focus(), 50);
+  box.querySelector("form").onsubmit = (e) => { e.preventDefault(); box.hidden = true; if (input.value.trim()) cb(input.value.trim()); };
+  document.getElementById("askno").onclick = () => { box.hidden = true; };
+}
+function deltaPill(seat) {
+  const d = deltaOf(seat);
+  return d ? el("span", { class: "delta" + (d < 0 ? " neg" : "") }, fmt(d)) : null;
+}
+
+function detail(seat, isMe) {
+  const s = state, p = s.players[seat], out = [];
+  out.push(el("div", { class: "hero" + (p.ko ? " dead" : ""), style: cardBg(p, "rgba(0,0,0,.55), rgba(0,0,0,.35) 45%, rgba(0,0,0,.7)") },
+    el("div", { class: "top" },
+      el("button", { class: "name", type: "button",
+                     onclick: () => ask("Rename", p.name.startsWith("Player ") ? "" : p.name,
+                                        (t) => act({ op: "name", seat, name: t })) },
+         p.name, el("small", {}, "rename")),
+      el("button", { class: "chipbtn", type: "button", onclick: () => act({ op: "color", seat }) }, "Colour")),
+    deltaPill(seat),
+    el("div", { class: "life" }, p.life),
+    p.ko ? el("span", { class: "ko" }, p.ko === "life" ? "KO" : "KO · " + p.ko) : null,
+    el("div", { class: "steps" },
+      [-5, -1, 1, 5].map((d) => rep(fmt(d), () => act({ op: "life", seat, d }))))));
+  out.push(el("h2", {}, "Counters"));
+  out.push(el("div", { class: "rows" }, s.counters.map(([key, label]) =>
+    el("div", { class: "row" }, el("span", { class: "label" }, label),
+       stepper(p.counters[key], () => act({ op: "counter", seat, key, d: -1 }), () => act({ op: "counter", seat, key, d: 1 }),
+               key === "poison" && p.counters[key] >= 10)))));
+  out.push(el("h2", {}, "Commander damage taken"));
+  out.push(el("div", { class: "rows" }, s.players.map((src) =>
+    el("div", { class: "row" },
+       el("span", { class: "tile", style: cardBg(src, "rgba(0,0,0,.1), rgba(0,0,0,.1)") }),
+       el("span", { class: "label" }, src.name, src.seat === seat ? el("small", {}, " (own)") : null),
+       stepper(p.cmd[src.seat], () => act({ op: "cmd", seat, src: src.seat, d: -1 }),
+               () => act({ op: "cmd", seat, src: src.seat, d: 1 }), p.cmd[src.seat] >= 21)))));
+  out.push(isMe
+    ? el("a", { class: "link", href: "#", onclick: (e) => { e.preventDefault(); setMe(-1); render(); } }, "Not you? Pick another seat")
+    : el("a", { class: "link", href: "#", onclick: (e) => { e.preventDefault(); viewing = -1; render(); } }, "← Back to the table"));
+  return out;
+}
+
+function picker() {
+  return [el("h2", {}, "Which seat are you?"),
+          el("div", { class: "seats" }, state.players.map((p) =>
+            el("button", { class: "seat", type: "button", style: cardBg(p, "rgba(0,0,0,.25), rgba(0,0,0,.6)"),
+                           onclick: () => { setMe(p.seat); render(); } }, el("b", {}, p.name), el("span", {}, p.life)))),
+          el("p", { class: "muted" }, "You can still change anyone's life from the Table tab.")];
+}
+
+function table() {
+  return [el("div", { class: "tgrid" }, state.players.map((p) =>
+    el("div", { class: "tcard" + (p.ko ? " dead" : ""), style: cardBg(p, "rgba(0,0,0,.45), rgba(0,0,0,.3) 50%, rgba(0,0,0,.65)") },
+      el("button", { class: "tname", type: "button", onclick: () => { viewing = p.seat; render(); scrollTo(0, 0); } },
+         p.name, p.seat === me ? el("small", {}, " • you") : null),
+      deltaPill(p.seat),
+      el("div", { class: "tlife" }, p.life),
+      el("div", { class: "tbtn" }, rep("−", () => act({ op: "life", seat: p.seat, d: -1 })),
+                                   rep("+", () => act({ op: "life", seat: p.seat, d: 1 })))))),
+    el("p", { class: "muted" }, "Tap a name for counters and commander damage. Hold −/+ to repeat.")];
+}
+
+function confirmBtn(id, label, cls, fn) {
+  const armed = confirmAt === id;
+  return el("button", { class: "big " + cls, type: "button", onclick: () => {
+    if (armed) { confirmAt = ""; fn(); } else { confirmAt = id; setTimeout(() => { if (confirmAt === id) { confirmAt = ""; render(); } }, 3000); }
+    render();
+  } }, armed ? "Tap again to confirm" : label);
+}
+
+function game() {
+  const s = state;
+  if (ng.n === null) { ng.n = s.players.length; ng.life = s.start_life; }
+  const lifeOpts = [20, 30, 40];
+  return [
+    el("h2", {}, "New game"),
+    el("div", { class: "muted" }, "Players"),
+    el("div", { class: "chips six" }, [1, 2, 3, 4, 5, 6].map((n) =>
+      el("button", { type: "button", class: ng.n === n ? "on" : "", onclick: () => { ng.n = n; render(); } }, n))),
+    el("div", { class: "muted", style: { marginTop: "14px" } }, "Starting life"),
+    el("div", { class: "chips" }, lifeOpts.map((l) =>
+      el("button", { type: "button", class: ng.life === l ? "on" : "", onclick: () => { ng.life = l; render(); } }, l)),
+      el("input", { type: "number", inputmode: "numeric", min: "1", max: "9999", placeholder: "Other",
+                    value: lifeOpts.includes(ng.life) ? null : String(ng.life),
+                    onchange: (e) => { const v = parseInt(e.target.value, 10); if (v > 0) ng.life = Math.min(9999, v); render(); } })),
+    confirmBtn("new", `Start ${ng.n}-player game at ${ng.life}`, "go", () => act({ op: "newgame", n: ng.n, life: ng.life })),
+    confirmBtn("reset", "Reset this game", "danger", () => act({ op: "reset" })),
+    el("h2", {}, "Rules"),
+    el("div", { class: "rows" }, el("button", { type: "button", class: "row switch" + (s.cmd_hits_life ? " on" : ""),
+        style: { width: "100%", background: "none", border: "0", textAlign: "left" },
+        onclick: () => act({ op: "cmd_hits_life", on: !s.cmd_hits_life }) },
+      el("span", { class: "label" }, "Commander damage also reduces life"), el("i"))),
+    el("h2", {}, "Big screen"),
+    el("p", { class: "muted" }, "Open the TV view on a TV browser, cast this tab, or mirror your phone to a Roku: "),
+    el("a", { class: "link", href: "/tv?k=" + encodeURIComponent(KEY), target: "_blank" }, "Open TV view"),
+  ];
+}
+
+function render() {
+  for (const b of document.querySelectorAll("nav button")) b.classList.toggle("on", b.dataset.tab === tab);
+  const view = document.getElementById("view");
+  if (!state) return;
+  followMe(state);
+  document.getElementById("who").textContent = me >= 0 ? "You: " + state.players[me].name : "";
+  let kids;
+  if (tab === "table") kids = viewing >= 0 && viewing < state.players.length ? detail(viewing, false) : table();
+  else if (tab === "game") kids = game();
+  else kids = me >= 0 && me < state.players.length ? detail(me, true) : picker();
+  view.replaceChildren(...kids);
+}
+for (const b of document.querySelectorAll("nav button"))
+  b.onclick = () => { tab = b.dataset.tab; viewing = -1; store.set("lifepi-tab", tab); render(); scrollTo(0, 0); };
+
+onState = render;
+onStatus = (what, code) => {
+  document.getElementById("dot").classList.toggle("on", what === "online");
+  const pin = document.getElementById("pin");
+  if (what === "auth") {
+    pin.hidden = false;
+    document.getElementById("pinwhy").textContent = code === 429
+      ? "Too many wrong PINs - wait a minute, then try again."
+      : (KEY ? "That PIN didn't work (it may have changed). " : "") + "Enter the PIN shown on LifePi under Menu > Phones & TV.";
+  } else if (what === "online") pin.hidden = true;
+};
+document.querySelector("#pin form").onsubmit = (e) => {
+  e.preventDefault(); const v = e.target.querySelector("input").value; if (v.trim()) setKey(v);
+};
+render();
+start();
+</script>
+</body></html>
+""".replace("/*CLIENT*/", CLIENT_JS)
+
+TV_HTML = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LifePi - TV</title>
+<style>
+  :root { --cols:2; --rows:2; --gap:1.2vmin; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:#0d0d12; color:#fff; overflow:hidden; cursor:none;
+               font-family:system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  #grid { position:fixed; inset:0; padding:var(--gap); display:grid; gap:var(--gap);
+          grid-template-columns:repeat(var(--cols), 1fr); grid-template-rows:repeat(var(--rows), 1fr); }
+  .card { --ch:calc((100vh - var(--gap) * (var(--rows) + 1)) / var(--rows));
+          --cw:calc((100vw - var(--gap) * (var(--cols) + 1)) / var(--cols));
+          position:relative; border-radius:2.2vmin; overflow:hidden; background-size:cover; background-position:center;
+          display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;
+          box-shadow:0 1vmin 3vmin rgba(0,0,0,.45); }
+  .card.dead { filter:saturate(.3) brightness(.55); }
+  .name { position:absolute; top:5%; left:6%; right:6%; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+          font-size:min(calc(var(--ch) * .1), calc(var(--cw) * .07)); text-shadow:0 .3vmin 1vmin rgba(0,0,0,.7); }
+  .life { font-weight:800; line-height:1; font-variant-numeric:tabular-nums; letter-spacing:-.02em;
+          font-size:min(calc(var(--ch) * .44), calc(var(--cw) * .33)); text-shadow:0 .6vmin 2vmin rgba(0,0,0,.6); }
+  .delta { position:absolute; top:20%; padding:.2em .7em; border-radius:999px; font-weight:800; background:#32a050;
+           font-size:min(calc(var(--ch) * .08), calc(var(--cw) * .06)); }
+  .delta.neg { background:#c23b3b; }
+  .ko { margin-top:2%; padding:.15em .8em; border-radius:999px; background:#c23b3b; font-weight:800;
+        font-size:min(calc(var(--ch) * .07), calc(var(--cw) * .05)); }
+  .bottom { position:absolute; bottom:5%; left:4%; right:4%; display:flex; flex-wrap:wrap; justify-content:center;
+            align-items:center; gap:min(calc(var(--ch) * .025), 1.2vmin); }
+  .pill { padding:.2em .7em; border-radius:999px; font-weight:700; font-size:min(calc(var(--ch) * .055), calc(var(--cw) * .04)); }
+  .tile { position:relative; width:min(calc(var(--ch) * .14), calc(var(--cw) * .11)); aspect-ratio:1; border-radius:18%;
+          background-size:cover; background-position:center; border:.35vmin solid rgba(255,255,255,.45);
+          display:flex; align-items:center; justify-content:center; font-weight:800;
+          font-size:min(calc(var(--ch) * .075), calc(var(--cw) * .06)); text-shadow:0 .2vmin .8vmin #000; }
+  .tile.lethal { border-color:#ff4a4a; color:#ff8a8a; }
+  .credit { position:absolute; bottom:1.2%; left:0; right:0; font-size:max(9px, calc(var(--ch) * .026)); color:rgba(255,255,255,.55); }
+  #hint { position:fixed; left:50%; bottom:1.2vmin; transform:translateX(-50%); padding:.5vmin 1.6vmin; border-radius:999px;
+          background:rgba(13,13,18,.82); color:#c8c9d6; font-size:max(12px, 1.7vmin); max-width:94vw; text-align:center; }
+  @media (max-aspect-ratio: 1/1), (max-height: 520px) { .credit { display:none; } }
+  #hint[hidden], #off[hidden] { display:none; }
+  #off { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(13,13,18,.75);
+         font-size:3vmin; color:#c8c9d6; }
+</style>
+</head><body>
+<div id="grid"></div>
+<div id="hint" hidden></div>
+<div id="off">Connecting to LifePi...</div>
+<script>
+/*CLIENT*/
+const CHIP = { poison: "#2f8a4a", tax: "#97702a", energy: "#ae8716", exp: "#5459ad" };
+const SHORT = { poison: "Poison", tax: "Tax", energy: "Energy", exp: "Exp" };
+function layout(n) {
+  let [c, r] = [[1, 1], [2, 1], [3, 1], [2, 2], [3, 2], [3, 2]][n - 1];
+  if (innerHeight > innerWidth * 1.1) [c, r] = n <= 2 ? [1, n] : n <= 4 ? [2, 2] : [2, 3];
+  document.documentElement.style.setProperty("--cols", c);
+  document.documentElement.style.setProperty("--rows", r);
+}
+function render() {
+  if (!state) return;
+  const s = state;
+  layout(s.players.length);
+  document.getElementById("grid").replaceChildren(...s.players.map((p) => {
+    const d = deltaOf(p.seat);
+    const bottom = [];
+    s.players.forEach((src) => {
+      const v = p.cmd[src.seat];
+      if (v) bottom.push(el("div", { class: "tile" + (v >= 21 ? " lethal" : ""),
+                                     style: Object.assign(cardBg(src, "rgba(0,0,0,.25), rgba(0,0,0,.45)"),
+                                                          { borderColor: v >= 21 ? null : src.color }) }, v));
+    });
+    for (const [key] of s.counters)
+      if (p.counters[key]) bottom.push(el("span", { class: "pill", style: { background: CHIP[key] || "#444" } },
+                                          `${SHORT[key] || key} ${p.counters[key]}`));
+    return el("div", { class: "card" + (p.ko ? " dead" : ""),
+                       style: cardBg(p, "rgba(0,0,0,.62), rgba(0,0,0,.38) 45%, rgba(0,0,0,.72)") },
+      el("div", { class: "name" }, p.name),
+      d ? el("div", { class: "delta" + (d < 0 ? " neg" : "") }, fmt(d)) : null,
+      el("div", { class: "life" }, p.life),
+      p.ko ? el("div", { class: "ko" }, p.ko === "life" ? "KO" : "KO · " + p.ko) : null,
+      el("div", { class: "bottom" }, bottom),
+      p.credit ? el("div", { class: "credit" }, p.credit) : null);
+  }));
+  const hint = document.getElementById("hint");
+  hint.hidden = !s.join || qs.get("hint") === "0";
+  hint.textContent = "Control LifePi from your phone: " + s.join + "  (PIN on the LifePi screen)";
+}
+onState = render;
+onStatus = (what) => {
+  const off = document.getElementById("off");
+  off.hidden = what === "online";
+  if (what === "auth") off.textContent = "This TV link's PIN is out of date - open it again from LifePi > Phones & TV.";
+  else if (what === "offline") off.textContent = "Reconnecting to LifePi...";
+};
+addEventListener("resize", render);
+start();
+</script>
+</body></html>
+""".replace("/*CLIENT*/", CLIENT_JS)
 
 
 def main():
@@ -1310,7 +2247,13 @@ def main():
     ap.add_argument("--windowed", metavar="WxH", help="run in a window (e.g. 800x480) instead of fullscreen")
     ap.add_argument("--rotate", type=int, choices=(0, 90, 180, 270), help="set screen rotation and remember it")
     ap.add_argument("--fps", type=int, default=30)
-    App(ap.parse_args()).run()
+    ap.add_argument("--companion-port", type=int, default=COMPANION_PORT, metavar="PORT",
+                    help=f"port for the phone / TV web pages (default {COMPANION_PORT})")
+    ap.add_argument("--no-companion", action="store_true", help="don't serve the phone / TV web pages")
+    args = ap.parse_args()
+    if args.no_companion:
+        args.companion_port = None
+    App(args).run()
 
 
 if __name__ == "__main__":
