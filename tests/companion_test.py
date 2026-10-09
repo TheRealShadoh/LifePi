@@ -47,6 +47,24 @@ assert [p["life"] for p in s["players"]] == [40] * 4 and s["players"][0]["color"
 assert s["join"].startswith("http://") and s["join"].endswith(f":{comp.port}")
 print("auth / state ok")
 
+# phones and the TV place every seat exactly where the device draws it
+def device_rects(a):
+    return [(r.x / a.W, r.y / a.H, r.w / a.W, r.h / a.H) for r, _ in lifepi.layout(len(a.players), a.W, a.H, a.settings["seating"])]
+def published(a):
+    return [tuple(p["pos"]) for p in json.loads(comp.snap)["players"]]
+def close(xs, ys): return all(abs(a - b) < 1e-3 for x, y in zip(xs, ys) for a, b in zip(x, y))
+for n in range(1, 7):
+    app.start_game(n, 40); app.tick_remote()
+    assert close(published(app), device_rects(app)), n
+order = lambda: [p["seat"] for p in sorted(json.loads(comp.snap)["players"], key=lambda p: (p["pos"][1], p["pos"][0]))]
+assert order() == [0, 1, 2, 5, 4, 3], order()        # clockwise: bottom row runs right to left
+app.start_game(4, 40); app.tick_remote(); assert order() == [0, 1, 3, 2], order()
+app.rotate_screen(); app.tick_remote()                  # portrait canvas: still the device's rectangles
+assert close(published(app), device_rects(app))
+for _ in range(3): app.rotate_screen()
+app.tick_remote()
+print("seat positions match the device ok")
+
 # every action, applied by the main thread
 act(op="life", seat=0, d=-3); assert app.players[0]["life"] == 37 and state()["players"][0]["life"] == 37
 act(op="cmd", seat=1, src=1, d=2)               # own commander

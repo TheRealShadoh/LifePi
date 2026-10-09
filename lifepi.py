@@ -422,6 +422,7 @@ class App:
         self.toast = ("", 0.0)
         self.qr_cache = (None, None)
         self.running = True
+        self.make_canvas()                  # before publish(): phones get the seat layout from it
         # phones / TV: off unless a port is given (main() always gives one)
         self.companion = None
         port = getattr(args, "companion_port", None)
@@ -430,7 +431,6 @@ class App:
             if self.settings["companion"]:
                 self.companion.start()
         self.publish()
-        self.make_canvas()
 
     # ------------------------------------------------------------------ state
     def load_state(self):
@@ -567,6 +567,11 @@ class App:
 
     def snapshot(self):
         n = len(self.players)
+        # each seat's rectangle on the device screen (fractions of the canvas), so phones and
+        # the TV place players exactly where the device does (clockwise, seating, rotation)
+        W, H = self.W, self.H
+        rects = [[round(r.x / W, 4), round(r.y / H, 4), round(r.w / W, 4), round(r.h / H, 4)]
+                 for r, _ in layout(n, W, H, self.settings["seating"])]
         out = []
         for i, p in enumerate(self.players):
             art = None
@@ -575,7 +580,8 @@ class App:
             out.append({"seat": i, "name": p["name"], "life": p["life"],
                         "color": "#%02x%02x%02x" % PALETTE[p["color"] % len(PALETTE)],
                         "art": art, "credit": p["credit"] if art else "",
-                        "counters": dict(p["counters"]), "cmd": p["cmd"][:n], "ko": self.ko_reason(p)})
+                        "counters": dict(p["counters"]), "cmd": p["cmd"][:n], "ko": self.ko_reason(p),
+                        "pos": rects[i]})
         return {"players": out, "start_life": self.settings["start_life"],
                 "cmd_hits_life": self.settings["cmd_hits_life"],
                 "counters": [[k, label] for k, label, _ in COUNTERS],
@@ -661,7 +667,7 @@ class App:
         self.canvas = pygame.Surface((sw, sh) if rot in (0, 180) else (sh, sw))
         self.W, self.H = self.canvas.get_size()
         self.img_cache.clear()
-        self.dirty = True
+        self.dirty = self.snap_dirty = True       # phones mirror the layout
 
     def font(self, size):
         size = max(10, int(size))
@@ -1849,121 +1855,139 @@ const fmt = (d) => (d > 0 ? "+" : "−") + Math.abs(d);
 PHONE_HTML = r"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#121218">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>LifePi</title>
 <style>
   :root { --bg:#121218; --card:#1d1e29; --line:#2c2e3d; --text:#f2f2f6; --dim:#9a9cae;
-          --accent:#4678c8; --good:#32a050; --bad:#c23b3b; --warn:#ffe678; }
+          --accent:#4678c8; --good:#32a050; --bad:#c23b3b; --warn:#ffe678; --gap:5px; }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-  html, body { margin:0; background:var(--bg); color:var(--text);
-               font:16px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  body { padding:0 0 calc(76px + env(safe-area-inset-bottom)); min-height:100vh; }
-  header { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:10px;
-           padding:calc(10px + env(safe-area-inset-top)) 16px 10px; background:rgba(18,18,24,.92);
-           backdrop-filter:blur(8px); border-bottom:1px solid var(--line); }
-  header b { font-size:18px; letter-spacing:.3px; }
-  #dot { width:9px; height:9px; border-radius:50%; background:var(--bad); }
-  #dot.on { background:var(--good); }
-  #who { margin-left:auto; color:var(--dim); font-size:14px; }
-  main { padding:14px 14px 0; max-width:640px; margin:0 auto; }
-  nav { position:fixed; left:0; right:0; bottom:0; z-index:5; display:flex; background:#181923;
-        border-top:1px solid var(--line); padding-bottom:env(safe-area-inset-bottom); }
-  nav button { flex:1; height:62px; background:none; border:0; color:var(--dim); font:600 15px system-ui, sans-serif; }
-  nav button.on { color:var(--text); box-shadow:inset 0 3px 0 var(--accent); }
+  /* one fixed screen, like the device: nothing outside the sheets scrolls or zooms */
+  html, body { position:fixed; inset:0; margin:0; overflow:hidden; overscroll-behavior:none; touch-action:none;
+               background:var(--bg); color:var(--text); user-select:none; -webkit-user-select:none;
+               -webkit-touch-callout:none; font:16px/1.3 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { display:flex; flex-direction:column; padding:env(safe-area-inset-top) env(safe-area-inset-right)
+         env(safe-area-inset-bottom) env(safe-area-inset-left); }
   button { font:inherit; color:inherit; cursor:pointer; touch-action:manipulation; }
-  h2 { font-size:15px; font-weight:600; color:var(--dim); margin:22px 4px 10px; text-transform:uppercase; letter-spacing:.6px; }
-  .hero { position:relative; border-radius:20px; padding:16px 16px 18px; overflow:hidden;
-          background-size:cover; background-position:center; box-shadow:0 6px 24px rgba(0,0,0,.35); }
-  .hero .top { display:flex; gap:8px; align-items:center; }
-  .hero .name { flex:1; text-align:left; background:none; border:0; font-size:22px; font-weight:700; padding:4px 0;
-                text-shadow:0 1px 3px rgba(0,0,0,.6); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .hero .name small { font-weight:500; color:var(--dim); font-size:13px; margin-left:6px; }
-  .chipbtn { background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.18); border-radius:999px;
-             padding:6px 12px; font-size:13px; }
-  .life { text-align:center; font-size:min(34vw, 150px); font-weight:800; line-height:1; margin:34px 0 4px;
-          font-variant-numeric:tabular-nums; text-shadow:0 3px 10px rgba(0,0,0,.55); }
-  .delta { position:absolute; left:50%; top:58px; transform:translateX(-50%); padding:4px 14px; border-radius:999px;
-           font-weight:800; font-size:20px; background:var(--good); }
+  header { flex:none; display:flex; align-items:center; gap:8px; height:48px; padding:0 10px; }
+  header b { font-size:17px; }
+  #dot { width:9px; height:9px; border-radius:50%; background:var(--bad); flex:none; }
+  #dot.on { background:var(--good); }
+  .hbtn { margin-left:auto; height:36px; padding:0 14px; border-radius:999px; border:1px solid var(--line);
+          background:#22232f; font-size:14px; font-weight:600; max-width:46vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hbtn + .hbtn { margin-left:0; }
+  #table { position:relative; flex:1; min-height:0; margin:0 var(--gap) var(--gap); }
+
+  .cell { position:absolute; padding:var(--gap); container-type:size; }
+  .panel { position:relative; width:100%; height:100%; border-radius:16px; overflow:hidden; background-size:cover;
+           background-position:center; box-shadow:0 3px 12px rgba(0,0,0,.35); }
+  .panel.me { box-shadow:0 0 0 3px var(--warn), 0 3px 12px rgba(0,0,0,.35); }
+  .strip { position:absolute; left:0; right:0; border:0; background:none; padding:0 6%; display:flex;
+           align-items:center; justify-content:center; text-align:center; }
+  .strip.top { top:0; height:20%; font-weight:700; font-size:min(10cqh, 8cqw); text-shadow:0 1px 3px rgba(0,0,0,.7); }
+  .strip.top span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .strip.top small { color:var(--warn); font-weight:600; margin-left:.35em; flex:none; }
+  .strip.bot { bottom:0; height:22%; gap:min(2cqh, 1.6cqw); flex-wrap:wrap; align-content:center; }
+  .half { position:absolute; top:20%; bottom:22%; width:50%; border:0; background:none; padding:0;
+          touch-action:none; display:flex; align-items:center; }
+  .half.minus { left:0; justify-content:flex-start; padding-left:6%; }
+  .half.plus { right:0; justify-content:flex-end; padding-right:6%; }
+  .half i { font-style:normal; font-weight:700; font-size:min(16cqh, 11cqw); opacity:.45; line-height:1; }
+  .half:active { background:rgba(255,255,255,.07); }
+  .life { position:absolute; left:15%; right:15%; top:50%; transform:translateY(-50%); text-align:center; pointer-events:none;
+          font-weight:800; line-height:1; font-variant-numeric:tabular-nums;
+          font-size:min(46cqh, 34cqw); text-shadow:0 2px 8px rgba(0,0,0,.6); }
+  .delta { position:absolute; left:50%; top:21%; transform:translateX(-50%); pointer-events:none; padding:.1em .6em;
+           border-radius:999px; font-weight:800; font-size:min(9cqh, 7cqw); background:var(--good); }
   .delta.neg { background:var(--bad); }
-  .ko { display:block; width:max-content; margin:0 auto 8px; padding:4px 14px; border-radius:999px; background:var(--bad);
-        font-weight:800; letter-spacing:.5px; }
-  .dead { filter:saturate(.35) brightness(.7); }
-  .steps { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-top:12px; }
-  .steps button, .stepper button { height:64px; border-radius:16px; border:1px solid rgba(255,255,255,.14);
-           background:rgba(10,10,16,.55); font-size:24px; font-weight:700; }
-  .steps button:active, .stepper button:active, .tcard button:active { transform:scale(.96); background:rgba(255,255,255,.18); }
-  .rows { background:var(--card); border-radius:16px; overflow:hidden; border:1px solid var(--line); }
-  .row { display:flex; align-items:center; gap:12px; padding:10px 12px; border-top:1px solid var(--line); min-height:66px; }
+  .ko { position:absolute; left:50%; bottom:24%; transform:translateX(-50%); pointer-events:none; padding:.1em .7em;
+        border-radius:999px; background:var(--bad); font-weight:800; font-size:min(8cqh, 6cqw); white-space:nowrap; }
+  .panel.dead > :not(.ko):not(.strip) { opacity:.45; }
+  .panel.dead { filter:saturate(.4); }
+  .pill { padding:.15em .55em; border-radius:999px; font-weight:700; font-size:min(7cqh, 5.2cqw); white-space:nowrap; }
+  .pill.empty { color:#cfd0dc; background:rgba(0,0,0,.28); border:1px solid rgba(255,255,255,.2); font-weight:600; }
+  .tile { width:min(14cqh, 11cqw); aspect-ratio:1; border-radius:22%; background-size:cover; background-position:center;
+          border:2px solid rgba(255,255,255,.45); display:flex; align-items:center; justify-content:center;
+          font-weight:800; font-size:min(8cqh, 6cqw); text-shadow:0 1px 4px #000; }
+  .tile.lethal { border-color:#ff4a4a; color:#ff8a8a; }
+
+  /* sheets: the only places that scroll */
+  .sheet { position:fixed; inset:0; z-index:10; display:flex; align-items:flex-end; justify-content:center;
+           background:rgba(6,6,10,.6); touch-action:auto; }
+  .sheet[hidden] { display:none; }
+  .box { width:100%; max-width:560px; max-height:88%; overflow-y:auto; overscroll-behavior:contain; touch-action:pan-y;
+         -webkit-overflow-scrolling:touch; background:var(--card); border:1px solid var(--line); border-bottom:0;
+         border-radius:22px 22px 0 0; padding:10px 16px calc(18px + env(safe-area-inset-bottom)); }
+  .grab { width:44px; height:5px; border-radius:3px; background:#4a4c5e; margin:2px auto 10px; }
+  .shead { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+  .shead h3 { flex:1; margin:0; font-size:21px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .chipbtn { height:38px; padding:0 14px; border-radius:999px; border:1px solid var(--line); background:#2a2c3b; font-size:14px; font-weight:600; }
+  .chipbtn.go { background:var(--accent); border-color:var(--accent); }
+  h4 { font-size:13px; font-weight:600; color:var(--dim); margin:18px 2px 8px; text-transform:uppercase; letter-spacing:.6px; }
+  .steps { display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; }
+  .steps button, .stepper button { height:54px; border-radius:14px; border:1px solid var(--line); background:#2a2c3b;
+                                   font-size:22px; font-weight:700; }
+  .steps button:active, .stepper button:active, .chips button:active { transform:scale(.96); background:#3a3d52; }
+  .lifebig { text-align:center; font-size:64px; font-weight:800; line-height:1; margin:4px 0 10px; font-variant-numeric:tabular-nums; }
+  .rows { border-radius:14px; overflow:hidden; border:1px solid var(--line); background:#191a24; }
+  .row { display:flex; align-items:center; gap:10px; padding:8px 10px; border-top:1px solid var(--line); min-height:62px; }
   .row:first-child { border-top:0; }
   .row .label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
   .row .label small { color:var(--dim); font-weight:500; }
-  .stepper { display:flex; align-items:center; gap:8px; }
-  .stepper button { width:52px; height:48px; font-size:24px; background:#2a2c3b; }
-  .stepper .v { min-width:42px; text-align:center; font-size:22px; font-weight:800; font-variant-numeric:tabular-nums; }
+  .row .stile { width:40px; height:40px; border-radius:9px; flex:none; background-size:cover; background-position:center;
+                border:2px solid rgba(255,255,255,.35); }
+  .stepper { display:flex; align-items:center; gap:6px; }
+  .stepper button { width:50px; height:46px; }
+  .stepper .v { min-width:40px; text-align:center; font-size:21px; font-weight:800; font-variant-numeric:tabular-nums; }
   .stepper .v.warn { color:#ff7a7a; }
-  .tile { width:44px; height:44px; border-radius:10px; flex:none; background-size:cover; background-position:center;
-          border:2px solid rgba(255,255,255,.35); }
-  .seats { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:12px; }
-  .seat { height:120px; border-radius:18px; border:0; padding:12px; text-align:left; display:flex; flex-direction:column;
-          justify-content:space-between; background-size:cover; background-position:center; box-shadow:0 4px 16px rgba(0,0,0,.3); }
-  .seat b { font-size:18px; text-shadow:0 1px 3px rgba(0,0,0,.7); }
-  .seat span { font-size:38px; font-weight:800; text-shadow:0 2px 6px rgba(0,0,0,.6); }
-  .tgrid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-  .tcard { position:relative; border-radius:18px; padding:10px; background-size:cover; background-position:center;
-           min-height:150px; display:flex; flex-direction:column; box-shadow:0 4px 16px rgba(0,0,0,.3); }
-  .tcard .tname { background:none; border:0; text-align:left; font-weight:700; padding:2px; font-size:16px;
-                  text-shadow:0 1px 3px rgba(0,0,0,.7); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .tcard .tname small { color:var(--warn); font-weight:600; }
-  .tcard .tlife { text-align:center; font-size:46px; font-weight:800; flex:1; display:flex; align-items:center;
-                  justify-content:center; text-shadow:0 2px 8px rgba(0,0,0,.6); font-variant-numeric:tabular-nums; }
-  .tcard .tbtn { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-  .tcard .tbtn button { height:46px; border-radius:12px; border:1px solid rgba(255,255,255,.14); background:rgba(10,10,16,.55);
-                        font-size:22px; font-weight:700; }
-  .tcard .delta { top:40px; font-size:15px; padding:2px 10px; }
   .chips { display:flex; flex-wrap:wrap; gap:8px; }
   .chips.six { display:grid; grid-template-columns:repeat(6, 1fr); }
-  .chips.six button { min-width:0; padding:0; }
-  .switch .label { white-space:normal; }
-  .chips button { min-width:56px; height:48px; border-radius:12px; border:1px solid var(--line); background:#2a2c3b;
-                  font-size:18px; font-weight:700; padding:0 14px; }
+  .chips button { min-width:0; height:48px; border-radius:12px; border:1px solid var(--line); background:#2a2c3b;
+                  font-size:17px; font-weight:700; padding:0 12px; }
   .chips button.on { background:var(--accent); border-color:var(--accent); }
-  .chips input { width:110px; height:48px; border-radius:12px; border:1px solid var(--line); background:#2a2c3b;
-                 color:var(--text); font-size:18px; padding:0 12px; }
-  .big { width:100%; height:58px; border-radius:16px; border:0; font-size:18px; font-weight:700; margin-top:12px; background:#2a2c3b; }
+  .chips input { width:100px; height:48px; border-radius:12px; border:1px solid var(--line); background:#2a2c3b;
+                 color:var(--text); font-size:17px; padding:0 12px; user-select:text; -webkit-user-select:text; }
+  .big { width:100%; height:54px; border-radius:14px; border:0; font-size:17px; font-weight:700; margin-top:10px; background:#2a2c3b; }
   .big.go { background:var(--good); } .big.danger { background:var(--bad); }
-  .switch { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-  .switch i { width:52px; height:30px; border-radius:15px; background:#3a3c4c; position:relative; flex:none; }
+  .switch { width:100%; background:none; border:0; text-align:left; }
+  .switch .label { white-space:normal; }
+  .switch i { width:50px; height:30px; border-radius:15px; background:#3a3c4c; position:relative; flex:none; }
   .switch i::after { content:""; position:absolute; top:3px; left:3px; width:24px; height:24px; border-radius:50%;
                      background:#fff; transition:left .15s; }
-  .switch.on i { background:var(--good); } .switch.on i::after { left:25px; }
-  .link { display:block; text-align:center; color:var(--dim); margin:18px 0 6px; font-size:14px; }
+  .switch.on i { background:var(--good); } .switch.on i::after { left:23px; }
+  .seatpick { display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:8px; }
+  .seatpick button { height:54px; border-radius:12px; border:2px solid transparent; font-weight:700; font-size:16px;
+                     background-size:cover; background-position:center; text-shadow:0 1px 3px rgba(0,0,0,.7); }
+  .seatpick button.on { border-color:var(--warn); }
+  .muted { color:var(--dim); font-size:14px; margin:8px 2px; }
   a { color:#8fb4ff; }
-  .muted { color:var(--dim); font-size:14px; margin:6px 4px; }
-  .overlay { position:fixed; inset:0; z-index:9; background:rgba(8,8,12,.86); display:flex; align-items:center;
-             justify-content:center; padding:24px; }
+  .overlay { position:fixed; inset:0; z-index:20; background:rgba(8,8,12,.88); display:flex; align-items:center;
+             justify-content:center; padding:24px; touch-action:auto; }
   .overlay[hidden] { display:none; }
-  .panel { width:100%; max-width:380px; background:var(--card); border:1px solid var(--line); border-radius:20px; padding:20px; }
-  .panel h3 { margin:0 0 6px; font-size:20px; }
-  .panel input { width:100%; height:54px; margin:14px 0 4px; border-radius:14px; border:1px solid var(--line);
-                 background:#2a2c3b; color:var(--text); font-size:22px; padding:0 14px; }
-  .panel .acts { display:flex; gap:10px; } .panel .acts .big { flex:1; }
+  .panel2 { width:100%; max-width:380px; background:var(--card); border:1px solid var(--line); border-radius:20px; padding:20px; }
+  .panel2 h3 { margin:0 0 6px; font-size:20px; }
+  .panel2 input { width:100%; height:54px; margin:14px 0 4px; border-radius:14px; border:1px solid var(--line);
+                  background:#2a2c3b; color:var(--text); font-size:22px; padding:0 14px; user-select:text; -webkit-user-select:text; }
+  .panel2 .acts { display:flex; gap:10px; } .panel2 .acts .big { flex:1; }
 </style>
 </head><body>
-<header><span id="dot"></span><b>LifePi</b><span id="who"></span></header>
-<main id="view"><p class="muted">Connecting...</p></main>
-<nav>
-  <button data-tab="me">Me</button><button data-tab="table">Table</button><button data-tab="game">Game</button>
-</nav>
-<div class="overlay" id="pin" hidden><form class="panel">
+<header>
+  <span id="dot"></span><b>LifePi</b>
+  <button class="hbtn" id="seatbtn" type="button">Pick your seat</button>
+  <button class="hbtn" id="gamebtn" type="button">Game</button>
+</header>
+<main id="table"></main>
+<div class="sheet" id="sheet" hidden><div class="box" id="box"></div></div>
+<div class="overlay" id="pin" hidden><form class="panel2">
   <h3>Join the game</h3>
   <div class="muted" id="pinwhy">Enter the PIN shown on LifePi under Menu &gt; Phones &amp; TV.</div>
   <input inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit PIN">
   <button class="big go">Join</button>
 </form></div>
-<div class="overlay" id="ask" hidden><form class="panel">
+<div class="overlay" id="ask" hidden><form class="panel2">
   <h3 id="asktitle">Rename</h3>
   <input id="askin" maxlength="18" autocomplete="off">
   <div class="acts"><button type="button" class="big" id="askno">Cancel</button><button class="big go">Save</button></div>
@@ -1973,39 +1997,55 @@ PHONE_HTML = r"""<!doctype html>
 if (qs.get("k")) history.replaceState(null, "", location.pathname);   // keep the PIN out of the address bar
 const store = { get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
                 set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
-let tab = store.get("lifepi-tab", "me");
 let me = +store.get("lifepi-seat", "-1"), myName = store.get("lifepi-name", "");
-let viewing = -1, confirmAt = "";
+let sheet = null;                      // {kind: "player", seat} | {kind: "game"} | {kind: "seat"}
+let confirmAt = "";
 const ng = { n: null, life: null };
+const CHIP = { poison: "#2f8a4a", tax: "#97702a", energy: "#ae8716", exp: "#5459ad" };
+const SHORT = { poison: "Poison", tax: "Tax", energy: "Energy", exp: "Exp" };
 
 function setMe(seat) {
-  me = seat; myName = seat >= 0 && state ? state.players[seat].name : "";
+  me = seat; myName = seat >= 0 && state && state.players[seat] ? state.players[seat].name : "";
   store.set("lifepi-seat", String(me)); store.set("lifepi-name", myName);
 }
-// seats can be swapped on the device: follow "me" by name
-function followMe(s) {
+function followMe(s) {                 // seats can be swapped on the device: follow "me" by name
   if (me < 0) return;
   const at = s.players[me];
   if (at && at.name === myName) return;
   const moved = s.players.findIndex((p) => p.name === myName);
   if (moved >= 0) setMe(moved);
   else if (!at) setMe(-1);
-  else { myName = at.name; store.set("lifepi-name", myName); }   // renamed in place
+  else { myName = at.name; store.set("lifepi-name", myName); }     // renamed in place
 }
 
-// tap = one step; press and hold repeats
-let holdTimer = null;
-function stopHold() { clearTimeout(holdTimer); clearInterval(holdTimer); holdTimer = null; }
-addEventListener("pointerup", stopHold); addEventListener("pointercancel", stopHold); addEventListener("blur", stopHold);
-function rep(label, fn) {
-  return el("button", { type: "button", onpointerdown: (e) => {
-    e.preventDefault(); stopHold(); fn();
-    holdTimer = setTimeout(() => { holdTimer = setInterval(fn, 150); }, 450);
-  }, oncontextmenu: (e) => e.preventDefault() }, label);
+// presses: like the device - tap = 1 step, hold = big steps repeating. Tracked per pointer on
+// window, because a live update can replace the element under a finger mid-press.
+const presses = new Map();
+function press(e, tap, hold, every) {
+  e.preventDefault();
+  const pr = { held: false, timer: null, tap };
+  pr.timer = setTimeout(() => {
+    pr.held = true;
+    if (hold) { hold(); pr.timer = setInterval(hold, every); }
+  }, 450);
+  presses.set(e.pointerId, pr);
 }
+function release(e, cancel) {
+  const pr = presses.get(e.pointerId);
+  if (!pr) return;
+  presses.delete(e.pointerId); clearTimeout(pr.timer); clearInterval(pr.timer);
+  if (!pr.held && !cancel) pr.tap();
+}
+addEventListener("pointerup", (e) => release(e, false));
+addEventListener("pointercancel", (e) => release(e, true));
+function pressable(tag, attrs, tap, hold, every, ...kids) {
+  return el(tag, Object.assign({}, attrs, { type: "button", oncontextmenu: (e) => e.preventDefault(),
+    onpointerdown: (e) => press(e, tap, hold, every) }), ...kids);
+}
+const stepBtn = (label, fn) => pressable("button", {}, fn, fn, 150, label);   // sheets: hold repeats the step
 function stepper(value, minus, plus, warn) {
-  return el("div", { class: "stepper" }, rep("−", minus),
-            el("span", { class: "v" + (warn ? " warn" : "") }, value), rep("+", plus));
+  return el("div", { class: "stepper" }, stepBtn("−", minus),
+            el("span", { class: "v" + (warn ? " warn" : "") }, value), stepBtn("+", plus));
 }
 function ask(title, value, cb) {
   const box = document.getElementById("ask"), input = document.getElementById("askin");
@@ -2014,81 +2054,97 @@ function ask(title, value, cb) {
   box.querySelector("form").onsubmit = (e) => { e.preventDefault(); box.hidden = true; if (input.value.trim()) cb(input.value.trim()); };
   document.getElementById("askno").onclick = () => { box.hidden = true; };
 }
-function deltaPill(seat) {
-  const d = deltaOf(seat);
-  return d ? el("span", { class: "delta" + (d < 0 ? " neg" : "") }, fmt(d)) : null;
+
+// ------------------------------------------------------------------ the table (mirrors the device)
+function panel(p) {
+  const seat = p.seat, d = deltaOf(seat), bottom = [];
+  state.players.forEach((src) => {
+    const v = p.cmd[src.seat];
+    if (v) bottom.push(el("span", { class: "tile" + (v >= 21 ? " lethal" : ""),
+      style: Object.assign(cardBg(src, "rgba(0,0,0,.2), rgba(0,0,0,.45)"), { borderColor: v >= 21 ? null : src.color }) }, v));
+  });
+  for (const [key] of state.counters)
+    if (p.counters[key]) bottom.push(el("span", { class: "pill", style: { background: CHIP[key] || "#444" } },
+                                        `${SHORT[key] || key} ${p.counters[key]}`));
+  if (!bottom.length) bottom.push(el("span", { class: "pill empty" }, "counters"));
+  const open = () => openSheet({ kind: "player", seat });
+  const [x, y, w, h] = p.pos;
+  return el("div", { class: "cell", style: { left: x * 100 + "%", top: y * 100 + "%", width: w * 100 + "%", height: h * 100 + "%" } },
+    el("div", { class: "panel" + (seat === me ? " me" : "") + (p.ko ? " dead" : ""),
+                style: cardBg(p, "rgba(0,0,0,.6), rgba(0,0,0,.32) 45%, rgba(0,0,0,.66)") },
+      el("button", { class: "strip top", type: "button", onclick: open },
+         el("span", {}, p.name), seat === me ? el("small", {}, "you") : null),
+      pressable("button", { class: "half minus", "aria-label": "minus" }, () => act({ op: "life", seat, d: -1 }),
+                () => act({ op: "life", seat, d: -10 }), 500, el("i", {}, "−")),
+      pressable("button", { class: "half plus", "aria-label": "plus" }, () => act({ op: "life", seat, d: 1 }),
+                () => act({ op: "life", seat, d: 10 }), 500, el("i", {}, "+")),
+      el("div", { class: "life" }, p.life),
+      d ? el("div", { class: "delta" + (d < 0 ? " neg" : "") }, fmt(d)) : null,
+      p.ko ? el("div", { class: "ko" }, p.ko === "life" ? "KO" : "KO · " + p.ko) : null,
+      el("button", { class: "strip bot", type: "button", onclick: open }, bottom)));
 }
 
-function detail(seat, isMe) {
-  const s = state, p = s.players[seat], out = [];
-  out.push(el("div", { class: "hero" + (p.ko ? " dead" : ""), style: cardBg(p, "rgba(0,0,0,.55), rgba(0,0,0,.35) 45%, rgba(0,0,0,.7)") },
-    el("div", { class: "top" },
-      el("button", { class: "name", type: "button",
-                     onclick: () => ask("Rename", p.name.startsWith("Player ") ? "" : p.name,
-                                        (t) => act({ op: "name", seat, name: t })) },
-         p.name, el("small", {}, "rename")),
-      el("button", { class: "chipbtn", type: "button", onclick: () => act({ op: "color", seat }) }, "Colour")),
-    deltaPill(seat),
-    el("div", { class: "life" }, p.life),
-    p.ko ? el("span", { class: "ko" }, p.ko === "life" ? "KO" : "KO · " + p.ko) : null,
-    el("div", { class: "steps" },
-      [-5, -1, 1, 5].map((d) => rep(fmt(d), () => act({ op: "life", seat, d }))))));
-  out.push(el("h2", {}, "Counters"));
-  out.push(el("div", { class: "rows" }, s.counters.map(([key, label]) =>
-    el("div", { class: "row" }, el("span", { class: "label" }, label),
-       stepper(p.counters[key], () => act({ op: "counter", seat, key, d: -1 }), () => act({ op: "counter", seat, key, d: 1 }),
-               key === "poison" && p.counters[key] >= 10)))));
-  out.push(el("h2", {}, "Commander damage taken"));
-  out.push(el("div", { class: "rows" }, s.players.map((src) =>
-    el("div", { class: "row" },
-       el("span", { class: "tile", style: cardBg(src, "rgba(0,0,0,.1), rgba(0,0,0,.1)") }),
-       el("span", { class: "label" }, src.name, src.seat === seat ? el("small", {}, " (own)") : null),
-       stepper(p.cmd[src.seat], () => act({ op: "cmd", seat, src: src.seat, d: -1 }),
-               () => act({ op: "cmd", seat, src: src.seat, d: 1 }), p.cmd[src.seat] >= 21)))));
-  out.push(isMe
-    ? el("a", { class: "link", href: "#", onclick: (e) => { e.preventDefault(); setMe(-1); render(); } }, "Not you? Pick another seat")
-    : el("a", { class: "link", href: "#", onclick: (e) => { e.preventDefault(); viewing = -1; render(); } }, "← Back to the table"));
-  return out;
+// ------------------------------------------------------------------ sheets
+function openSheet(s) { sheet = s; render(); document.getElementById("box").scrollTop = 0; }
+function closeSheet() { sheet = null; confirmAt = ""; render(); }
+document.getElementById("sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") closeSheet(); });
+
+function playerSheet(seat) {
+  const s = state, p = s.players[seat];
+  return [
+    el("div", { class: "shead" }, el("h3", {}, p.name),
+       el("button", { class: "chipbtn", type: "button", onclick: () => ask("Rename", p.name.startsWith("Player ") ? "" : p.name,
+                                                                         (t) => act({ op: "name", seat, name: t })) }, "Rename"),
+       el("button", { class: "chipbtn", type: "button", onclick: () => act({ op: "color", seat }) }, "Colour"),
+       el("button", { class: "chipbtn go", type: "button", onclick: closeSheet }, "Done")),
+    el("div", { class: "lifebig" }, p.life),
+    el("div", { class: "steps" }, [-5, -1, 1, 5].map((d) => stepBtn(fmt(d), () => act({ op: "life", seat, d })))),
+    el("h4", {}, "Counters"),
+    el("div", { class: "rows" }, s.counters.map(([key, label]) =>
+      el("div", { class: "row" }, el("span", { class: "label" }, label),
+         stepper(p.counters[key], () => act({ op: "counter", seat, key, d: -1 }), () => act({ op: "counter", seat, key, d: 1 }),
+                 key === "poison" && p.counters[key] >= 10)))),
+    el("h4", {}, "Commander damage taken"),
+    el("div", { class: "rows" }, s.players.map((src) =>
+      el("div", { class: "row" },
+         el("span", { class: "stile", style: cardBg(src, "rgba(0,0,0,.1), rgba(0,0,0,.1)") }),
+         el("span", { class: "label" }, src.name, src.seat === seat ? el("small", {}, " (own)") : null),
+         stepper(p.cmd[src.seat], () => act({ op: "cmd", seat, src: src.seat, d: -1 }),
+                 () => act({ op: "cmd", seat, src: src.seat, d: 1 }), p.cmd[src.seat] >= 21)))),
+  ];
 }
 
-function picker() {
-  return [el("h2", {}, "Which seat are you?"),
-          el("div", { class: "seats" }, state.players.map((p) =>
-            el("button", { class: "seat", type: "button", style: cardBg(p, "rgba(0,0,0,.25), rgba(0,0,0,.6)"),
-                           onclick: () => { setMe(p.seat); render(); } }, el("b", {}, p.name), el("span", {}, p.life)))),
-          el("p", { class: "muted" }, "You can still change anyone's life from the Table tab.")];
-}
-
-function table() {
-  return [el("div", { class: "tgrid" }, state.players.map((p) =>
-    el("div", { class: "tcard" + (p.ko ? " dead" : ""), style: cardBg(p, "rgba(0,0,0,.45), rgba(0,0,0,.3) 50%, rgba(0,0,0,.65)") },
-      el("button", { class: "tname", type: "button", onclick: () => { viewing = p.seat; render(); scrollTo(0, 0); } },
-         p.name, p.seat === me ? el("small", {}, " • you") : null),
-      deltaPill(p.seat),
-      el("div", { class: "tlife" }, p.life),
-      el("div", { class: "tbtn" }, rep("−", () => act({ op: "life", seat: p.seat, d: -1 })),
-                                   rep("+", () => act({ op: "life", seat: p.seat, d: 1 })))))),
-    el("p", { class: "muted" }, "Tap a name for counters and commander damage. Hold −/+ to repeat.")];
+function seatSheet() {
+  return [
+    el("div", { class: "shead" }, el("h3", {}, "Which seat are you?"),
+       el("button", { class: "chipbtn go", type: "button", onclick: closeSheet }, "Done")),
+    el("div", { class: "seatpick" }, state.players.map((p) =>
+      el("button", { type: "button", class: p.seat === me ? "on" : "", style: cardBg(p, "rgba(0,0,0,.3), rgba(0,0,0,.5)"),
+                     onclick: () => { setMe(p.seat); closeSheet(); } }, p.name)),
+      el("button", { type: "button", class: me < 0 ? "on" : "", onclick: () => { setMe(-1); closeSheet(); } }, "Just watching")),
+    el("p", { class: "muted" }, "Your seat gets a yellow outline. Everyone can still adjust any player."),
+  ];
 }
 
 function confirmBtn(id, label, cls, fn) {
   const armed = confirmAt === id;
   return el("button", { class: "big " + cls, type: "button", onclick: () => {
-    if (armed) { confirmAt = ""; fn(); } else { confirmAt = id; setTimeout(() => { if (confirmAt === id) { confirmAt = ""; render(); } }, 3000); }
-    render();
+    if (armed) { confirmAt = ""; fn(); closeSheet(); return; }
+    confirmAt = id; setTimeout(() => { if (confirmAt === id) { confirmAt = ""; render(); } }, 3000); render();
   } }, armed ? "Tap again to confirm" : label);
 }
 
-function game() {
+function gameSheet() {
   const s = state;
   if (ng.n === null) { ng.n = s.players.length; ng.life = s.start_life; }
   const lifeOpts = [20, 30, 40];
   return [
-    el("h2", {}, "New game"),
-    el("div", { class: "muted" }, "Players"),
+    el("div", { class: "shead" }, el("h3", {}, "Game"),
+       el("button", { class: "chipbtn go", type: "button", onclick: closeSheet }, "Done")),
+    el("h4", {}, "Players"),
     el("div", { class: "chips six" }, [1, 2, 3, 4, 5, 6].map((n) =>
       el("button", { type: "button", class: ng.n === n ? "on" : "", onclick: () => { ng.n = n; render(); } }, n))),
-    el("div", { class: "muted", style: { marginTop: "14px" } }, "Starting life"),
+    el("h4", {}, "Starting life"),
     el("div", { class: "chips" }, lifeOpts.map((l) =>
       el("button", { type: "button", class: ng.life === l ? "on" : "", onclick: () => { ng.life = l; render(); } }, l)),
       el("input", { type: "number", inputmode: "numeric", min: "1", max: "9999", placeholder: "Other",
@@ -2096,31 +2152,34 @@ function game() {
                     onchange: (e) => { const v = parseInt(e.target.value, 10); if (v > 0) ng.life = Math.min(9999, v); render(); } })),
     confirmBtn("new", `Start ${ng.n}-player game at ${ng.life}`, "go", () => act({ op: "newgame", n: ng.n, life: ng.life })),
     confirmBtn("reset", "Reset this game", "danger", () => act({ op: "reset" })),
-    el("h2", {}, "Rules"),
+    el("h4", {}, "Rules"),
     el("div", { class: "rows" }, el("button", { type: "button", class: "row switch" + (s.cmd_hits_life ? " on" : ""),
-        style: { width: "100%", background: "none", border: "0", textAlign: "left" },
         onclick: () => act({ op: "cmd_hits_life", on: !s.cmd_hits_life }) },
       el("span", { class: "label" }, "Commander damage also reduces life"), el("i"))),
-    el("h2", {}, "Big screen"),
-    el("p", { class: "muted" }, "Open the TV view on a TV browser, cast this tab, or mirror your phone to a Roku: "),
-    el("a", { class: "link", href: "/tv?k=" + encodeURIComponent(KEY), target: "_blank" }, "Open TV view"),
+    el("h4", {}, "Big screen"),
+    el("p", { class: "muted" }, "Open the TV view on a TV browser, cast this tab, or mirror this phone to a Roku. ",
+       el("a", { href: "/tv?k=" + encodeURIComponent(KEY), target: "_blank" }, "Open TV view")),
   ];
 }
 
+// ------------------------------------------------------------------ render
 function render() {
-  for (const b of document.querySelectorAll("nav button")) b.classList.toggle("on", b.dataset.tab === tab);
-  const view = document.getElementById("view");
   if (!state) return;
   followMe(state);
-  document.getElementById("who").textContent = me >= 0 ? "You: " + state.players[me].name : "";
-  let kids;
-  if (tab === "table") kids = viewing >= 0 && viewing < state.players.length ? detail(viewing, false) : table();
-  else if (tab === "game") kids = game();
-  else kids = me >= 0 && me < state.players.length ? detail(me, true) : picker();
-  view.replaceChildren(...kids);
+  document.getElementById("seatbtn").textContent = me >= 0 && state.players[me] ? "You: " + state.players[me].name : "Pick your seat";
+  document.getElementById("table").replaceChildren(...state.players.map(panel));
+  const sh = document.getElementById("sheet"), box = document.getElementById("box");
+  if (sheet && sheet.kind === "player" && !state.players[sheet.seat]) sheet = null;
+  sh.hidden = !sheet;
+  if (sheet) {
+    const top = box.scrollTop;
+    box.replaceChildren(el("div", { class: "grab" }),
+      ...(sheet.kind === "player" ? playerSheet(sheet.seat) : sheet.kind === "seat" ? seatSheet() : gameSheet()));
+    box.scrollTop = top;                 // live updates must not jump the sheet back to the top
+  }
 }
-for (const b of document.querySelectorAll("nav button"))
-  b.onclick = () => { tab = b.dataset.tab; viewing = -1; store.set("lifepi-tab", tab); render(); scrollTo(0, 0); };
+document.getElementById("seatbtn").onclick = () => openSheet({ kind: "seat" });
+document.getElementById("gamebtn").onclick = () => { ng.n = null; openSheet({ kind: "game" }); };
 
 onState = render;
 onStatus = (what, code) => {
@@ -2136,7 +2195,6 @@ onStatus = (what, code) => {
 document.querySelector("#pin form").onsubmit = (e) => {
   e.preventDefault(); const v = e.target.querySelector("input").value; if (v.trim()) setKey(v);
 };
-render();
 start();
 </script>
 </body></html>
@@ -2148,36 +2206,35 @@ TV_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LifePi - TV</title>
 <style>
-  :root { --cols:2; --rows:2; --gap:1.2vmin; }
+  :root { --gap:.6vmin; }
   * { box-sizing:border-box; }
   html, body { margin:0; height:100%; background:#0d0d12; color:#fff; overflow:hidden; cursor:none;
                font-family:system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
-  #grid { position:fixed; inset:0; padding:var(--gap); display:grid; gap:var(--gap);
-          grid-template-columns:repeat(var(--cols), 1fr); grid-template-rows:repeat(var(--rows), 1fr); }
-  .card { --ch:calc((100vh - var(--gap) * (var(--rows) + 1)) / var(--rows));
-          --cw:calc((100vw - var(--gap) * (var(--cols) + 1)) / var(--cols));
-          position:relative; border-radius:2.2vmin; overflow:hidden; background-size:cover; background-position:center;
-          display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;
-          box-shadow:0 1vmin 3vmin rgba(0,0,0,.45); }
+  #grid { position:fixed; inset:var(--gap); }
+  body.hinted #grid { bottom:calc(var(--gap) + max(26px, 4.4vmin)); }   /* room for the join hint */
+  .cell { position:absolute; padding:var(--gap); container-type:size; }
+  .card { position:relative; width:100%; height:100%; border-radius:2.2vmin; overflow:hidden; background-size:cover;
+          background-position:center; display:flex; flex-direction:column; align-items:center; justify-content:center;
+          text-align:center; box-shadow:0 1vmin 3vmin rgba(0,0,0,.45); }
   .card.dead { filter:saturate(.3) brightness(.55); }
   .name { position:absolute; top:5%; left:6%; right:6%; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-          font-size:min(calc(var(--ch) * .1), calc(var(--cw) * .07)); text-shadow:0 .3vmin 1vmin rgba(0,0,0,.7); }
+          font-size:4vmin; font-size:min(10cqh, 7cqw); text-shadow:0 .3vmin 1vmin rgba(0,0,0,.7); }
   .life { font-weight:800; line-height:1; font-variant-numeric:tabular-nums; letter-spacing:-.02em;
-          font-size:min(calc(var(--ch) * .44), calc(var(--cw) * .33)); text-shadow:0 .6vmin 2vmin rgba(0,0,0,.6); }
+          font-size:18vmin; font-size:min(44cqh, 33cqw); text-shadow:0 .6vmin 2vmin rgba(0,0,0,.6); }
   .delta { position:absolute; top:20%; padding:.2em .7em; border-radius:999px; font-weight:800; background:#32a050;
-           font-size:min(calc(var(--ch) * .08), calc(var(--cw) * .06)); }
+           font-size:3vmin; font-size:min(8cqh, 6cqw); }
   .delta.neg { background:#c23b3b; }
   .ko { margin-top:2%; padding:.15em .8em; border-radius:999px; background:#c23b3b; font-weight:800;
-        font-size:min(calc(var(--ch) * .07), calc(var(--cw) * .05)); }
+        font-size:2.6vmin; font-size:min(7cqh, 5cqw); }
   .bottom { position:absolute; bottom:5%; left:4%; right:4%; display:flex; flex-wrap:wrap; justify-content:center;
-            align-items:center; gap:min(calc(var(--ch) * .025), 1.2vmin); }
-  .pill { padding:.2em .7em; border-radius:999px; font-weight:700; font-size:min(calc(var(--ch) * .055), calc(var(--cw) * .04)); }
-  .tile { position:relative; width:min(calc(var(--ch) * .14), calc(var(--cw) * .11)); aspect-ratio:1; border-radius:18%;
+            align-items:center; gap:1vmin; gap:min(2.5cqh, 1.2vmin); }
+  .pill { padding:.2em .7em; border-radius:999px; font-weight:700; font-size:2vmin; font-size:min(5.5cqh, 4cqw); }
+  .tile { position:relative; width:5vmin; width:min(14cqh, 11cqw); aspect-ratio:1; border-radius:18%;
           background-size:cover; background-position:center; border:.35vmin solid rgba(255,255,255,.45);
           display:flex; align-items:center; justify-content:center; font-weight:800;
-          font-size:min(calc(var(--ch) * .075), calc(var(--cw) * .06)); text-shadow:0 .2vmin .8vmin #000; }
+          font-size:2.6vmin; font-size:min(7.5cqh, 6cqw); text-shadow:0 .2vmin .8vmin #000; }
   .tile.lethal { border-color:#ff4a4a; color:#ff8a8a; }
-  .credit { position:absolute; bottom:1.2%; left:0; right:0; font-size:max(9px, calc(var(--ch) * .026)); color:rgba(255,255,255,.55); }
+  .credit { position:absolute; bottom:1.2%; left:0; right:0; font-size:max(9px, 1.2vmin); font-size:max(9px, 2.6cqh); color:rgba(255,255,255,.55); }
   #hint { position:fixed; left:50%; bottom:1.2vmin; transform:translateX(-50%); padding:.5vmin 1.6vmin; border-radius:999px;
           background:rgba(13,13,18,.82); color:#c8c9d6; font-size:max(12px, 1.7vmin); max-width:94vw; text-align:center; }
   @media (max-aspect-ratio: 1/1), (max-height: 520px) { .credit { display:none; } }
@@ -2193,16 +2250,9 @@ TV_HTML = r"""<!doctype html>
 /*CLIENT*/
 const CHIP = { poison: "#2f8a4a", tax: "#97702a", energy: "#ae8716", exp: "#5459ad" };
 const SHORT = { poison: "Poison", tax: "Tax", energy: "Energy", exp: "Exp" };
-function layout(n) {
-  let [c, r] = [[1, 1], [2, 1], [3, 1], [2, 2], [3, 2], [3, 2]][n - 1];
-  if (innerHeight > innerWidth * 1.1) [c, r] = n <= 2 ? [1, n] : n <= 4 ? [2, 2] : [2, 3];
-  document.documentElement.style.setProperty("--cols", c);
-  document.documentElement.style.setProperty("--rows", r);
-}
 function render() {
   if (!state) return;
   const s = state;
-  layout(s.players.length);
   document.getElementById("grid").replaceChildren(...s.players.map((p) => {
     const d = deltaOf(p.seat);
     const bottom = [];
@@ -2215,17 +2265,20 @@ function render() {
     for (const [key] of s.counters)
       if (p.counters[key]) bottom.push(el("span", { class: "pill", style: { background: CHIP[key] || "#444" } },
                                           `${SHORT[key] || key} ${p.counters[key]}`));
-    return el("div", { class: "card" + (p.ko ? " dead" : ""),
-                       style: cardBg(p, "rgba(0,0,0,.62), rgba(0,0,0,.38) 45%, rgba(0,0,0,.72)") },
+    const [x, y, w, h] = p.pos;          // same place as on the device
+    return el("div", { class: "cell", style: { left: x * 100 + "%", top: y * 100 + "%", width: w * 100 + "%", height: h * 100 + "%" } },
+      el("div", { class: "card" + (p.ko ? " dead" : ""),
+                  style: cardBg(p, "rgba(0,0,0,.62), rgba(0,0,0,.38) 45%, rgba(0,0,0,.72)") },
       el("div", { class: "name" }, p.name),
       d ? el("div", { class: "delta" + (d < 0 ? " neg" : "") }, fmt(d)) : null,
       el("div", { class: "life" }, p.life),
       p.ko ? el("div", { class: "ko" }, p.ko === "life" ? "KO" : "KO · " + p.ko) : null,
       el("div", { class: "bottom" }, bottom),
-      p.credit ? el("div", { class: "credit" }, p.credit) : null);
+      p.credit ? el("div", { class: "credit" }, p.credit) : null));
   }));
   const hint = document.getElementById("hint");
   hint.hidden = !s.join || qs.get("hint") === "0";
+  document.body.classList.toggle("hinted", !hint.hidden);
   hint.textContent = "Control LifePi from your phone: " + s.join + "  (PIN on the LifePi screen)";
 }
 onState = render;
