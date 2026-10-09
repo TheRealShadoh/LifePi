@@ -163,6 +163,73 @@ assert app.players[2]["cmd"][0] == 5 and app.players[0]["cmd"][2] == 7   # damag
 tap((200, 220)); assert app.modals and app.modals[-1]["kind"] == "player" and app.modals[-1]["idx"] == 0
 app.modals.clear()
 print("seat drag ok")
+
+# --- seating styles: table ===, ends -=-, round, upright; 1-8 players -----------------
+import math
+def seat_point(seat, fx, fy):
+    """Canvas point at fraction (fx, fy) of a seat's upright frame (0.5, 0.5 = centre)."""
+    cx, cy, cw, ch = seat.frame
+    (rx, ry), (dx, dy) = lifepi.frame_axes(seat.angle)
+    lx, ly = (fx - 0.5) * cw, (fy - 0.5) * ch
+    return (round(cx + lx * rx + ly * dx), round(cy + lx * ry + ly * dy))
+
+W, H = app.W, app.H
+for seating in lifepi.SEATINGS:
+    for n in range(1, lifepi.MAX_PLAYERS + 1):
+        app.modals.clear(); app.settings["seating"] = seating; app.start_game(n, 40); app.render()
+        seats = app.seats
+        assert len(seats) == n, (seating, n)
+        # every screen point belongs to exactly one seat (no holes, no overlaps)
+        for gx in range(7, W, 37):
+            for gy in range(5, H, 31):
+                owners = [k for k, s in enumerate(seats) if s.contains((gx + 0.37, gy + 0.41))]
+                assert len(owners) == 1, (seating, n, (gx, gy), owners)
+        # clockwise around the table (angles of seat centres keep increasing)
+        if n >= 3:
+            ang = [math.degrees(math.atan2(s.frame[1] - H / 2, s.frame[0] - W / 2)) % 360 for s in seats]
+            steps = [(b - a) % 360 for a, b in zip(ang, ang[1:] + ang[:1])]
+            assert all(0 < st < 180 for st in steps) and abs(sum(steps) - 360) < 1e-6, (seating, n, ang)
+        # a tap on a player's own -/+ half (in their reading direction) changes their life
+        for k, s in enumerate(seats):
+            for fx, d in ((0.25, -1), (0.75, 1)):
+                pos = seat_point(s, fx, 0.5)
+                if app.menu_pos(max(22, min(W, H) // 22)) and math.dist(pos, app.menu_pos(max(22, min(W, H) // 22))) < 60:
+                    pos = seat_point(s, 0.15 if d < 0 else 0.85, 0.42)   # step around the menu button
+                before = [p["life"] for p in app.players]
+                tap(pos)
+                after = [p["life"] for p in app.players]
+                assert after[k] == before[k] + d and sum(after) == sum(before) + d, (seating, n, k, d, pos)
+        # the name strip opens the sheet facing that player (end seats: 90 / 270)
+        for k, s in enumerate(seats):
+            tap(seat_point(s, 0.5, 0.06))
+            m = app.modals[-1] if app.modals else None
+            assert m and m["kind"] == "player" and m["idx"] == k, (seating, n, k)
+            assert m["angle"] == round(s.angle / 90) * 90 % 360
+            app.modals.clear(); app.render()
+print("seating layouts: coverage, clockwise order, rotated taps ok")
+
+# a sheet opened at a table end is laid out portrait and its buttons still hit
+app.settings["seating"] = "ends"; app.start_game(6, 40); app.render()
+end = next(k for k, s in enumerate(app.seats) if s.angle == 270)
+app.push("player", idx=end, angle=270); app.render()
+pygame.image.save(app.canvas, os.path.join(shots, "sheet_end_seat.png"))
+v = lifepi.View(app, (0, 0, W, H), 270); assert (v.w, v.h) == (H, W)
+plus = [z for z in app.zones if z[2]]
+assert len(plus) == 2 * (4 + 6)                  # 4 counters + damage from 6 seats
+poison0 = app.players[end]["counters"]["poison"]
+# press the first "+" on the rotated sheet: find its canvas point by scanning the zone
+hit = next((x, y) for x in range(0, W, 4) for y in range(0, H, 4) if plus[1][0]((x, y)))
+app.pointer_down("t", hit); app.pointer_up("t", hit)
+assert app.players[end]["counters"]["poison"] == poison0 + 1
+app.modals.clear()
+# 8 players: commander damage from the 8th seat, saved and restored with the seating style
+app.settings["seating"] = "round"; app.start_game(8, 40)
+app.change_cmd(0, 7, 4); assert app.players[0]["cmd"][7] == 4 and len(app.players[0]["cmd"]) == 8
+app.render(); pygame.image.save(app.canvas, os.path.join(shots, "round_8.png"))
+app.save_state(); r8 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
+assert len(r8.players) == 8 and r8.players[0]["cmd"][7] == 4 and r8.settings["seating"] == "round"
+app.settings["seating"] = "table"; app.start_game(4, 40); app.render()
+print("8 players / rotated sheets ok")
 for n in range(1, 7):
     app.start_game(n, 40); app.render()
 app.save_state(); app2 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
@@ -210,7 +277,7 @@ d["players"][0].update(life="x", cmd=[1, "y"], counters={"poison": None})
 d["players"][1]["life"] = 17; d["settings"]["rotation"] = 45
 lifepi.STATE_FILE.write_text(json.dumps(d))
 b = fresh()
-assert b.players[1]["life"] == 17 and b.players[0]["cmd"] == [1, 0, 0, 0, 0, 0]
+assert b.players[1]["life"] == 17 and b.players[0]["cmd"] == [1] + [0] * (lifepi.MAX_PLAYERS - 1)
 assert b.players[0]["counters"]["poison"] == 0 and b.settings["rotation"] == 0
 # hand-edited on Windows: a UTF-8 BOM must not make the save "unreadable"
 lifepi.STATE_FILE.write_bytes(b"\xef\xbb\xbf" + json.dumps(d).encode())

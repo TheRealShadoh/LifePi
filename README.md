@@ -12,7 +12,11 @@ life counter — released under the MIT licence so anyone can use, fork and impr
 
 ## Features
 
-- 1–6 players; **table seating** (far row flipped 180° so everyone reads their own panel) or **upright** seating for a monitor on a stand
+- 1–8 players, four seating styles (menu > Seating, or pick one in New game):
+  - **Table `===`** – players along both long sides, the far row flipped 180° so everyone reads their own panel
+  - **Ends `-=-`** – one player at each short end of the table (panels turned 90° to face them), the rest along the sides
+  - **Round** – a slice per player from the centre, each turned to face its player, for a round table
+  - **Upright** – everything upright, for a monitor on a stand
 - Tap **−/+** for 1, **hold** for 10; running delta ("−7") while you tap; true multi-touch, so two players can tap at once
 - Poison, commander tax, energy, experience; **commander damage per commander, your own included** - each source shows on your panel as a mini tile of that player's art (or colour) with the amount (optionally also subtracts life); automatic KO dimming at 0 life / 10 poison / 21 commander damage
 - **Images:** search any card on Scryfall with the on-screen keyboard - card names are suggested as you type - and use its art as your background, or drop your own PNG/JPGs in `~/.local/share/lifepi/images`. Searches, suggestions and art are cached on disk, so repeat searches cost no API calls and work offline
@@ -117,4 +121,4 @@ LifePi is not affiliated with Scryfall or with any other life-counter app.
 
 ## Roadmap / good first issues
 
-Turn timer · Planechase/Archenemy decks (Scryfall `t:plane` / `t:scheme`) · partner commanders (two damage tracks) · life history log · side-seat (90°) layouts for 5–6 players · monarch/initiative markers.
+Turn timer · Planechase/Archenemy decks (Scryfall `t:plane` / `t:scheme`) · partner commanders (two damage tracks) · life history log · monarch/initiative markers.

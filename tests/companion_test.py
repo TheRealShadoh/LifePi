@@ -49,10 +49,32 @@ print("auth / state ok")
 
 # phones and the TV place every seat exactly where the device draws it
 def device_rects(a):
-    return [(r.x / a.W, r.y / a.H, r.w / a.W, r.h / a.H) for r, _ in lifepi.layout(len(a.players), a.W, a.H, a.settings["seating"])]
+    return [(s.box.x / a.W, s.box.y / a.H, s.box.w / a.W, s.box.h / a.H)
+            for s in lifepi.layout(len(a.players), a.W, a.H, a.settings["seating"])]
 def published(a):
     return [tuple(p["pos"]) for p in json.loads(comp.snap)["players"]]
 def close(xs, ys): return all(abs(a - b) < 1e-3 for x, y in zip(xs, ys) for a, b in zip(x, y))
+for seating in lifepi.SEATINGS:
+    act(op="seating", value=seating); assert app.settings["seating"] == seating
+    for n in range(1, lifepi.MAX_PLAYERS + 1):
+        app.start_game(n, 40); app.tick_remote()
+        assert close(published(app), device_rects(app)), (seating, n)
+        snap = json.loads(comp.snap)
+        assert snap["seating"] == seating and snap["max_players"] == 8
+        for p in snap["players"]:
+            if seating == "round" and n >= 3:     # wedge outline; the upright box sits inside it
+                assert p["poly"] and len(p["poly"]) >= 3
+                x, y, w, h = p["pos"]
+                assert lifepi.point_in_poly((x + w / 2, y + h / 2), [tuple(q) for q in p["poly"]])
+            else:
+                assert p["poly"] is None
+act(op="seating", value="nonsense"); assert app.settings["seating"] == "upright"
+act(op="seating", value="table")
+act(op="newgame", n=8, life=30, seating="ends")
+assert len(app.players) == 8 and app.settings["seating"] == "ends" and len(state()["players"][7]["cmd"]) == 8
+act(op="cmd", seat=0, src=7, d=3); assert app.players[0]["cmd"][7] == 3
+act(op="newgame", n=99, life=40); assert len(app.players) == 8                     # clamped
+act(op="seating", value="table")
 for n in range(1, 7):
     app.start_game(n, 40); app.tick_remote()
     assert close(published(app), device_rects(app)), n

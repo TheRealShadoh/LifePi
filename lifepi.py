@@ -3,7 +3,7 @@
 LifePi - a touch-first Magic: The Gathering life counter that runs natively on
 a Raspberry Pi (or any Linux box) with nothing but Python 3 and pygame/SDL2.
 
-  * 1-6 players, table seating (top row flipped 180 deg) or upright seating
+  * 1-8 players; table (===), ends (-=-), round table or upright seating
   * tap = +/-1, hold = +/-10, running delta indicator
   * poison / commander tax / energy / experience, commander damage per opponent
   * card-art backgrounds from Scryfall (cached on disk) or your own local images
@@ -16,6 +16,7 @@ Unofficial fan content. Not affiliated with Wizards of the Coast, Scryfall or
 any other life counter app.  MIT licensed - see LICENSE.
 """
 import argparse
+import functools
 import hashlib
 import hmac
 import http.server
@@ -32,6 +33,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import math
 from math import ceil
 from pathlib import Path
 
@@ -70,7 +72,9 @@ COUNTERS = [("poison", "Poison", "Poison"), ("tax", "Cmdr tax", "Tax"),
             ("energy", "Energy", "Energy"), ("exp", "Experience", "Exp")]
 CHIP_COLORS = {"poison": (40, 130, 70), "tax": (150, 110, 40), "energy": (175, 135, 20),
                "exp": (80, 85, 175), "cmd": (165, 45, 45)}
-ROWS = {1: [1], 2: [1, 1], 3: [2, 1], 4: [2, 2], 5: [3, 2], 6: [3, 3]}
+MAX_PLAYERS = 8
+ROWS = {1: [1], 2: [1, 1], 3: [2, 1], 4: [2, 2], 5: [3, 2], 6: [3, 3], 7: [4, 3], 8: [4, 4]}
+SEATINGS = {"table": "Table  ===", "ends": "Ends  -=-", "round": "Round", "upright": "Upright"}
 HOLD_DELAY = 0.45
 
 
@@ -145,11 +149,57 @@ def unrotate(px, py, disp_w, disp_h, rot):
 def new_player(i, life):
     return {"name": f"Player {i + 1}", "life": life, "color": i % len(PALETTE),
             "art": None, "credit": "",
-            "counters": {k: 0 for k, _, _ in COUNTERS}, "cmd": [0] * 6}
+            "counters": {k: 0 for k, _, _ in COUNTERS}, "cmd": [0] * MAX_PLAYERS}
 
 
-def layout(n, w, h, seating):
-    """Return [(rect, angle)] in clockwise seat order."""
+def point_in_poly(pt, poly):
+    x, y = pt
+    inside = False
+    for (x1, y1), (x2, y2) in zip(poly, poly[1:] + poly[:1]):
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+    return inside
+
+
+def frame_axes(angle):
+    """Screen directions of a frame's local right and down, for content rotated
+    counter-clockwise by angle degrees (pygame.transform.rotate convention)."""
+    a = math.radians(angle)
+    return (math.cos(a), -math.sin(a)), (math.sin(a), math.cos(a))
+
+
+class Seat:
+    """Where one player sits: an outline on the canvas (rect or wedge polygon) and an upright
+    frame - centre, size, reading angle - that the panel's content is drawn in and rotated by.
+    angle is counter-clockwise degrees: 0 = reader at the bottom edge, 180 = top, 90 = right
+    edge, 270 = left edge; anything else for a round table."""
+
+    def __init__(self, rect=None, angle=0, poly=None, frame=None, box=None):
+        self.angle = angle % 360
+        if rect is not None:
+            self.rect = pygame.Rect(rect)
+            r = self.rect
+            self.poly = [(r.left, r.top), (r.right, r.top), (r.right, r.bottom), (r.left, r.bottom)]
+            cw, ch = (r.h, r.w) if self.angle in (90, 270) else (r.w, r.h)
+            self.frame = (r.x + r.w / 2, r.y + r.h / 2, cw, ch)
+            self.box = r                          # upright box for phones / TV
+        else:
+            self.poly = poly
+            xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+            self.rect = pygame.Rect(math.floor(min(xs)), math.floor(min(ys)),
+                                    math.ceil(max(xs) - min(xs)), math.ceil(max(ys) - min(ys)))
+            self.frame, self.box = frame, box
+        self.is_rect = rect is not None
+
+    def __iter__(self):                           # old (rect, angle) unpacking still works
+        return iter((self.rect, self.angle))
+
+    def contains(self, pos):
+        return self.rect.collidepoint(pos) if self.is_rect else point_in_poly(pos, self.poly)
+
+
+def rows_layout(n, w, h, flip):
+    """=== : rows along the long sides; the far row faces the other way when flip."""
     rows = ROWS[n]
     rh = h / len(rows)
     out = []
@@ -158,12 +208,111 @@ def layout(n, w, h, seating):
         cells = []
         for ci in range(cnt):
             x0, x1 = round(ci * w / cnt), round((ci + 1) * w / cnt)
-            flipped = seating == "table" and len(rows) > 1 and ri == 0
-            cells.append((pygame.Rect(x0, y0, x1 - x0, y1 - y0), 180 if flipped else 0))
+            flipped = flip and len(rows) > 1 and ri == 0
+            cells.append(Seat(pygame.Rect(x0, y0, x1 - x0, y1 - y0), 180 if flipped else 0))
         if ri == 1:
             cells.reverse()          # clockwise: top L->R, then bottom R->L
         out += cells
     return out
+
+
+def ends_layout(n, w, h):
+    """-=- : a player at each end of the table (one for 3 players), the rest along the sides.
+    End seats face the short edges, so their content is turned 90 degrees."""
+    ends = 2 if n >= 4 else 1
+    top = (n - ends + 1) // 2
+    bot = n - ends - top
+    e = round(min(h / 2, w / (max(top, bot) + 2)))
+    x0, mid = e, w - e * ends
+    half = round(h / 2)
+
+    def row(cnt, y, hh, angle):
+        return [Seat(pygame.Rect(x0 + round(c * mid / cnt), y, round((c + 1) * mid / cnt) - round(c * mid / cnt), hh),
+                     angle) for c in range(cnt)]
+    out = row(top, 0, half, 180)                  # clockwise: far side L->R,
+    if ends == 2:
+        out.append(Seat(pygame.Rect(w - e, 0, e, h), 90))       # right end,
+    out += row(bot, half, h - half, 0)[::-1]                    # near side R->L,
+    out.append(Seat(pygame.Rect(0, 0, e, h), 270))              # left end
+    return out
+
+
+def fit_box(poly, centre, out_dir, angle, depth, aspects=(1.7, 1.4, 1.15, 0.95)):
+    """Largest box (rotated by angle) inside poly, centred somewhere on the ray from centre
+    along out_dir. Returns (cx, cy, w, h). Used for round-table wedges."""
+    right, down = frame_axes(angle)
+    best = (0, centre[0] + out_dir[0] * depth * 0.6, centre[1] + out_dir[1] * depth * 0.6, 10, 10)
+    for hf in [x / 20 for x in range(16, 5, -1)]:
+        bh = depth * hf
+        for asp in aspects:
+            bw = bh * asp
+            if bw * bh <= best[0]:
+                continue
+            for df in [x / 20 for x in range(19, 4, -1)]:
+                d = depth * df
+                cx, cy = centre[0] + out_dir[0] * d, centre[1] + out_dir[1] * d
+                # the panel's corners are empty, so they may overhang a little; its edge
+                # middles (name, counters, -/+ hints) must be inside
+                probes = [(sx * 0.8, sy * 0.8) for sx in (-1, 1) for sy in (-1, 1)] + \
+                         [(0, -1), (0, 1), (-0.92, 0), (0.92, 0)] + \
+                         [(sx * fx, sy) for sx in (-1, 1) for sy in (-1, 1) for fx in (0.45, 0.72)]
+                pts = [(cx + px * bw / 2 * right[0] + py * bh / 2 * down[0],
+                        cy + px * bw / 2 * right[1] + py * bh / 2 * down[1]) for px, py in probes]
+                if all(point_in_poly(c, poly) for c in pts):
+                    best = (bw * bh, cx, cy, bw, bh)
+                    break
+    _, cx, cy, bw, bh = best
+    return cx, cy, bw, bh
+
+
+def round_layout(n, w, h):
+    """Round table: equal wedges from the centre (equal area: wedges are cut in a unit square,
+    then stretched to the screen), each player's text facing their edge of the screen."""
+    cx, cy = w / 2, h / 2
+    step = 360 / n
+
+    def edge(t):                                  # unit-square boundary point at angle t
+        c, s = math.cos(math.radians(t)), math.sin(math.radians(t))
+        m = max(abs(c), abs(s))
+        return c / m, s / m
+
+    def screen(u, v):
+        return (cx + u * w / 2, cy + v * h / 2)
+
+    # turn the wedges so their edges land on the screen corners where possible: 4 players
+    # get one wedge per edge, 6 get two per long side and one per end
+    offset = step / 2 if n == 8 else 0
+    out = []
+    for k in range(n):
+        a0 = 180 - step / 2 + offset + k * step   # seat 0 on the left, then clockwise
+        a1 = a0 + step
+        pts = [edge(a0)]                          # in angle order (no sort: float wobble)
+        for c in sorted(corner + 360 * m for corner in (45, 135, 225, 315) for m in (-1, 0, 1, 2)):
+            if a0 + 1e-6 < c < a1 - 1e-6:
+                pts.append(edge(c))
+        pts.append(edge(a1))
+        poly = [(cx, cy)] + [screen(*p) for p in pts]
+        mid = edge(a0 + step / 2)
+        ex, ey = screen(*mid)
+        depth = math.hypot(ex - cx, ey - cy)
+        out_dir = ((ex - cx) / depth, (ey - cy) / depth)
+        theta = math.degrees(math.atan2(out_dir[1], out_dir[0]))
+        angle = (90 - theta) % 360                # content "down" points at the player
+        frame = fit_box(poly, (cx, cy), out_dir, angle, depth)
+        bx, by, bw, bh = fit_box(poly, (cx, cy), out_dir, 0, depth, aspects=(1.3, 1.0, 0.8, 0.6))
+        box = pygame.Rect(round(bx - bw / 2), round(by - bh / 2), round(bw), round(bh))
+        out.append(Seat(angle=angle, poly=poly, frame=frame, box=box))
+    return out
+
+
+@functools.lru_cache(maxsize=32)
+def layout(n, w, h, seating):
+    """Seats in clockwise order for a seating style (see SEATINGS)."""
+    if seating == "round" and n >= 3:
+        return tuple(round_layout(n, w, h))
+    if seating == "ends" and n >= 3:
+        return tuple(ends_layout(n, w, h))
+    return tuple(rows_layout(n, w, h, flip=seating != "upright"))
 
 
 def lan_ip():
@@ -366,24 +515,43 @@ def make_handler(comp):
 
 
 class View:
-    """An off-screen surface drawn upright, then placed on the canvas at 0/180 deg.
-    Touch zones registered through it are transformed to canvas coordinates."""
+    """An off-screen surface drawn upright in a seat's frame, then rotated onto the canvas.
+    Touch zones are given in the upright frame; touches are mapped back into it, so any
+    angle works (flipped far row, table ends at 90/270, round-table wedges)."""
 
-    def __init__(self, app, rect, angle=0):
-        self.app, self.rect, self.angle = app, pygame.Rect(rect), angle
-        self.surf = pygame.Surface(self.rect.size)
-        self.w, self.h = self.rect.size
+    def __init__(self, app, seat, angle=0, inset=0, alpha=False):
+        if not isinstance(seat, Seat):
+            seat = Seat(pygame.Rect(seat), angle)
+        cx, cy, cw, ch = seat.frame
+        self.app, self.seat, self.angle = app, seat, seat.angle
+        self.cx, self.cy = cx, cy
+        self.w, self.h = max(1, int(cw - 2 * inset)), max(1, int(ch - 2 * inset))
+        self.surf = pygame.Surface((self.w, self.h), pygame.SRCALPHA if alpha else 0)
+
+    def to_local(self, pos):
+        """Canvas point -> upright frame coordinates (may fall outside the frame)."""
+        (rx, ry), (dx, dy) = frame_axes(self.angle)
+        px, py = pos[0] - self.cx, pos[1] - self.cy
+        return px * rx + py * ry + self.w / 2, px * dx + py * dy + self.h / 2
 
     def zone(self, r, tap=None, hold=None, repeat=0.15, drag=None):
         r = pygame.Rect(r)
-        if self.angle == 180:
-            r = pygame.Rect(self.w - r.right, self.h - r.bottom, r.w, r.h)
-        r.move_ip(self.rect.topleft)
-        self.app.zones.append((r, tap, hold, repeat, drag))
+        seat = self.seat
+
+        def hit(pos):
+            if not seat.contains(pos):
+                return False
+            x, y = self.to_local(pos)
+            return r.collidepoint(math.floor(x), math.floor(y))
+        self.app.zones.append((hit, tap, hold, repeat, drag))
 
     def finish(self):
-        s = self.surf if self.angle == 0 else pygame.transform.flip(self.surf, True, True)
-        self.app.canvas.blit(s, self.rect.topleft)
+        a = self.angle
+        if a % 90 == 0:
+            s = pygame.transform.rotate(self.surf, a) if a else self.surf
+        else:
+            s = pygame.transform.rotozoom(self.surf, a, 1)     # smooth for round tables
+        self.app.canvas.blit(s, s.get_rect(center=(round(self.cx), round(self.cy))))
 
 
 # --------------------------------------------------------------------------- app
@@ -462,7 +630,7 @@ class App:
         settings = {}
         if as_int(s.get("rotation"), -1) in (0, 90, 180, 270):
             settings["rotation"] = as_int(s["rotation"])
-        if s.get("seating") in ("table", "upright"):
+        if s.get("seating") in SEATINGS:
             settings["seating"] = s["seating"]
         if isinstance(s.get("cmd_hits_life"), bool):
             settings["cmd_hits_life"] = s["cmd_hits_life"]
@@ -477,7 +645,7 @@ class App:
 
         players = []
         raw = data.get("players") or []
-        if 1 <= len(raw) <= 6:
+        if 1 <= len(raw) <= MAX_PLAYERS:
             for i, p in enumerate(raw):
                 b = new_player(i, start)
                 if isinstance(p.get("name"), str) and p["name"].strip():
@@ -490,7 +658,7 @@ class App:
                     b["credit"] = p["credit"]
                 c = p.get("counters") or {}
                 b["counters"] = {k: max(0, as_int(c.get(k))) for k, _, _ in COUNTERS}
-                b["cmd"] = [max(0, as_int(x)) for x in (list(p.get("cmd") or []) + [0] * 6)[:6]]
+                b["cmd"] = [max(0, as_int(x)) for x in (list(p.get("cmd") or []) + [0] * MAX_PLAYERS)[:MAX_PLAYERS]]
                 players.append(b)
 
         profiles = {}
@@ -567,11 +735,16 @@ class App:
 
     def snapshot(self):
         n = len(self.players)
-        # each seat's rectangle on the device screen (fractions of the canvas), so phones and
-        # the TV place players exactly where the device does (clockwise, seating, rotation)
+        # each seat's place on the device screen (fractions of the canvas), so phones and the
+        # TV put players exactly where the device does (clockwise, seating style, rotation):
+        # pos = upright box for the panel, poly = outline (a wedge on a round table)
         W, H = self.W, self.H
-        rects = [[round(r.x / W, 4), round(r.y / H, 4), round(r.w / W, 4), round(r.h / H, 4)]
-                 for r, _ in layout(n, W, H, self.settings["seating"])]
+        seats = layout(n, W, H, self.settings["seating"])
+
+        def frac(x, y):
+            return [round(x / W, 4), round(y / H, 4)]
+        rects = [frac(s.box.x, s.box.y) + frac(s.box.w, s.box.h) for s in seats]
+        polys = [None if s.is_rect else [frac(x, y) for x, y in s.poly] for s in seats]
         out = []
         for i, p in enumerate(self.players):
             art = None
@@ -581,9 +754,10 @@ class App:
                         "color": "#%02x%02x%02x" % PALETTE[p["color"] % len(PALETTE)],
                         "art": art, "credit": p["credit"] if art else "",
                         "counters": dict(p["counters"]), "cmd": p["cmd"][:n], "ko": self.ko_reason(p),
-                        "pos": rects[i]})
+                        "pos": rects[i], "poly": polys[i]})
         return {"players": out, "start_life": self.settings["start_life"],
-                "cmd_hits_life": self.settings["cmd_hits_life"],
+                "cmd_hits_life": self.settings["cmd_hits_life"], "seating": self.settings["seating"],
+                "seatings": [[k, label] for k, label in SEATINGS.items()], "max_players": MAX_PLAYERS,
                 "counters": [[k, label] for k, label, _ in COUNTERS],
                 "join": self.companion_base() if self.companion and self.companion.running else ""}
 
@@ -635,9 +809,13 @@ class App:
         elif op == "color":
             self.recolor_player(seat)
         elif op == "newgame":
-            self.start_game(num("n", 1, 6), num("life", 1, 9999))
+            if a.get("seating") in SEATINGS:
+                self.settings["seating"] = a["seating"]
+            self.start_game(num("n", 1, MAX_PLAYERS), num("life", 1, 9999))
         elif op == "reset":
             self.start_game(n, self.settings["start_life"])
+        elif op == "seating":
+            self.set_seating(a.get("value"))
         elif op == "cmd_hits_life" and isinstance(a.get("on"), bool):
             self.settings["cmd_hits_life"] = a["on"]
             self.changed()
@@ -941,8 +1119,8 @@ class App:
         self.changed()
 
     def seat_at(self, pos):
-        for k, (rect, _) in enumerate(self.seats):
-            if rect.collidepoint(pos):
+        for k, seat in enumerate(self.seats):
+            if seat.contains(pos):
                 return k
         return None
 
@@ -989,16 +1167,44 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------------ player panel
-    def draw_panel(self, i, rect, angle):
+    def wedge_bg(self, p, seat, dead):
+        """Round-table wedge filled with the player's art (darkened) or colour. Cached."""
+        r = seat.rect
+        key = ("wedge", p["art"], p["color"], tuple(seat.poly), dead)
+        if key not in self.img_cache:
+            surf = pygame.Surface(r.size, pygame.SRCALPHA)
+            art = self.cover(p["art"], r.w, r.h) if p["art"] else None
+            if art:
+                surf.blit(art, (0, 0))
+                surf.blit(self.shade(r.w, r.h, 150, 150, 150), (0, 0))
+            else:
+                surf.fill((*PALETTE[p["color"] % len(PALETTE)], 255))
+            if dead:
+                tint = pygame.Surface(r.size, pygame.SRCALPHA)
+                tint.fill((25, 0, 0, 170))
+                surf.blit(tint, (0, 0))
+            mask = pygame.Surface(r.size, pygame.SRCALPHA)
+            pygame.draw.polygon(mask, (255, 255, 255, 255), [(x - r.x, y - r.y) for x, y in seat.poly])
+            surf.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+            self.img_cache[key] = surf
+        return self.img_cache[key]
+
+    def draw_panel(self, i, seat):
         p = self.players[i]
         gap = max(2, min(self.W, self.H) // 160)
-        v = View(self, pygame.Rect(rect).inflate(-2 * gap, -2 * gap), angle)
+        wedge = not seat.is_rect
+        why = self.ko_reason(p)
+        if wedge:
+            self.canvas.blit(self.wedge_bg(p, seat, bool(why)), seat.rect)
+            v = View(self, seat, alpha=True)            # content only, over the wedge
+        else:
+            v = View(self, seat, inset=gap)
         s, w, h = v.surf, v.w, v.h
-        bg = self.cover(p["art"], w, h) if p["art"] else None
+        bg = self.cover(p["art"], w, h) if p["art"] and not wedge else None
         if bg:
             s.blit(bg, (0, 0))
             s.blit(self.shade(w, h, 210, 150, 220), (0, 0))   # darker where the text sits
-        else:
+        elif not wedge:
             s.fill(PALETTE[p["color"] % len(PALETTE)])
             s.blit(self.shade(w, h, 0, 25, 95), (0, 0))
         top, bot = int(h * 0.2), int(h * 0.22)
@@ -1030,62 +1236,69 @@ class App:
             pl = self.make_pill("counters", bot * 0.34, fg=(200, 200, 210), alpha=70,
                                 outline=(255, 255, 255, 50))
             s.blit(pl, pl.get_rect(center=(w // 2, cy)))
-        if bg and p["credit"]:
+        if (bg or (wedge and p["art"])) and p["credit"]:
             self.text(s, p["credit"], max(11, h * 0.05), GREY, maxw=w * 0.9,
                       midbottom=(w // 2, h - 3))
-        why = self.ko_reason(p)
         if why:
-            shade = pygame.Surface((w, h))
-            shade.fill((25, 0, 0))
-            shade.set_alpha(170)
-            s.blit(shade, (0, 0))
+            if not wedge:                               # wedges are tinted in wedge_bg
+                shade = pygame.Surface((w, h))
+                shade.fill((25, 0, 0))
+                shade.set_alpha(170)
+                s.blit(shade, (0, 0))
             pl = self.make_pill("KO" if why == "life" else f"KO - {why}", size * 0.2, bg=BAD, alpha=240)
             s.blit(pl, pl.get_rect(center=(w // 2, h // 2 + int(size * 0.47))))
-        s.blit(self.corners(w, h, max(6, min(w, h) // 14)), (0, 0))
+        if not wedge:
+            s.blit(self.corners(w, h, max(6, min(w, h) // 14)), (0, 0))
 
         mid = h - top - bot
-        v.zone((0, top, w // 2, mid), lambda: self.change_life(i, -1),
+        # -/+ halves: for a wedge they cover the whole slice, split along the player's centre line
+        far = 10 ** 5 if wedge else 0
+        v.zone((-far, top - far, w // 2 + far, mid + 2 * far), lambda: self.change_life(i, -1),
                lambda: self.change_life(i, -10), 0.5)
-        v.zone((w // 2, top, w - w // 2, mid), lambda: self.change_life(i, 1),
+        v.zone((w // 2, top - far, w - w // 2 + far, mid + 2 * far), lambda: self.change_life(i, 1),
                lambda: self.change_life(i, 10), 0.5)
-        opener = lambda: self.push("player", idx=i, angle=angle)
+        sheet_angle = round(seat.angle / 90) * 90 % 360   # sheets open facing that player
+        opener = lambda: self.push("player", idx=i, angle=sheet_angle)
         v.zone((0, 0, w, top), opener, drag=i)       # hold + drag the name to swap seats
         v.zone((0, h - bot, w, bot), opener)
         v.finish()
 
     # ------------------------------------------------------------------ modals
     def modal_view(self, m, title, accent=HEADER):
+        """Full-screen modal facing m["angle"] (0/90/180/270). Draw with v.w x v.h - for a
+        player at a table end that is portrait on a landscape screen."""
         v = View(self, (0, 0, self.W, self.H), m.get("angle", 0))
         v.surf.fill(DARK)
-        v.u = max(40, self.H // 8)               # basic row height
-        pygame.draw.rect(v.surf, accent, (0, 0, self.W, v.u))
-        self.text(v.surf, title, v.u * 0.55, maxw=self.W - v.u * 3, shadow=False,
+        v.u = max(40, min(v.h // 8, v.w // 8))  # basic row height (portrait: not taller)
+        pygame.draw.rect(v.surf, accent, (0, 0, v.w, v.u))
+        self.text(v.surf, title, v.u * 0.55, maxw=v.w - v.u * 3, shadow=False,
                   midleft=(16, v.u // 2))
         return v
 
     def draw_menu(self, m):
         v = self.modal_view(m, f"LifePi {VERSION}")
-        u, W = v.u, self.W
+        u, W = v.u, v.w
         st = self.settings
         items = [
-            ("New game", lambda: self.push("newgame", n=len(self.players), life=st["start_life"]), BTN_OK),
+            ("New game", lambda: self.push("newgame", n=len(self.players), life=st["start_life"],
+                                           seating=st["seating"]), BTN_OK),
             ("Reset this game", lambda: self.start_game(len(self.players), st["start_life"]), BTN),
             ("Dice / coin", lambda: self.push("dice", result="", sub=""), BTN),
             (f"Rotate screen ({st['rotation']} deg)", self.rotate_screen, BTN_ON),
-            (f"Seating: {st['seating']}", self.toggle_seating, BTN),
+            (f"Seating: {SEATINGS[st['seating']]}", self.toggle_seating, BTN),
             (f"Cmdr dmg hits life: {'on' if st['cmd_hits_life'] else 'off'}", self.toggle_cmd, BTN),
             ("Phones & TV", self.open_remote, BTN_ON),
             ("Cast to TV", self.open_cast, BTN),
             ("Back to game", self.pop, BTN),
             ("Quit", self.quit, BTN_BAD),
         ]
-        rh = (self.H - u - u // 2) // ((len(items) + 1) // 2)
+        rh = (v.h - u - u // 2) // ((len(items) + 1) // 2)
         for k, (label, fn, bg) in enumerate(items):
             r = (k % 2 * W // 2, u + k // 2 * rh, W // 2, rh)
             self.button(v, r, label, fn, bg=bg, size=min(rh * 0.42, W * 0.035))
         self.text(v.surf, "Unofficial fan content - not affiliated with Wizards of the Coast. "
                   "Card art via Scryfall.", u * 0.3, GREY, maxw=W - 20, shadow=False,
-                  midbottom=(W // 2, self.H - 4))
+                  midbottom=(W // 2, v.h - 4))
         v.finish()
 
     def open_remote(self):
@@ -1095,7 +1308,7 @@ class App:
 
     def draw_remote(self, m):
         v = self.modal_view(m, "Phones & TV")
-        u, W, H = v.u, self.W, self.H
+        u, W, H = v.u, v.w, v.h
         comp = self.companion
         on = bool(comp and comp.running)
         bh = u
@@ -1213,8 +1426,13 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def toggle_seating(self):
-        self.settings["seating"] = "upright" if self.settings["seating"] == "table" else "table"
-        self.changed()
+        order = list(SEATINGS)
+        self.set_seating(order[(order.index(self.settings["seating"]) + 1) % len(order)])
+
+    def set_seating(self, seating):
+        if seating in SEATINGS:
+            self.settings["seating"] = seating
+            self.changed()
 
     def toggle_cmd(self):
         self.settings["cmd_hits_life"] = not self.settings["cmd_hits_life"]
@@ -1225,16 +1443,18 @@ class App:
 
     def draw_newgame(self, m):
         v = self.modal_view(m, "New game")
-        u, W = v.u, self.W
-        rh = (self.H - u) // 4
+        u, W = v.u, v.w
+        rh = (v.h - u) // 4
+        m.setdefault("seating", self.settings["seating"])
 
         def setv(k, val):
             m[k] = val
             self.dirty = True
 
         self.text(v.surf, "Players", rh * 0.3, GREY, shadow=False, midleft=(16, u + 10))
-        for n in range(1, 7):
-            self.button(v, ((n - 1) * W // 6, u + rh // 5, W // 6, rh - rh // 5), str(n),
+        for n in range(1, MAX_PLAYERS + 1):
+            x0, x1 = (n - 1) * W // MAX_PLAYERS, n * W // MAX_PLAYERS
+            self.button(v, (x0, u + rh // 5, x1 - x0, rh - rh // 5), str(n),
                         lambda n=n: setv("n", n), bg=BTN_ON if m["n"] == n else BTN)
         y = u + rh
         self.text(v.surf, "Starting life", rh * 0.3, GREY, shadow=False, midleft=(16, y + 10))
@@ -1250,14 +1470,24 @@ class App:
                     f"Custom: {m['life']}" if custom else "Custom",
                     lambda: self.ask_text("Starting life", "", set_custom),
                     bg=BTN_ON if custom else BTN)
-        y = self.H - rh
+        y += rh
+        self.text(v.surf, "Seating", rh * 0.3, GREY, shadow=False, midleft=(16, y + 10))
+        for k, key in enumerate(SEATINGS):
+            self.button(v, (k * W // 4, y + rh // 5, W // 4, rh - rh // 5), SEATINGS[key],
+                        lambda key=key: setv("seating", key), bg=BTN_ON if m["seating"] == key else BTN,
+                        size=min((rh - rh // 5) * 0.4, W * 0.04))
+        y = v.h - rh
+
+        def start():
+            self.settings["seating"] = m["seating"]
+            self.start_game(m["n"], m["life"])
         self.button(v, (0, y, W // 2, rh), "Cancel", self.pop)
-        self.button(v, (W // 2, y, W // 2, rh), "Start", lambda: self.start_game(m["n"], m["life"]), bg=BTN_OK)
+        self.button(v, (W // 2, y, W // 2, rh), "Start", start, bg=BTN_OK)
         v.finish()
 
     def draw_dice(self, m):
         v = self.modal_view(m, "Dice / coin")
-        u, W, H = v.u, self.W, self.H
+        u, W, H = v.u, v.w, v.h
         rh = max(u, H // 6)
 
         def roll(sides):
@@ -1291,7 +1521,7 @@ class App:
             return self.pop()
         p, ang = self.players[i], m.get("angle", 0)
         v = self.modal_view(m, p["name"], tuple(c * 3 // 4 for c in PALETTE[p["color"] % len(PALETTE)]))
-        u, W, H = v.u, self.W, self.H
+        u, W, H = v.u, v.w, v.h
         self.button(v, (W - 2 * u, 0, 2 * u, u), "Done", self.pop, bg=BTN_ON)
 
         def rename(t):
@@ -1325,10 +1555,16 @@ class App:
             self.button(v, (k * W // len(acts), u, W // len(acts), u), label, fn, size=u * 0.38)
 
         sources = range(len(self.players))          # commander damage, own commander included
-        nrows = max(len(COUNTERS), len(sources))
+        portrait = W < H                            # opened at a table end: one column
+        if portrait:
+            nrows = len(COUNTERS) + len(sources) + 1
+            cw = W
+        else:
+            nrows = max(len(COUNTERS), len(sources))
+            cw = W // 2
         rh = (H - 2 * u - u // 3) // (nrows + 1)
         y0 = 2 * u + u // 6
-        cw = W // 2
+        cx, cy0 = (0, y0 + (len(COUNTERS) + 1) * rh) if portrait else (cw, y0)   # damage column
 
         def row(x, y, label, value, minus, plus, warn=False, tile=None):
             b = min(rh, cw // 5)
@@ -1351,17 +1587,17 @@ class App:
                 lambda key=key: self.change_counter(i, key, 1),
                 warn=key == "poison" and p["counters"][key] >= 10)
         self.text(v.surf, "Commander damage from", rh * 0.4, GREY, shadow=False,
-                  midleft=(cw + 14, y0 + rh // 2))
+                  midleft=(cx + 14, cy0 + rh // 2))
         for k, j in enumerate(sources):
             name = self.players[j]["name"] + (" (you)" if j == i else "")
-            row(cw, y0 + (k + 1) * rh, name, p["cmd"][j],
+            row(cx, cy0 + (k + 1) * rh, name, p["cmd"][j],
                 lambda j=j: self.change_cmd(i, j, -1), lambda j=j: self.change_cmd(i, j, 1),
                 warn=p["cmd"][j] >= 21, tile=j)
         v.finish()
 
     def draw_keyboard(self, m):
         v = self.modal_view(m, m["title"])
-        u, W, H = v.u, self.W, self.H
+        u, W, H = v.u, v.w, v.h
         box = pygame.Rect(12, u, W - 24, u)
         pygame.draw.rect(v.surf, (36, 38, 50), box, border_radius=8)
         self.text(v.surf, m["text"] + "|", u * 0.6, maxw=box.w - 20, shadow=False, midleft=(box.x + 12, box.centery))
@@ -1411,7 +1647,7 @@ class App:
     def draw_grid(self, m):
         """Generic 3x2 paged picker. items: {label, img, value}; may grow from a thread."""
         v = self.modal_view(m, m["title"])
-        u, W, H = v.u, self.W, self.H
+        u, W, H = v.u, v.w, v.h
         items = m["items"]
         per = 6
         pages = max(1, (len(items) + per - 1) // per)
@@ -1588,8 +1824,12 @@ class App:
         self.canvas.fill(DARK)
         n = len(self.players)
         self.seats = layout(n, self.W, self.H, self.settings["seating"])
-        for i, (rect, angle) in enumerate(self.seats):
-            self.draw_panel(i, rect, angle)
+        for i, seat in enumerate(self.seats):
+            self.draw_panel(i, seat)
+        gap = max(2, min(self.W, self.H) // 160)
+        for seat in self.seats:                   # round table: gaps between the wedges
+            if not seat.is_rect:
+                pygame.draw.polygon(self.canvas, DARK, seat.poly, 2 * gap)
         self.draw_drags()
         r = max(22, min(self.W, self.H) // 22)
         c = self.menu_pos(r)
@@ -1600,7 +1840,7 @@ class App:
             pygame.draw.line(self.canvas, WHITE, (c[0] - r // 2, c[1] + dy), (c[0] + r // 2, c[1] + dy), 2)
         hit = pygame.Rect(0, 0, int(r * 2.6), int(r * 2.6))
         hit.center = c
-        self.zones.append((hit, lambda: self.push("menu"), None, 0, None))
+        self.zones.append((hit.collidepoint, lambda: self.push("menu"), None, 0, None))
 
         if self.modals:
             self.zones = []
@@ -1626,10 +1866,15 @@ class App:
         n = len(self.players)
         if n == 1:
             return (self.W - r - 10, self.H - r - 10)
-        xs = [(ci + 0.5) * self.W / cnt for cnt in ROWS[n] for ci in range(cnt)]
-        clear = self.W * 0.12 + r
-        x = min(range(self.W // 2 % 2, self.W, 2), key=lambda x: (
-            -min(clear, min(abs(x - c) for c in xs)), abs(x - self.W // 2)))
+        if not all(s.is_rect for s in self.seats):
+            return (self.W // 2, self.H // 2)     # round table: where the wedges meet
+        # rows (and the sides of an ends layout) meet at H/2; avoid the end seats
+        sides = [s.rect for s in self.seats if s.angle in (0, 180)]
+        xs = [s.centerx for s in sides]
+        lo, hi = min(s.left for s in sides) + r + 4, max(s.right for s in sides) - r - 4
+        clear = (hi - lo) * 0.12 + r
+        mid = (lo + hi) // 2
+        x = min(range(lo, hi + 1, 2), key=lambda x: (-min(clear, min(abs(x - c) for c in xs)), abs(x - mid)))
         return (x, self.H // 2)
 
     def draw_drags(self):
@@ -1638,13 +1883,14 @@ class App:
             src = ptr.get("drag")
             if src is None or src >= len(self.seats):
                 continue
-            srect, sang = self.seats[src]
-            shade = pygame.Surface(srect.size)
-            shade.set_alpha(140)
-            self.canvas.blit(shade, srect)
+            seat = self.seats[src]
+            r = seat.rect
+            shade = pygame.Surface(r.size, pygame.SRCALPHA)
+            pygame.draw.polygon(shade, (0, 0, 0, 140), [(x - r.x, y - r.y) for x, y in seat.poly])
+            self.canvas.blit(shade, r)
             dst = self.seat_at(ptr["pos"])
             if dst is not None and dst != src:
-                pygame.draw.rect(self.canvas, (255, 230, 120), self.seats[dst][0], 6)
+                pygame.draw.polygon(self.canvas, (255, 230, 120), self.seats[dst].poly, 6)
             p = self.players[src]
             size = max(20, min(self.W, self.H) // 12)
             img = self.font(size).render(p["name"], True, WHITE)
@@ -1652,8 +1898,8 @@ class App:
             chip.fill(PALETTE[p["color"] % len(PALETTE)])
             pygame.draw.rect(chip, (255, 230, 120), chip.get_rect(), 3)
             chip.blit(img, img.get_rect(center=chip.get_rect().center))
-            if sang == 180:
-                chip = pygame.transform.flip(chip, True, True)
+            if seat.angle:                       # the chip faces whoever is dragging it
+                chip = pygame.transform.rotate(chip, seat.angle)
             self.canvas.blit(chip, chip.get_rect(center=ptr["pos"]))
 
     # ------------------------------------------------------------------ input
@@ -1663,7 +1909,7 @@ class App:
 
     def pointer_down(self, pid, pos):
         for z in reversed(self.zones):
-            if z[0].collidepoint(pos):
+            if z[0](pos):
                 self.pointers[pid] = {"zone": z, "t": time.time(), "held": False, "next": 0, "pos": pos}
                 return
 
@@ -1681,7 +1927,7 @@ class App:
             if dst is not None and dst != ptr["drag"] and not self.modals:
                 self.swap_seats(ptr["drag"], dst)
             self.dirty = True
-        elif ptr and not ptr["held"] and ptr["zone"][1] and ptr["zone"][0].collidepoint(pos):
+        elif ptr and not ptr["held"] and ptr["zone"][1] and ptr["zone"][0](pos):
             ptr["zone"][1]()
             self.dirty = True
 
@@ -1850,6 +2096,68 @@ function deltaOf(seat) {
   return d && d.d && Date.now() - d.t < 1800 ? d.d : 0;
 }
 const fmt = (d) => (d > 0 ? "+" : "−") + Math.abs(d);
+
+// round table: each player's wedge as a clipped background, plus the gaps between wedges
+const pct = (poly) => "polygon(" + poly.map(([x, y]) => `${x * 100}% ${y * 100}%`).join(",") + ")";
+function wedgeLayers(players, shade, meSeat) {
+  const out = [];
+  for (const p of players) if (p.poly)
+    out.push(el("div", { class: "wedge" + (p.ko ? " dead" : ""), style: Object.assign(cardBg(p, shade), { clipPath: pct(p.poly) }) }));
+  if (!out.length) return out;
+  const NS = "http://www.w3.org/2000/svg", svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("class", "gaps"); svg.setAttribute("viewBox", "0 0 1 1"); svg.setAttribute("preserveAspectRatio", "none");
+  for (const p of players) if (p.poly) {
+    const g = document.createElementNS(NS, "polygon");
+    g.setAttribute("points", p.poly.map((xy) => xy.join(",")).join(" "));
+    g.setAttribute("class", p.seat === meSeat ? "me" : "");
+    svg.append(g);
+  }
+  out.push(svg);
+  return out;
+}
+const placeAt = ([x, y, w, h]) => ({ left: x * 100 + "%", top: y * 100 + "%", width: w * 100 + "%", height: h * 100 + "%" });
+
+// The device fits each wedge's upright box for its own (landscape) screen; on a phone that box
+// would be stretched thin, so refit it here in this page's pixels (same rules as fit_box).
+function inPoly([x, y], poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [x1, y1] = poly[i], [x2, y2] = poly[j];
+    if ((y1 > y) !== (y2 > y) && x < x1 + (y - y1) * (x2 - x1) / (y2 - y1)) inside = !inside;
+  }
+  return inside;
+}
+const fitCache = new Map();
+function wedgeBox(p, W, H) {
+  const key = W + "x" + H + JSON.stringify(p.poly);
+  if (fitCache.has(key)) return fitCache.get(key);
+  const poly = p.poly.map(([x, y]) => [x * W, y * H]), [cx, cy] = poly[0];
+  let mx = 0, my = 0;                                   // outward direction: through the wedge's far edge
+  for (const [x, y] of poly.slice(1)) { mx += x; my += y; }
+  mx = mx / (poly.length - 1) - cx; my = my / (poly.length - 1) - cy;
+  const len = Math.hypot(mx, my) || 1, ux = mx / len, uy = my / len;
+  let depth = 0;
+  while (inPoly([cx + ux * (depth + 2), cy + uy * (depth + 2)], poly) && depth < W + H) depth += 2;
+  const probes = [[-.8, -.8], [.8, -.8], [-.8, .8], [.8, .8], [0, -1], [0, 1], [-.92, 0], [.92, 0],
+                  [-.6, 1], [.6, 1], [-.6, -1], [.6, -1]];
+  let best = null;
+  for (let hf = 0.8; hf >= 0.25; hf -= 0.05) {
+    for (const asp of [1.3, 1.0, 0.8, 0.6]) {
+      const bh = depth * hf, bw = bh * asp;
+      if (best && bw * bh <= best[0]) continue;
+      for (let df = 0.95; df >= 0.2; df -= 0.05) {
+        const bx = cx + ux * depth * df, by = cy + uy * depth * df;
+        if (probes.every(([px, py]) => inPoly([bx + px * bw / 2, by + py * bh / 2], poly))) {
+          best = [bw * bh, bx - bw / 2, by - bh / 2, bw, bh]; break;
+        }
+      }
+    }
+  }
+  const box = best ? [best[1] / W, best[2] / H, best[3] / W, best[4] / H] : p.pos;
+  fitCache.set(key, box);
+  return box;
+}
+const boxOf = (p, el) => (p.poly && el && el.clientWidth ? wedgeBox(p, el.clientWidth, el.clientHeight) : p.pos);
 """
 
 PHONE_HTML = r"""<!doctype html>
@@ -1882,6 +2190,13 @@ PHONE_HTML = r"""<!doctype html>
   #table { position:relative; flex:1; min-height:0; margin:0 var(--gap) var(--gap); }
 
   .cell { position:absolute; padding:var(--gap); container-type:size; }
+  .wedge { position:absolute; inset:0; background-size:cover; background-position:center; }
+  .wedge.dead { filter:saturate(.35) brightness(.55); }
+  .gaps { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  .gaps polygon { fill:none; stroke:var(--bg); stroke-width:6px; vector-effect:non-scaling-stroke; stroke-linejoin:round; }
+  .gaps polygon.me { stroke:var(--warn); stroke-width:3px; }
+  .cell.inwedge .panel { background:none !important; box-shadow:none; }
+  .cell.inwedge .panel.me { box-shadow:none; }
   .panel { position:relative; width:100%; height:100%; border-radius:16px; overflow:hidden; background-size:cover;
            background-position:center; box-shadow:0 3px 12px rgba(0,0,0,.35); }
   .panel.me { box-shadow:0 0 0 3px var(--warn), 0 3px 12px rgba(0,0,0,.35); }
@@ -1944,7 +2259,8 @@ PHONE_HTML = r"""<!doctype html>
   .stepper .v { min-width:40px; text-align:center; font-size:21px; font-weight:800; font-variant-numeric:tabular-nums; }
   .stepper .v.warn { color:#ff7a7a; }
   .chips { display:flex; flex-wrap:wrap; gap:8px; }
-  .chips.six { display:grid; grid-template-columns:repeat(6, 1fr); }
+  .chips.six { display:grid; grid-template-columns:repeat(4, 1fr); }
+  .chips.seat4 { display:grid; grid-template-columns:repeat(2, 1fr); }
   .chips button { min-width:0; height:48px; border-radius:12px; border:1px solid var(--line); background:#2a2c3b;
                   font-size:17px; font-weight:700; padding:0 12px; }
   .chips button.on { background:var(--accent); border-color:var(--accent); }
@@ -2068,10 +2384,9 @@ function panel(p) {
                                         `${SHORT[key] || key} ${p.counters[key]}`));
   if (!bottom.length) bottom.push(el("span", { class: "pill empty" }, "counters"));
   const open = () => openSheet({ kind: "player", seat });
-  const [x, y, w, h] = p.pos;
-  return el("div", { class: "cell", style: { left: x * 100 + "%", top: y * 100 + "%", width: w * 100 + "%", height: h * 100 + "%" } },
+  return el("div", { class: "cell" + (p.poly ? " inwedge" : ""), style: placeAt(boxOf(p, document.getElementById("table"))) },
     el("div", { class: "panel" + (seat === me ? " me" : "") + (p.ko ? " dead" : ""),
-                style: cardBg(p, "rgba(0,0,0,.6), rgba(0,0,0,.32) 45%, rgba(0,0,0,.66)") },
+                style: p.poly ? {} : cardBg(p, "rgba(0,0,0,.6), rgba(0,0,0,.32) 45%, rgba(0,0,0,.66)") },
       el("button", { class: "strip top", type: "button", onclick: open },
          el("span", {}, p.name), seat === me ? el("small", {}, "you") : null),
       pressable("button", { class: "half minus", "aria-label": "minus" }, () => act({ op: "life", seat, d: -1 }),
@@ -2142,7 +2457,7 @@ function gameSheet() {
     el("div", { class: "shead" }, el("h3", {}, "Game"),
        el("button", { class: "chipbtn go", type: "button", onclick: closeSheet }, "Done")),
     el("h4", {}, "Players"),
-    el("div", { class: "chips six" }, [1, 2, 3, 4, 5, 6].map((n) =>
+    el("div", { class: "chips six" }, Array.from({ length: s.max_players || 6 }, (_, i) => i + 1).map((n) =>
       el("button", { type: "button", class: ng.n === n ? "on" : "", onclick: () => { ng.n = n; render(); } }, n))),
     el("h4", {}, "Starting life"),
     el("div", { class: "chips" }, lifeOpts.map((l) =>
@@ -2152,6 +2467,10 @@ function gameSheet() {
                     onchange: (e) => { const v = parseInt(e.target.value, 10); if (v > 0) ng.life = Math.min(9999, v); render(); } })),
     confirmBtn("new", `Start ${ng.n}-player game at ${ng.life}`, "go", () => act({ op: "newgame", n: ng.n, life: ng.life })),
     confirmBtn("reset", "Reset this game", "danger", () => act({ op: "reset" })),
+    el("h4", {}, "Seating"),
+    el("div", { class: "chips seat4" }, (s.seatings || []).map(([key, label]) =>
+      el("button", { type: "button", class: s.seating === key ? "on" : "", onclick: () => act({ op: "seating", value: key }) }, label))),
+    el("p", { class: "muted" }, "Changes the current game's layout on LifePi and every screen."),
     el("h4", {}, "Rules"),
     el("div", { class: "rows" }, el("button", { type: "button", class: "row switch" + (s.cmd_hits_life ? " on" : ""),
         onclick: () => act({ op: "cmd_hits_life", on: !s.cmd_hits_life }) },
@@ -2167,7 +2486,8 @@ function render() {
   if (!state) return;
   followMe(state);
   document.getElementById("seatbtn").textContent = me >= 0 && state.players[me] ? "You: " + state.players[me].name : "Pick your seat";
-  document.getElementById("table").replaceChildren(...state.players.map(panel));
+  document.getElementById("table").replaceChildren(
+    ...wedgeLayers(state.players, "rgba(0,0,0,.5), rgba(0,0,0,.5)", me), ...state.players.map(panel));
   const sh = document.getElementById("sheet"), box = document.getElementById("box");
   if (sheet && sheet.kind === "player" && !state.players[sheet.seat]) sheet = null;
   sh.hidden = !sheet;
@@ -2179,6 +2499,7 @@ function render() {
   }
 }
 document.getElementById("seatbtn").onclick = () => openSheet({ kind: "seat" });
+addEventListener("resize", () => render());          // wedge boxes depend on the screen shape
 document.getElementById("gamebtn").onclick = () => { ng.n = null; openSheet({ kind: "game" }); };
 
 onState = render;
@@ -2213,6 +2534,11 @@ TV_HTML = r"""<!doctype html>
   #grid { position:fixed; inset:var(--gap); }
   body.hinted #grid { bottom:calc(var(--gap) + max(26px, 4.4vmin)); }   /* room for the join hint */
   .cell { position:absolute; padding:var(--gap); container-type:size; }
+  .wedge { position:absolute; inset:0; background-size:cover; background-position:center; }
+  .wedge.dead { filter:saturate(.3) brightness(.5); }
+  .gaps { position:absolute; inset:0; width:100%; height:100%; }
+  .gaps polygon { fill:none; stroke:#0d0d12; stroke-width:1.2vmin; vector-effect:non-scaling-stroke; stroke-linejoin:round; }
+  .cell.inwedge .card { background:none !important; box-shadow:none; }
   .card { position:relative; width:100%; height:100%; border-radius:2.2vmin; overflow:hidden; background-size:cover;
           background-position:center; display:flex; flex-direction:column; align-items:center; justify-content:center;
           text-align:center; box-shadow:0 1vmin 3vmin rgba(0,0,0,.45); }
@@ -2253,7 +2579,8 @@ const SHORT = { poison: "Poison", tax: "Tax", energy: "Energy", exp: "Exp" };
 function render() {
   if (!state) return;
   const s = state;
-  document.getElementById("grid").replaceChildren(...s.players.map((p) => {
+  document.getElementById("grid").replaceChildren(...wedgeLayers(s.players, "rgba(0,0,0,.45), rgba(0,0,0,.45)", -1),
+                                                   ...s.players.map((p) => {
     const d = deltaOf(p.seat);
     const bottom = [];
     s.players.forEach((src) => {
@@ -2265,10 +2592,10 @@ function render() {
     for (const [key] of s.counters)
       if (p.counters[key]) bottom.push(el("span", { class: "pill", style: { background: CHIP[key] || "#444" } },
                                           `${SHORT[key] || key} ${p.counters[key]}`));
-    const [x, y, w, h] = p.pos;          // same place as on the device
-    return el("div", { class: "cell", style: { left: x * 100 + "%", top: y * 100 + "%", width: w * 100 + "%", height: h * 100 + "%" } },
+    // same place as on the device; round tables: upright card inside the player's wedge
+    return el("div", { class: "cell" + (p.poly ? " inwedge" : ""), style: placeAt(boxOf(p, document.getElementById("grid"))) },
       el("div", { class: "card" + (p.ko ? " dead" : ""),
-                  style: cardBg(p, "rgba(0,0,0,.62), rgba(0,0,0,.38) 45%, rgba(0,0,0,.72)") },
+                  style: p.poly ? {} : cardBg(p, "rgba(0,0,0,.62), rgba(0,0,0,.38) 45%, rgba(0,0,0,.72)") },
       el("div", { class: "name" }, p.name),
       d ? el("div", { class: "delta" + (d < 0 ? " neg" : "") }, fmt(d)) : null,
       el("div", { class: "life" }, p.life),
