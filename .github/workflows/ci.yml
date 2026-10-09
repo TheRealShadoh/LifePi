@@ -1,9 +1,13 @@
 name: CI
 
+# Every push and PR - and, via workflow_call, every release (release.yml): a tag is only
+# released when all of these jobs pass.
 on:
   push:
+    branches: ["**"]        # tags go through release.yml, which runs this workflow first
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   smoke:
@@ -46,6 +50,36 @@ jobs:
       - env:
           SDL_VIDEODRIVER: dummy
         run: /usr/bin/python3 tests/smoke_test.py && /usr/bin/python3 tests/companion_test.py
+
+  web:
+    name: phone / browser build (pygbag + headless Chrome)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pygbag==0.9.3 pygame-ce websocket-client
+      - name: Build the installable web app
+        env:
+          SDL_VIDEODRIVER: dummy
+        run: python web/build.py
+      - name: End-to-end test in headless Chrome (phone size, real touch input)
+        env:
+          LIFEPI_SHOTS: ${{ runner.temp }}/web-shots
+        run: |
+          # pygbag's runtime comes from its CDN: retry once before calling it a failure
+          python tests/web_test.py || { echo "retrying once"; sleep 20; python tests/web_test.py; }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots-web
+          path: ${{ runner.temp }}/web-shots/*.png
+      - uses: actions/upload-artifact@v4       # the exact files that were tested; releases ship these
+        with:
+          name: lifepi-web
+          path: build/web
+          include-hidden-files: true
 
   scryfall-live:
     name: live Scryfall search (non-blocking)

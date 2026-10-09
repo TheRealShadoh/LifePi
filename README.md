@@ -71,6 +71,24 @@ Open the menu (round button) > **Phones & TV**. It shows a QR code, the address 
 
 The QR code needs `python3-qrcode` (also installed by `install.sh`); without it the address and PIN are still shown.
 
+## On a phone or tablet, no Pi needed
+
+The same `lifepi.py` also runs in a phone's browser (compiled to WebAssembly with
+[pygbag](https://pypi.org/project/pygbag/)) and installs like an app - Android and iPhone:
+
+```bash
+pip install pygbag==0.9.3 pygame-ce
+python web/build.py            # -> build/web/, a static site
+python web/build.py --serve    # try it at http://localhost:8000 (use 127.0.0.1 if pygame fails to load)
+```
+
+Host `build/web` anywhere with HTTPS (every release attaches it as `lifepi-web.zip`, and can
+deploy it to GitHub Pages - see Releases below), open it on the phone, then **Add to Home Screen**
+(iPhone: Share menu; Android: browser menu or the install prompt). After the first visit it works
+offline. The game is saved in the browser (localStorage); card art is re-downloaded after the
+browser clears its cache. Not available in the phone app: Phones & TV (a page can't run a server),
+casting, and local image folders.
+
 ## Run it in a browser (Docker)
 
 No Pi handy, or want it on a tablet/phone? The container runs the real app on a virtual
@@ -108,9 +126,19 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 - Name strip or counter strip of a panel: opens that player's sheet (rename, card art, local image, colour, profiles, counters, commander damage) — oriented toward that player
 - Round button in the centre: main menu (new game, reset, dice, rotate, seating)
 
+## Releases
+
+Cut a release by pushing a version tag: `git tag v1.1.0 && git push origin v1.1.0`.
+[`release.yml`](.github/workflows/release.yml) first runs **every** test - the CI suite below plus
+the container tests - and publishes only if all pass: the container image (`:1.1.0`, `:1.1`), a
+GitHub Release with the tested phone app (`lifepi-web.zip`), and optionally the phone app on GitHub
+Pages (repository variable `DEPLOY_PAGES=true`, and Settings > Pages > Source: *GitHub Actions*).
+`:latest` is published from `main` only after CI has passed there. Running the Release workflow by
+hand on a branch is a dry run (tests only).
+
 ## Tests
 
-`SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` and `tests/companion_test.py` (phone / TV server) — headless; covers rotation/touch mapping, tap/hold, modals, persistence and a mocked Scryfall search. CI runs it on x86_64 and arm64 (the Pi's architecture), plus `tests/live_scryfall.py` against the real API.
+`SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` and `tests/companion_test.py` (phone / TV server) — headless; `python web/build.py && python tests/web_test.py` tests the phone app end to end in headless Chrome (touch, holds, Scryfall in the browser, reload, rotation, offline start); covers rotation/touch mapping, tap/hold, modals, persistence and a mocked Scryfall search. CI runs it on x86_64 and arm64 (the Pi's architecture), plus `tests/live_scryfall.py` against the real API.
 
 ## Legal
 

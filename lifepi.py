@@ -16,10 +16,10 @@ Unofficial fan content. Not affiliated with Wizards of the Coast, Scryfall or
 any other life counter app.  MIT licensed - see LICENSE.
 """
 import argparse
+import asyncio
 import functools
 import hashlib
 import hmac
-import http.server
 import json
 import os
 import queue
@@ -41,6 +41,7 @@ import pygame
 
 VERSION = "1.0.0"
 APP = "lifepi"
+WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / APP
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / APP / "art"
@@ -87,17 +88,70 @@ def http_get(url, timeout=10):
         return r.read()
 
 
+_web_tmp = iter(range(10 ** 9))
+
+
+async def fetch_bytes(url):
+    """GET a URL. Desktop: urllib (background work runs on a thread there). Browser: the
+    page's fetch(), saved into the in-browser filesystem by pygbag, then read back."""
+    if not WEB:
+        return http_get(url)
+    import platform                               # pygbag's browser bridge
+    tmp = f"/tmp/lifepi-fetch-{next(_web_tmp)}"
+    flags = platform.ffi({"redirect": "follow", "credentials": "omit"})
+    path = await platform.jsiter(platform.window.cross_file(url, tmp, flags))
+    try:
+        return Path(path).read_bytes()
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def spawn(coro_fn):
+    """Run background work without blocking the UI: a thread with its own event loop on
+    desktop, an asyncio task in the browser (no threads there)."""
+    if WEB:
+        asyncio.get_event_loop().create_task(coro_fn())
+    else:
+        threading.Thread(target=lambda: asyncio.run(coro_fn()), daemon=True).start()
+
+
+class ScryfallError(Exception):
+    def __init__(self, status):
+        super().__init__(f"Scryfall error {status}")
+        self.status = status
+
+
 _api_lock, _api_last = threading.Lock(), [0.0]
 
 
-def scryfall(path, **params):
+async def scryfall(path, **params):
     """GET a Scryfall API endpoint as JSON, at most ~10 requests/s as Scryfall asks."""
-    with _api_lock:
-        wait = _api_last[0] + 0.1 - time.time()
-        if wait > 0:
-            time.sleep(wait)
-        _api_last[0] = time.time()
-    return json.loads(http_get("https://api.scryfall.com" + path + "?" + urllib.parse.urlencode(params)))
+    with _api_lock:                               # reserve the next free slot
+        now = time.time()
+        slot = max(now, _api_last[0] + 0.1)
+        _api_last[0] = slot
+    if slot > now:
+        await asyncio.sleep(slot - now)
+    try:
+        data = json.loads(await fetch_bytes("https://api.scryfall.com" + path + "?" + urllib.parse.urlencode(params)))
+    except urllib.error.HTTPError as e:
+        raise ScryfallError(e.code) from None
+    if isinstance(data, dict) and data.get("object") == "error":     # browser fetch keeps error bodies
+        raise ScryfallError(as_int(data.get("status"), 500))
+    return data
+
+
+def web_store(key, value=None):
+    """Browser only: read (value None) or write a string in localStorage."""
+    import platform
+    ls = platform.window.localStorage
+    if value is None:
+        v = ls.getItem(f"lifepi-{key}")
+        return None if v is None or str(v) in ("null", "undefined") else str(v)
+    ls.setItem(f"lifepi-{key}", value)
 
 
 def search_cache_path(query):
@@ -149,7 +203,7 @@ def unrotate(px, py, disp_w, disp_h, rot):
 
 def new_player(i, life):
     return {"name": f"Player {i + 1}", "life": life, "color": i % len(PALETTE),
-            "art": None, "credit": "",
+            "art": None, "credit": "", "art_url": None,
             "counters": {k: 0 for k, _, _ in COUNTERS}, "cmd": [0] * MAX_PLAYERS}
 
 
@@ -367,6 +421,7 @@ class Companion:
 
     def start(self):
         try:
+            import http.server
             self.httpd = http.server.ThreadingHTTPServer(("", self.port), make_handler(self))
         except OSError as e:
             self.error = f"Port {self.port} is in use ({e.strerror})" if e.errno in (48, 98, 10048) \
@@ -406,6 +461,7 @@ class Companion:
 
 
 def make_handler(comp):
+    import http.server
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = f"LifePi/{VERSION}"
 
@@ -579,7 +635,11 @@ class App:
         pygame.display.init()      # no audio needed; skips ALSA start-up
         pygame.font.init()
         pygame.display.set_caption("LifePi")
-        if args.windowed:
+        if WEB:                                   # the page decides: match its shape and size
+            self.web_size = web_screen_size()
+            self.screen = pygame.display.set_mode(self.web_size)
+            self.web_checked = time.time()
+        elif args.windowed:
             w, h = (int(v) for v in args.windowed.lower().split("x"))
             self.screen = pygame.display.set_mode((w, h))
         else:
@@ -601,20 +661,29 @@ class App:
             if self.settings["companion"]:
                 self.companion.start()
         self.publish()
+        if WEB:
+            spawn(self.restore_art)
 
     # ------------------------------------------------------------------ state
     def load_state(self):
         """Restore the saved game. Falls back to the previous save if the latest is damaged;
         a damaged file is kept aside (state.json.corrupt) rather than silently overwritten."""
-        for path in (STATE_FILE, BACKUP_FILE):
+        if WEB:                                   # the browser keeps saves in localStorage
+            sources = [("browser save", lambda: web_store("state")), ("browser backup", lambda: web_store("state.bak"))]
+        else:                                     # -sig: tolerate a BOM from Windows editors
+            sources = [(f.name, lambda f=f: f.read_text(encoding="utf-8-sig")) for f in (STATE_FILE, BACKUP_FILE)]
+        for name, read in sources:
             try:
-                data = json.loads(path.read_text(encoding="utf-8-sig"))   # -sig: tolerate a BOM from Windows editors
+                text = read()
+                if text is None:
+                    raise FileNotFoundError(name)
+                data = json.loads(text)
                 settings, players, profiles = self.parse_state(data)
             except FileNotFoundError:
                 continue
             except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
-                print(f"ignoring unreadable {path.name}: {e}", file=sys.stderr)
-                if path == STATE_FILE:
+                print(f"ignoring unreadable {name}: {e}", file=sys.stderr)
+                if name == STATE_FILE.name:
                     try:
                         os.replace(STATE_FILE, STATE_FILE.with_name("state.json.corrupt"))
                     except OSError:
@@ -662,6 +731,8 @@ class App:
                     b["art"] = p["art"]
                 if isinstance(p.get("credit"), str):
                     b["credit"] = p["credit"]
+                if isinstance(p.get("art_url"), str) and p["art_url"].startswith("https://"):
+                    b["art_url"] = p["art_url"]
                 c = p.get("counters") or {}
                 b["counters"] = {k: max(0, as_int(c.get(k))) for k, _, _ in COUNTERS}
                 b["cmd"] = [max(0, as_int(x)) for x in (list(p.get("cmd") or []) + [0] * MAX_PLAYERS)[:MAX_PLAYERS]]
@@ -672,13 +743,27 @@ class App:
             if isinstance(name, str) and isinstance(pr, dict):
                 profiles[name] = {"color": as_int(pr.get("color")) % len(PALETTE),
                                   "art": pr["art"] if isinstance(pr.get("art"), str) else None,
-                                  "credit": pr["credit"] if isinstance(pr.get("credit"), str) else ""}
+                                  "credit": pr["credit"] if isinstance(pr.get("credit"), str) else "",
+                                  "art_url": pr["art_url"] if isinstance(pr.get("art_url"), str)
+                                  and pr["art_url"].startswith("https://") else None}
         return settings, players, profiles
 
     def save_state(self):
         """Durably save the game. The previous save is kept as state.json.bak."""
         data = {"settings": self.settings, "players": self.players, "profiles": self.profiles,
                 "first": self.first}
+        if WEB:
+            try:
+                prev = web_store("state")
+                if prev:
+                    web_store("state.bak", prev)
+                web_store("state", json.dumps(data))
+                self.state_dirty = False
+            except Exception as e:                # storage full / blocked (private mode)
+                print("save failed:", e, file=sys.stderr)
+            self.last_save = time.time()
+            self.save_caches()
+            return
         try:
             tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
             with open(tmp, "w", encoding="utf-8") as f:
@@ -698,10 +783,10 @@ class App:
     def load_caches(self):
         """Autocomplete answers + card names from earlier searches (for offline guesses)."""
         try:
-            data = json.loads(SUGGEST_FILE.read_text())
+            data = json.loads((web_store("autocomplete") or "{}") if WEB else SUGGEST_FILE.read_text())
             if isinstance(data, dict):
                 self.ac_cache = data
-        except (OSError, ValueError):
+        except (OSError, ValueError, AttributeError):
             pass
         for entry in self.ac_cache.values():
             try:
@@ -722,8 +807,8 @@ class App:
             self.ac_cache, self.ac_dirty = dict(keep), False
             text = json.dumps(self.ac_cache)
         try:
-            write_atomic(SUGGEST_FILE, text)
-        except OSError as e:
+            web_store("autocomplete", text) if WEB else write_atomic(SUGGEST_FILE, text)
+        except Exception as e:
             print("cache save failed:", e, file=sys.stderr)
 
     # ------------------------------------------------------------------ phones / TV
@@ -1090,7 +1175,7 @@ class App:
         for i in range(n):
             p = new_player(i, life)
             if i < len(old):
-                p.update({k: old[i][k] for k in ("name", "color", "art", "credit")})
+                p.update({k: old[i].get(k) for k in ("name", "color", "art", "credit", "art_url")})
             self.players.append(p)
         self.fx.clear()
         self.modals.clear()
@@ -1153,7 +1238,7 @@ class App:
     def recolor_player(self, i):
         p = self.players[i]
         p["color"] = (p["color"] + 1) % len(PALETTE)
-        p["art"], p["credit"] = None, ""
+        p["art"], p["credit"], p["art_url"] = None, "", None
         self.remember_profile(p)
         self.changed()
 
@@ -1180,7 +1265,7 @@ class App:
 
     def remember_profile(self, p):
         if not p["name"].startswith("Player "):
-            self.profiles[p["name"]] = {k: p[k] for k in ("color", "art", "credit")}
+            self.profiles[p["name"]] = {k: p.get(k) for k in ("color", "art", "credit", "art_url")}
 
     # ------------------------------------------------------------------ modal plumbing
     def push(self, kind, **kw):
@@ -1213,12 +1298,12 @@ class App:
             return
         m["sugg_due"], t = None, m["text"]
 
-        def work():
-            names = m["suggest"](t)
+        async def work():
+            names = await m["suggest"](t)
             if m["text"] == t:                       # still what's on screen?
                 m["sugg"] = names
                 self.dirty = True
-        threading.Thread(target=work, daemon=True).start()
+        spawn(work)
 
     # ------------------------------------------------------------------ player panel
     def wedge_bg(self, p, seat, dead):
@@ -1350,6 +1435,8 @@ class App:
             ("Back to game", self.pop, BTN),
             ("Quit", self.quit, BTN_BAD),
         ]
+        if WEB:                                   # no server, casting or quitting in a browser tab
+            items = [it for it in items if it[0] not in ("Phones & TV", "Cast to TV", "Quit")]
         rh = (v.h - u - u // 2) // ((len(items) + 1) // 2)
         for k, (label, fn, bg) in enumerate(items):
             r = (k % 2 * W // 2, u + k // 2 * rh, W // 2, rh)
@@ -1612,6 +1699,8 @@ class App:
                 ("Local image", lambda: self.open_local_images(i, ang)),
                 ("Colour", recolor),
                 ("Profiles", lambda: self.open_profiles(i, ang))]
+        if WEB:                                   # no image folder in a browser
+            acts = [a for a in acts if a[0] != "Local image"]
         for k, (label, fn) in enumerate(acts):
             self.button(v, (k * W // len(acts), u, W // len(acts), u), label, fn, size=u * 0.38)
 
@@ -1749,13 +1838,31 @@ class App:
         m["on_pick"](it)
 
     # ------------------------------------------------------------------ art / profiles
-    def set_art(self, i, path, credit):
+    def set_art(self, i, path, credit, url=None):
+        """url: where the art came from, so the browser build can fetch it again after a
+        reload (its files don't survive one)."""
         p = self.players[i]
-        p["art"], p["credit"] = path, credit
+        p["art"], p["credit"], p["art_url"] = path, credit, url
         self.remember_profile(p)
         self.changed()
 
-    def search_cards(self, query):
+    async def restore_art(self):
+        """Browser: re-download card art whose cached file is gone (it lived in memory)."""
+        wanted = {}
+        for p in self.players + list(self.profiles.values()):
+            if p.get("art") and p.get("art_url") and not os.path.exists(p["art"]):
+                wanted[p["art"]] = p["art_url"]
+        for path, url in wanted.items():
+            try:
+                data = await fetch_bytes(url)
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                Path(path).write_bytes(data)
+                self.img_cache.clear()
+                self.dirty = True
+            except Exception as e:
+                print("art restore failed:", url, e, file=sys.stderr)
+
+    async def search_cards(self, query):
         """Scryfall art search, cached on disk for SEARCH_TTL so repeating a search costs
         no API calls. Falls back to saved (even stale) results when offline.
         Returns (cards, note); raises on network errors with nothing cached."""
@@ -1767,9 +1874,9 @@ class App:
         except (OSError, ValueError, KeyError, TypeError):
             cached = None
         try:
-            data = scryfall("/cards/search", q=query, unique="art", order="edhrec").get("data", [])
+            data = (await scryfall("/cards/search", q=query, unique="art", order="edhrec")).get("data", [])
         except Exception as e:
-            if isinstance(e, urllib.error.HTTPError) and e.code == 404:
+            if isinstance(e, ScryfallError) and e.status == 404:
                 data = []                              # Scryfall's "no cards matched"
             elif cached:
                 return cached["cards"], "Offline - showing saved results"
@@ -1789,9 +1896,9 @@ class App:
             self.known_names.update(c["name"] for c in cards)
         return cards, ""
 
-    def suggest_cards(self, text):
+    async def suggest_cards(self, text):
         """Card-name guesses from Scryfall autocomplete (cached); local guesses if offline.
-        Runs on a worker thread."""
+        Runs in the background (see spawn)."""
         q = " ".join(text.lower().split())
         if len(q) < 2:
             return []
@@ -1800,7 +1907,7 @@ class App:
         if hit and time.time() - hit[0] < SUGGEST_TTL:
             return hit[1]
         try:
-            names = scryfall("/cards/autocomplete", q=q).get("data", [])[:20]
+            names = (await scryfall("/cards/autocomplete", q=q)).get("data", [])[:20]
         except Exception:
             return hit[1] if hit else self.local_card_names(text)
         with self.cache_lock:
@@ -1826,35 +1933,35 @@ class App:
 
     def open_art_search(self, i, query, angle, label=None):
         grid = dict(title=f"Card art: {label or query}", items=[], page=0, status="Searching Scryfall...",
-                    angle=angle, on_pick=lambda it: self.set_art(i, it["img"], it["value"]))
+                    angle=angle, on_pick=lambda it: self.set_art(i, it["img"], it["value"], it.get("url")))
         self.push("grid", **grid)
         grid = self.modals[-1]
 
-        def work():
+        async def work():
             try:
-                cards, note = self.search_cards(query)
+                cards, note = await self.search_cards(query)
                 for c in cards:
                     path = CACHE_DIR / f"{c['id']}.jpg"
                     if not path.exists():                 # art is cached on disk by card id
                         try:
                             tmp = path.with_suffix(".part")
-                            tmp.write_bytes(http_get(c["art"]))
+                            tmp.write_bytes(await fetch_bytes(c["art"]))
                             os.replace(tmp, path)
-                            time.sleep(0.05)              # be polite to the image CDN
+                            await asyncio.sleep(0.05)     # be polite to the image CDN
                         except Exception:
                             continue                      # offline: show what we have
                     credit = f"{c['name']} - illus. {c['artist']} - (c) Wizards of the Coast"
                     grid["items"].append({"label": f"{c['name']} ({c['set'].upper()})",
-                                          "img": str(path), "value": credit})
+                                          "img": str(path), "value": credit, "url": c["art"]})
                     grid["status"] = "Loading..."
                     self.dirty = True
                 grid["status"] = note if grid["items"] else "No cards found"
-            except urllib.error.HTTPError as e:
-                grid["status"] = f"Scryfall error {e.code}"
+            except ScryfallError as e:
+                grid["status"] = str(e)
             except Exception as e:                            # offline, DNS, timeout...
                 grid["status"] = f"Network problem: {e}"
             self.dirty = True
-        threading.Thread(target=work, daemon=True).start()
+        spawn(work)
 
     def open_local_images(self, i, angle):
         exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
@@ -2084,39 +2191,69 @@ class App:
         self.running = False
 
     def run(self, max_frames=None):
+        """Desktop main loop."""
+        self.begin()
+        frames = 0
+        try:
+            while self.running:
+                self.step()
+                frames += 1
+                if max_frames and frames >= max_frames:
+                    break
+        finally:                                # also on a crash
+            self.end()
+
+    async def run_async(self):
+        """Browser main loop: the same frames, handing control back to the page after each."""
+        self.begin()
+        try:
+            while self.running:
+                self.step()
+                await asyncio.sleep(0)
+        finally:
+            self.end()
+
+    def begin(self):
+        if WEB:
+            return
         # docker stop / systemd / shutdown send SIGTERM, a closed terminal SIGHUP, Ctrl+C
         # SIGINT: leave the loop normally so the game is saved instead of dying mid-throttle
         for name in ("SIGTERM", "SIGINT", "SIGHUP"):
             if hasattr(signal, name):
                 signal.signal(getattr(signal, name), self.stop)
-        frames = 0
-        try:
-            while self.running:
-                for e in pygame.event.get():
-                    self.handle(e)
-                self.tick_holds()
-                self.tick_suggest()
-                self.tick_remote()
-                now = time.time()
-                if self.toast[0] and now - self.toast[1] < 3.2:
-                    self.dirty = True
-                if any(now - fx["t"] < 1.9 for fx in self.fx.values()):
-                    self.dirty = True
-                self.tick_first()
-                if self.dirty:
-                    self.render()
-                if self.state_dirty and now - self.last_save > SAVE_INTERVAL:
-                    self.save_state()
-                self.clock.tick(self.args.fps)
-                frames += 1
-                if max_frames and frames >= max_frames:
-                    break
-        finally:                                # also on a crash
-            if self.state_dirty:
-                self.save_state()
-            if self.companion:
-                self.companion.stop()
-            pygame.quit()
+
+    def step(self):
+        """One frame: input, timers, phones, drawing, autosave."""
+        for e in pygame.event.get():
+            self.handle(e)
+        self.tick_holds()
+        self.tick_suggest()
+        self.tick_remote()
+        now = time.time()
+        if WEB and now - self.web_checked > 0.5:     # phone rotated / window resized
+            self.web_checked = now
+            size = web_screen_size()
+            if size != self.web_size:
+                self.web_size = size
+                self.screen = pygame.display.set_mode(size)
+                self.make_canvas()
+        if self.toast[0] and now - self.toast[1] < 3.2:
+            self.dirty = True
+        if any(now - fx["t"] < 1.9 for fx in self.fx.values()):
+            self.dirty = True
+        self.tick_first()
+        if self.dirty:
+            self.render()
+        if self.state_dirty and now - self.last_save > SAVE_INTERVAL:
+            self.save_state()
+        self.clock.tick(self.args.fps)
+
+    def end(self):
+        if self.state_dirty:
+            self.save_state()
+        if self.companion:
+            self.companion.stop()
+        pygame.quit()
 
 
 # --------------------------------------------------------------------------- web pages
@@ -2747,6 +2884,39 @@ start();
 </script>
 </body></html>
 """.replace("/*CLIENT*/", CLIENT_JS)
+
+
+def web_screen_size():
+    """Browser: framebuffer for the page's current shape (sharper on high-DPI phones, capped
+    so drawing stays fast)."""
+    import platform
+    w, h = int(platform.window.innerWidth), int(platform.window.innerHeight)
+    scale = min(2.0, float(platform.window.devicePixelRatio or 1), 1600 / max(w, h, 1))
+    return max(320, round(w * scale)), max(240, round(h * scale))
+
+
+async def main_async():
+    """Browser entry point (pygbag runs web/main.py, which awaits this)."""
+    import types
+    import platform
+    app = App(types.SimpleNamespace(windowed=None, rotate=None, fps=30, companion_port=None))
+    if "selftest" in str(platform.window.location.search):
+        spawn(lambda: web_selftest(app))
+    await app.run_async()
+
+
+async def web_selftest(app):
+    """?selftest in the page URL (used by tests/web_test.py): exercise Scryfall search and an
+    image download through the browser's fetch, report into localStorage."""
+    result = {"ok": False}
+    try:
+        cards, _ = await app.search_cards('!"Sol Ring"')
+        art = await fetch_bytes(cards[0]["art"]) if cards else b""
+        result = {"ok": bool(cards) and art[:2] == b"\xff\xd8", "cards": len(cards), "art_bytes": len(art),
+                  "screen": list(app.screen.get_size())}
+    except Exception as e:
+        result["error"] = repr(e)
+    web_store("selftest", json.dumps(result))
 
 
 def main():

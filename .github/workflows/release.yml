@@ -1,0 +1,78 @@
+name: Release
+
+# Cut a release by pushing a version tag:   git tag v1.1.0 && git push origin v1.1.0
+#
+# Nothing is published unless every test passes first: the full CI suite (desktop smoke
+# tests on x86_64 + arm64, Pi OS's apt pygame, the phones/TV server, and the phone/browser
+# build end to end in headless Chrome) and the container tests. Only then:
+#   - the multi-arch container image is pushed as :1.1.0 and :1.1
+#   - a GitHub Release is created with the tested phone/browser app attached (lifepi-web.zip)
+#   - optionally the phone app is deployed to GitHub Pages (set repository variable
+#     DEPLOY_PAGES=true and Settings > Pages > Source: GitHub Actions)
+# Running it by hand (Actions > Release > Run workflow) on a branch is a dry run: tests only.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # create the GitHub Release
+  packages: write        # push the container image
+  pages: write           # optional Pages deploy
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    name: all tests
+    uses: ./.github/workflows/ci.yml
+
+  container:
+    name: container
+    needs: tests
+    uses: ./.github/workflows/docker.yml
+    with:
+      publish: ${{ startsWith(github.ref, 'refs/tags/v') }}
+
+  github-release:
+    name: GitHub Release
+    needs: [tests, container]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4      # the phone app exactly as CI tested it
+        with:
+          name: lifepi-web
+          path: lifepi-web
+      - run: cd lifepi-web && zip -qr ../lifepi-web.zip .
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: lifepi-web.zip
+          body: |
+            **Container:** `docker run -d -p 8080:8080 -p 8765:8765 -v lifepi-data:/data ghcr.io/therealshadoh/lifepi-web:${{ github.ref_name }}`
+
+            **Phone / tablet app:** `lifepi-web.zip` is a static site - host it anywhere with HTTPS
+            (e.g. GitHub Pages), open it on the phone and use "Add to Home Screen".
+
+  pages:
+    name: deploy phone app to GitHub Pages
+    needs: github-release
+    if: startsWith(github.ref, 'refs/tags/v') && vars.DEPLOY_PAGES == 'true'
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: lifepi-web
+          path: lifepi-web
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: lifepi-web
+      - id: deploy
+        uses: actions/deploy-pages@v4
