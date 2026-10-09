@@ -49,6 +49,7 @@ STATE_FILE = CONFIG_DIR / "state.json"
 BACKUP_FILE = CONFIG_DIR / "state.json.bak"         # the save before the latest one
 SAVE_INTERVAL = 0.5                                 # max seconds of play a power cut can lose
 COMPANION_PORT = 8765                               # phones + TV view, on the local network
+FIRST_SHOW = 3.0                                    # seconds "Goes first!" stays up after the spin
 SEARCH_DIR = CACHE_DIR.parent / "search"            # cached Scryfall search results
 SUGGEST_FILE = CACHE_DIR.parent / "autocomplete.json"
 SEARCH_TTL = 7 * 86400                              # re-ask Scryfall after a week
@@ -561,9 +562,10 @@ class App:
         for d in (CONFIG_DIR, CACHE_DIR, SEARCH_DIR, IMAGE_DIR):
             d.mkdir(parents=True, exist_ok=True)
         self.settings = {"rotation": 0, "seating": "table", "cmd_hits_life": True,
-                         "start_life": 40, "companion": True, "companion_pin": ""}
+                         "start_life": 40, "companion": True, "companion_pin": "", "random_first": True}
         self.players = [new_player(i, 40) for i in range(4)]
         self.profiles = {}
+        self.first, self.first_anim, self.game_id = -1, None, 0    # who goes first (-1: not picked)
         self.load_state()
         self.state_dirty = self.snap_dirty = False
         if not self.settings["companion_pin"]:
@@ -622,6 +624,8 @@ class App:
             self.profiles = profiles
             if players:
                 self.players = players
+            first = as_int(data.get("first"), -1)
+            self.first = first if 0 <= first < len(self.players) else -1
             return
 
     def parse_state(self, data):
@@ -641,6 +645,8 @@ class App:
         pin = s.get("companion_pin")
         if isinstance(pin, str) and len(pin) == 6 and pin.isdigit():
             settings["companion_pin"] = pin
+        if isinstance(s.get("random_first"), bool):
+            settings["random_first"] = s["random_first"]
         start = settings.get("start_life", self.settings["start_life"])
 
         players = []
@@ -671,7 +677,8 @@ class App:
 
     def save_state(self):
         """Durably save the game. The previous save is kept as state.json.bak."""
-        data = {"settings": self.settings, "players": self.players, "profiles": self.profiles}
+        data = {"settings": self.settings, "players": self.players, "profiles": self.profiles,
+                "first": self.first}
         try:
             tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
             with open(tmp, "w", encoding="utf-8") as f:
@@ -756,6 +763,9 @@ class App:
                         "counters": dict(p["counters"]), "cmd": p["cmd"][:n], "ko": self.ko_reason(p),
                         "pos": rects[i], "poly": polys[i]})
         return {"players": out, "start_life": self.settings["start_life"],
+                # who goes first - hidden while the device is still spinning, so no spoilers
+                "first": -1 if self.first_spinning() else self.first, "game": self.game_id,
+                "random_first": self.settings["random_first"],
                 "cmd_hits_life": self.settings["cmd_hits_life"], "seating": self.settings["seating"],
                 "seatings": [[k, label] for k, label in SEATINGS.items()], "max_players": MAX_PLAYERS,
                 "counters": [[k, label] for k, label, _ in COUNTERS],
@@ -816,6 +826,9 @@ class App:
             self.start_game(n, self.settings["start_life"])
         elif op == "seating":
             self.set_seating(a.get("value"))
+        elif op == "random_first" and isinstance(a.get("on"), bool):
+            self.settings["random_first"] = a["on"]
+            self.changed()
         elif op == "cmd_hits_life" and isinstance(a.get("on"), bool):
             self.settings["cmd_hits_life"] = a["on"]
             self.changed()
@@ -1081,6 +1094,45 @@ class App:
             self.players.append(p)
         self.fx.clear()
         self.modals.clear()
+        self.game_id += 1
+        self.pick_first()
+        self.changed()
+
+    def pick_first(self):
+        """Choose who goes first (if enabled) and start the spin that reveals it."""
+        n = len(self.players)
+        self.first, self.first_anim = -1, None
+        if n < 2 or not self.settings["random_first"]:
+            return
+        rng = random.SystemRandom()                 # fair, unpredictable
+        k, start = rng.randrange(n), rng.randrange(n)
+        seq = [(start + j) % n for j in range(2 * n + (k - start) % n + 1)]   # two laps, land on k
+        times, t = [], 0.0
+        for j in range(len(seq)):                   # slows down towards the end
+            times.append(t)
+            t += 0.05 + 0.32 * (j / len(seq)) ** 2.4
+        self.first = k
+        self.first_anim = {"t0": time.time(), "seq": seq, "times": times, "land": t}
+
+    def first_spinning(self):
+        a = self.first_anim
+        return bool(a) and time.time() - a["t0"] < a["land"]
+
+    def tick_first(self):
+        """Keep the spin animating; publish the result to phones once it lands."""
+        a = self.first_anim
+        if not a:
+            return
+        age = time.time() - a["t0"]
+        self.dirty = True
+        if age >= a["land"] and not a.get("landed"):
+            a["landed"] = True
+            self.snap_dirty = True                 # phones/TV get the result now, not before
+        if age >= a["land"] + FIRST_SHOW:
+            self.first_anim = None
+
+    def toggle_random_first(self):
+        self.settings["random_first"] = not self.settings["random_first"]
         self.changed()
 
     def rotate_screen(self):
@@ -1116,6 +1168,8 @@ class App:
             self.fx[b] = fa
         if fb:
             self.fx[a] = fb
+        if self.first in (a, b):                    # "goes first" stays with the player
+            self.first = b if self.first == a else a
         self.changed()
 
     def seat_at(self, pos):
@@ -1208,7 +1262,11 @@ class App:
             s.fill(PALETTE[p["color"] % len(PALETTE)])
             s.blit(self.shade(w, h, 0, 25, 95), (0, 0))
         top, bot = int(h * 0.2), int(h * 0.22)
-        self.text(s, p["name"], top * 0.6, maxw=w * 0.85, center=(w // 2, top // 2))
+        first = i == self.first and not self.first_spinning()
+        nr = self.text(s, p["name"], top * 0.6, maxw=w * (0.68 if first else 0.85), center=(w // 2, top // 2))
+        if first:                                   # who went first, for the rest of the game
+            badge = self.make_pill("1st", top * 0.36, fg=(30, 24, 0), bg=(255, 220, 90), alpha=240)
+            s.blit(badge, badge.get_rect(midleft=(nr.right + max(4, top // 8), top // 2)))
 
         size = int(min(h * 0.56, w * 0.5))
         self.text(s, str(p["life"]), size, maxw=w * 0.62, center=(w // 2, h // 2))
@@ -1481,8 +1539,11 @@ class App:
         def start():
             self.settings["seating"] = m["seating"]
             self.start_game(m["n"], m["life"])
-        self.button(v, (0, y, W // 2, rh), "Cancel", self.pop)
-        self.button(v, (W // 2, y, W // 2, rh), "Start", start, bg=BTN_OK)
+        rf = self.settings["random_first"]
+        self.button(v, (0, y, W // 3, rh), "Cancel", self.pop)
+        self.button(v, (W // 3, y, W // 3, rh), f"Random first: {'on' if rf else 'off'}", self.toggle_random_first,
+                    bg=BTN_ON if rf else BTN, size=min(rh * 0.36, W * 0.035))
+        self.button(v, (2 * W // 3, y, W - 2 * W // 3, rh), "Start", start, bg=BTN_OK)
         v.finish()
 
     def draw_dice(self, m):
@@ -1830,6 +1891,7 @@ class App:
         for seat in self.seats:                   # round table: gaps between the wedges
             if not seat.is_rect:
                 pygame.draw.polygon(self.canvas, DARK, seat.poly, 2 * gap)
+        self.draw_first_spin()
         self.draw_drags()
         r = max(22, min(self.W, self.H) // 22)
         c = self.menu_pos(r)
@@ -1876,6 +1938,34 @@ class App:
         mid = (lo + hi) // 2
         x = min(range(lo, hi + 1, 2), key=lambda x: (-min(clear, min(abs(x - c) for c in xs)), abs(x - mid)))
         return (x, self.H // 2)
+
+    def draw_first_spin(self):
+        """Random first player: a highlight runs round the table, slows and lands; then
+        "Goes first!" shows on that seat, facing its player."""
+        a = self.first_anim
+        if not a or not self.seats:
+            return
+        age = time.time() - a["t0"]
+        gold = (255, 220, 90)
+        if age < a["land"]:
+            j = max(k for k, t in enumerate(a["times"]) if t <= age)
+            seat = self.seats[a["seq"][j] % len(self.seats)]
+            pygame.draw.polygon(self.canvas, gold, seat.poly, max(4, min(self.W, self.H) // 80))
+            return
+        if not 0 <= self.first < len(self.seats):
+            return
+        seat = self.seats[self.first]
+        pulse = 0.5 + 0.5 * math.sin((age - a["land"]) * 9)
+        pygame.draw.polygon(self.canvas, gold, seat.poly, max(4, min(self.W, self.H) // 80) + round(3 * pulse))
+        cx, cy, cw, ch = seat.frame
+        pill = self.make_pill("Goes first!", max(16, min(cw, ch) * 0.14), fg=(30, 24, 0), bg=gold, alpha=250)
+        fade = a["land"] + FIRST_SHOW - age
+        if fade < 0.6:
+            pill.set_alpha(max(0, int(255 * fade / 0.6)))
+        if seat.angle:
+            pill = pygame.transform.rotozoom(pill, seat.angle, 1) if seat.angle % 90 else \
+                pygame.transform.rotate(pill, seat.angle)
+        self.canvas.blit(pill, pill.get_rect(center=(round(cx), round(cy))))
 
     def draw_drags(self):
         """Seat-swap drag feedback: dim the source, outline the target, float the name."""
@@ -2012,6 +2102,7 @@ class App:
                     self.dirty = True
                 if any(now - fx["t"] < 1.9 for fx in self.fx.values()):
                     self.dirty = True
+                self.tick_first()
                 if self.dirty:
                     self.render()
                 if self.state_dirty and now - self.last_save > SAVE_INTERVAL:
@@ -2065,11 +2156,11 @@ async function start() {
   try {
     const r = await fetch(api("/api/state"));
     if (r.status === 401 || r.status === 429) return onStatus("auth", r.status);
-    state = await r.json(); trackDeltas(state); onState(state);
+    state = await r.json(); trackDeltas(state); trackFirst(state); onState(state);
   } catch (e) { onStatus("offline"); setTimeout(start, 2000); return; }
   es = new EventSource(api("/api/events"));
   es.onopen = () => onStatus("online");
-  es.onmessage = (e) => { state = JSON.parse(e.data); trackDeltas(state); onStatus("online"); onState(state); };
+  es.onmessage = (e) => { state = JSON.parse(e.data); trackDeltas(state); trackFirst(state); onStatus("online"); onState(state); };
   es.onerror = () => {                          // the browser retries by itself unless refused
     onStatus("offline");
     if (es && es.readyState === 2) { es = null; setTimeout(start, 2000); }
@@ -2096,6 +2187,19 @@ function deltaOf(seat) {
   return d && d.d && Date.now() - d.t < 1800 ? d.d : 0;
 }
 const fmt = (d) => (d > 0 ? "+" : "−") + Math.abs(d);
+
+// "Goes first!": flash once when a new game's first player is revealed (not on page load,
+// not when seats are swapped later)
+let revealedGame = null, firstFlashAt = 0;
+const FIRST_FLASH = 3000;
+function trackFirst(s) {
+  if (s.first < 0) { if (revealedGame === null) revealedGame = -1; return; }
+  if (revealedGame !== null && revealedGame !== s.game) {
+    firstFlashAt = Date.now(); setTimeout(() => onState(state), FIRST_FLASH + 50);
+  }
+  revealedGame = s.game;
+}
+const firstFlash = (seat) => state && state.first === seat && Date.now() - firstFlashAt < FIRST_FLASH;
 
 // round table: each player's wedge as a clipped background, plus the gaps between wedges
 const pct = (poly) => "polygon(" + poly.map(([x, y]) => `${x * 100}% ${y * 100}%`).join(",") + ")";
@@ -2205,6 +2309,14 @@ PHONE_HTML = r"""<!doctype html>
   .strip.top { top:0; height:20%; font-weight:700; font-size:min(10cqh, 8cqw); text-shadow:0 1px 3px rgba(0,0,0,.7); }
   .strip.top span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .strip.top small { color:var(--warn); font-weight:600; margin-left:.35em; flex:none; }
+  .first1 { flex:none; margin-left:.4em; padding:0 .45em; border-radius:999px; background:#ffdc5a; color:#1e1800;
+            font-size:.72em; font-weight:800; line-height:1.5; text-shadow:none; }
+  .goes { position:absolute; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2; pointer-events:none;
+          padding:.25em .8em; border-radius:999px; background:#ffdc5a; color:#1e1800; font-weight:800; white-space:nowrap;
+          font-size:min(12cqh, 9cqw); box-shadow:0 0 0 4px rgba(255,220,90,.35); animation:goes 3s ease-out forwards; }
+  @keyframes goes { 0% { transform:translate(-50%, -50%) scale(.6); opacity:0 } 12% { transform:translate(-50%, -50%) scale(1.08); opacity:1 }
+                    20%, 80% { transform:translate(-50%, -50%) scale(1); opacity:1 } 100% { opacity:0 } }
+  .panel.goesfirst { box-shadow:0 0 0 4px #ffdc5a, 0 3px 12px rgba(0,0,0,.35); }
   .strip.bot { bottom:0; height:22%; gap:min(2cqh, 1.6cqw); flex-wrap:wrap; align-content:center; }
   .half { position:absolute; top:20%; bottom:22%; width:50%; border:0; background:none; padding:0;
           touch-action:none; display:flex; align-items:center; }
@@ -2385,10 +2497,12 @@ function panel(p) {
   if (!bottom.length) bottom.push(el("span", { class: "pill empty" }, "counters"));
   const open = () => openSheet({ kind: "player", seat });
   return el("div", { class: "cell" + (p.poly ? " inwedge" : ""), style: placeAt(boxOf(p, document.getElementById("table"))) },
-    el("div", { class: "panel" + (seat === me ? " me" : "") + (p.ko ? " dead" : ""),
+    el("div", { class: "panel" + (seat === me ? " me" : "") + (p.ko ? " dead" : "") + (firstFlash(seat) ? " goesfirst" : ""),
                 style: p.poly ? {} : cardBg(p, "rgba(0,0,0,.6), rgba(0,0,0,.32) 45%, rgba(0,0,0,.66)") },
       el("button", { class: "strip top", type: "button", onclick: open },
-         el("span", {}, p.name), seat === me ? el("small", {}, "you") : null),
+         el("span", {}, p.name), seat === me ? el("small", {}, "you") : null,
+         seat === state.first ? el("span", { class: "first1" }, "1st") : null),
+      firstFlash(seat) ? el("div", { class: "goes" }, "Goes first!") : null,
       pressable("button", { class: "half minus", "aria-label": "minus" }, () => act({ op: "life", seat, d: -1 }),
                 () => act({ op: "life", seat, d: -10 }), 500, el("i", {}, "−")),
       pressable("button", { class: "half plus", "aria-label": "plus" }, () => act({ op: "life", seat, d: 1 }),
@@ -2472,9 +2586,13 @@ function gameSheet() {
       el("button", { type: "button", class: s.seating === key ? "on" : "", onclick: () => act({ op: "seating", value: key }) }, label))),
     el("p", { class: "muted" }, "Changes the current game's layout on LifePi and every screen."),
     el("h4", {}, "Rules"),
-    el("div", { class: "rows" }, el("button", { type: "button", class: "row switch" + (s.cmd_hits_life ? " on" : ""),
-        onclick: () => act({ op: "cmd_hits_life", on: !s.cmd_hits_life }) },
-      el("span", { class: "label" }, "Commander damage also reduces life"), el("i"))),
+    el("div", { class: "rows" },
+      el("button", { type: "button", class: "row switch" + (s.random_first ? " on" : ""),
+                     onclick: () => act({ op: "random_first", on: !s.random_first }) },
+        el("span", { class: "label" }, "Pick a random first player on new game"), el("i")),
+      el("button", { type: "button", class: "row switch" + (s.cmd_hits_life ? " on" : ""),
+                     onclick: () => act({ op: "cmd_hits_life", on: !s.cmd_hits_life }) },
+        el("span", { class: "label" }, "Commander damage also reduces life"), el("i"))),
     el("h4", {}, "Big screen"),
     el("p", { class: "muted" }, "Open the TV view on a TV browser, cast this tab, or mirror this phone to a Roku. ",
        el("a", { href: "/tv?k=" + encodeURIComponent(KEY), target: "_blank" }, "Open TV view")),
@@ -2543,6 +2661,14 @@ TV_HTML = r"""<!doctype html>
           background-position:center; display:flex; flex-direction:column; align-items:center; justify-content:center;
           text-align:center; box-shadow:0 1vmin 3vmin rgba(0,0,0,.45); }
   .card.dead { filter:saturate(.3) brightness(.55); }
+  .first1 { display:inline-block; margin-left:.35em; padding:0 .45em; border-radius:999px; background:#ffdc5a; color:#1e1800;
+            font-size:.7em; font-weight:800; vertical-align:middle; text-shadow:none; }
+  .goes { position:absolute; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2; padding:.25em .8em;
+          border-radius:999px; background:#ffdc5a; color:#1e1800; font-weight:800; white-space:nowrap;
+          font-size:5vmin; font-size:min(12cqh, 9cqw); animation:goes 3s ease-out forwards; }
+  @keyframes goes { 0% { transform:translate(-50%, -50%) scale(.6); opacity:0 } 12% { transform:translate(-50%, -50%) scale(1.08); opacity:1 }
+                    20%, 80% { transform:translate(-50%, -50%) scale(1); opacity:1 } 100% { opacity:0 } }
+  .card.goesfirst { box-shadow:0 0 0 .7vmin #ffdc5a, 0 1vmin 3vmin rgba(0,0,0,.45); }
   .name { position:absolute; top:5%; left:6%; right:6%; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
           font-size:4vmin; font-size:min(10cqh, 7cqw); text-shadow:0 .3vmin 1vmin rgba(0,0,0,.7); }
   .life { font-weight:800; line-height:1; font-variant-numeric:tabular-nums; letter-spacing:-.02em;
@@ -2594,9 +2720,10 @@ function render() {
                                           `${SHORT[key] || key} ${p.counters[key]}`));
     // same place as on the device; round tables: upright card inside the player's wedge
     return el("div", { class: "cell" + (p.poly ? " inwedge" : ""), style: placeAt(boxOf(p, document.getElementById("grid"))) },
-      el("div", { class: "card" + (p.ko ? " dead" : ""),
+      el("div", { class: "card" + (p.ko ? " dead" : "") + (firstFlash(p.seat) ? " goesfirst" : ""),
                   style: p.poly ? {} : cardBg(p, "rgba(0,0,0,.62), rgba(0,0,0,.38) 45%, rgba(0,0,0,.72)") },
-      el("div", { class: "name" }, p.name),
+      el("div", { class: "name" }, p.name, p.seat === s.first ? el("span", { class: "first1" }, "1st") : null),
+      firstFlash(p.seat) ? el("div", { class: "goes" }, "Goes first!") : null,
       d ? el("div", { class: "delta" + (d < 0 ? " neg" : "") }, fmt(d)) : null,
       el("div", { class: "life" }, p.life),
       p.ko ? el("div", { class: "ko" }, p.ko === "life" ? "KO" : "KO · " + p.ko) : null,

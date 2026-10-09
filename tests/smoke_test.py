@@ -230,6 +230,49 @@ app.save_state(); r8 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
 assert len(r8.players) == 8 and r8.players[0]["cmd"][7] == 4 and r8.settings["seating"] == "round"
 app.settings["seating"] = "table"; app.start_game(4, 40); app.render()
 print("8 players / rotated sheets ok")
+
+# --- random first player on new game ------------------------------------------------
+def land(a):                                     # fast-forward the spin
+    a.first_anim["t0"] -= a.first_anim["land"] + 0.01
+    a.tick_first()
+assert app.settings["random_first"] is True      # on by default
+for seating in lifepi.SEATINGS:
+    app.settings["seating"] = seating
+    for n in range(2, lifepi.MAX_PLAYERS + 1):
+        app.start_game(n, 40)
+        k = app.first
+        assert 0 <= k < n and app.first_spinning(), (seating, n)
+        anim = app.first_anim
+        assert anim["seq"][-1] == k and len(anim["seq"]) > n            # at least one full lap, lands on k
+        gaps = [b - a for a, b in zip(anim["times"], anim["times"][1:])]
+        assert gaps == sorted(gaps), "the spin should slow down"
+        app.render()                              # spinning highlight
+        land(app); app.render()                   # landed: "Goes first!" facing that seat
+        assert not app.first_spinning() and app.first == k
+        app.first_anim["t0"] -= lifepi.FIRST_SHOW; app.tick_first()
+        assert app.first_anim is None
+        app.render()                              # badge only
+app.settings["seating"] = "round"; app.start_game(5, 40); land(app); app.render()
+pygame.image.save(app.canvas, os.path.join(shots, "goes_first_round.png"))
+app.settings["seating"] = "table"; app.start_game(4, 40)
+app.first_anim["t0"] -= app.first_anim["land"] * 0.5; app.render()
+pygame.image.save(app.canvas, os.path.join(shots, "first_spin.png"))
+land(app); app.render(); pygame.image.save(app.canvas, os.path.join(shots, "goes_first.png"))
+# the badge follows the player when seats are swapped; it survives a restart
+k = app.first; other = (k + 1) % 4; app.swap_seats(k, other); assert app.first == other
+app.save_state(); assert lifepi.App(NS(windowed="800x480", rotate=None, fps=30)).first == other
+# fair: every seat comes up about equally often
+counts = [0] * 8
+app.settings["seating"] = "table"
+for _ in range(8000):
+    app.players = [lifepi.new_player(i, 40) for i in range(8)]
+    app.pick_first(); counts[app.first] += 1
+assert all(850 < c < 1150 for c in counts), counts        # expected 1000 each (sd ~30)
+# off, or a single player: nobody is picked
+app.toggle_random_first(); app.start_game(4, 40); assert app.first == -1 and app.first_anim is None
+app.toggle_random_first(); app.start_game(1, 40); assert app.first == -1
+app.start_game(4, 40); land(app); app.first_anim = None
+print("random first player ok", counts)
 for n in range(1, 7):
     app.start_game(n, 40); app.render()
 app.save_state(); app2 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))

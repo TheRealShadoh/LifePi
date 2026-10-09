@@ -74,6 +74,15 @@ act(op="newgame", n=8, life=30, seating="ends")
 assert len(app.players) == 8 and app.settings["seating"] == "ends" and len(state()["players"][7]["cmd"]) == 8
 act(op="cmd", seat=0, src=7, d=3); assert app.players[0]["cmd"][7] == 3
 act(op="newgame", n=99, life=40); assert len(app.players) == 8                     # clamped
+# first player: hidden from phones while the device spins, revealed when it lands
+g0 = state()["game"]
+act(op="newgame", n=5, life=40)
+s1 = state(); assert s1["game"] == g0 + 1 and s1["first"] == -1 and app.first_spinning() and 0 <= app.first < 5
+app.first_anim["t0"] -= app.first_anim["land"] + 0.01; app.tick_first(); app.tick_remote()
+assert state()["first"] == app.first
+act(op="random_first", on=False); assert app.settings["random_first"] is False and state()["random_first"] is False
+act(op="reset"); assert state()["first"] == -1
+act(op="random_first", on=True); act(op="random_first", on="yes"); assert app.settings["random_first"] is True
 act(op="seating", value="table")
 for n in range(1, 7):
     app.start_game(n, 40); app.tick_remote()
