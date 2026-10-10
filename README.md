@@ -1,10 +1,14 @@
 # LifePi
 
 [![CI](https://github.com/TheRealShadoh/LifePi/actions/workflows/ci.yml/badge.svg)](https://github.com/TheRealShadoh/LifePi/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/TheRealShadoh/LifePi)](https://github.com/TheRealShadoh/LifePi/releases/latest)
 
 A touch-first **Magic: The Gathering life counter that runs natively on a Raspberry Pi** —
 no Android, no Waydroid, no browser. One Python file on top of pygame/SDL2, so it runs on
 any ARM (or x86) Linux box.
+
+**On a phone or tablet instead?** Open **https://therealshadoh.github.io/LifePi/** and
+*Add to Home Screen* - the same app, installable and offline ([details](#on-a-phone-or-tablet-no-pi-needed)).
 
 Built because forcing an Android life counter into landscape under Waydroid is miserable.
 LifePi is an **original, clean-room app** — it contains no code or assets from any other
@@ -56,9 +60,13 @@ Keys (optional, a keyboard is never required): `Esc` menu/back · `R` rotate · 
 
 Open the menu (round button) > **Phones & TV**. It shows a QR code, the address and a 6-digit PIN.
 
-- **Phones / tablets:** scan the QR code (or type the address and PIN). Pick your seat, then use
-  **Me** for your life, counters and commander damage, **Table** to adjust anyone, and **Game** to start a
-  new game or change the rules. Phones must be on the same network as LifePi; nothing is installed.
+- **Phones / tablets:** scan the QR code (or type the address and PIN). The phone shows the whole
+  table, laid out exactly like the Pi (same seats, seating style and player count), on one screen
+  with no scrolling: tap a panel's left / right half for −1 / +1, hold for ±10, tap a name or the
+  counters strip for that player's counters and commander damage. **Pick your seat** gives your panel
+  a yellow outline; **Game** starts a new game (1–8 players, starting life, seating style) and holds
+  the rules (random first player, commander damage reduces life). Changes show up instantly on the Pi
+  and every other phone. Phones must be on the same network as LifePi; nothing is installed.
 - **TV:** the **TV view** address shown there is a live, read-only scoreboard sized for a big screen.
   - *Chromecast, Google TV, Nvidia Shield:* menu > **Cast to TV**, pick the device (needs `python3-pychromecast`,
     which `install.sh` adds).
@@ -74,28 +82,37 @@ The QR code needs `python3-qrcode` (also installed by `install.sh`); without it 
 ## On a phone or tablet, no Pi needed
 
 The same `lifepi.py` also runs in a phone's browser (compiled to WebAssembly with
-[pygbag](https://pypi.org/project/pygbag/)) and installs like an app - Android and iPhone:
+[pygbag](https://pypi.org/project/pygbag/)) and installs like an app on Android and iPhone.
+
+1. Open **https://therealshadoh.github.io/LifePi/** on the phone (the first load fetches the
+   Python runtime, a few MB).
+2. **Add to Home Screen** - iPhone: Safari's Share menu; Android: the browser menu or the install prompt.
+3. Open it from the home screen: full screen, and it works offline from then on.
+
+Everything on the Pi works there - seating styles, up to 8 players, card art from Scryfall, profiles,
+random first player - except Phones & TV (a web page can't run a server), casting, and local image
+folders. The game is saved in the browser; card art is fetched again if the browser clears its cache.
+
+The site is published by each release (see [Releases](#releases)). To build or host it yourself:
 
 ```bash
 pip install pygbag==0.9.3 pygame-ce
-python web/build.py            # -> build/web/, a static site
-python web/build.py --serve    # try it at http://localhost:8000 (use 127.0.0.1 if pygame fails to load)
+python web/build.py            # -> build/web/, a static site (also attached to every release as lifepi-web.zip)
+python web/build.py --serve    # try it at http://127.0.0.1:8000 (use 127.0.0.1, not localhost: pygbag
+                               # treats localhost:8xxx as its own dev server and pygame won't load)
 ```
 
-Host `build/web` anywhere with HTTPS (every release attaches it as `lifepi-web.zip`, and can
-deploy it to GitHub Pages - see Releases below), open it on the phone, then **Add to Home Screen**
-(iPhone: Share menu; Android: browser menu or the install prompt). After the first visit it works
-offline. The game is saved in the browser (localStorage); card art is re-downloaded after the
-browser clears its cache. Not available in the phone app: Phones & TV (a page can't run a server),
-casting, and local image folders.
+Any HTTPS host works; installing and offline mode need HTTPS (or localhost).
 
 ## Run it in a browser (Docker)
 
-No Pi handy, or want it on a tablet/phone? The container runs the real app on a virtual
-display and streams it to any browser with noVNC. Images are multi-arch (amd64 + arm64).
+No Pi handy? The container runs the real desktop app on a virtual display and streams it to any
+browser with noVNC - including Phones & TV, which the phone app can't do. Images are multi-arch
+(amd64 + arm64): `:latest` follows `main`, `:1.1.0` / `:1.1` are releases.
 
 ```bash
-docker run -d --name lifepi -p 8080:8080 -v lifepi-data:/data ghcr.io/therealshadoh/lifepi-web
+docker run -d --name lifepi -p 8080:8080 -p 8765:8765 -v lifepi-data:/data \
+  -e LIFEPI_PUBLIC_URL=http://<this-machine's-LAN-IP>:8765 ghcr.io/therealshadoh/lifepi-web
 # or, from a clone:  docker compose up -d --build   (LIFEPI_PORT=8090 to use another host port)
 ```
 
@@ -124,21 +141,45 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 - Middle of a panel: left half −, right half + (hold for ±10)
 - **Hold a player's name and drag it** onto another panel to swap seats (commander damage follows the players)
 - Name strip or counter strip of a panel: opens that player's sheet (rename, card art, local image, colour, profiles, counters, commander damage) — oriented toward that player
-- Round button in the centre: main menu (new game, reset, dice, rotate, seating)
+- Round button: main menu - new game, reset, dice / coin, rotate, seating, commander damage rule,
+  Phones & TV, Cast to TV, quit
+- **New game:** 1–8 players, starting life (20 / 30 / 40 / custom), seating style, and random first player on / off
+- With a keyboard on the card-art search: Tab picks the first suggestion, Enter searches
 
 ## Releases
 
-Cut a release by pushing a version tag: `git tag v1.1.0 && git push origin v1.1.0`.
-[`release.yml`](.github/workflows/release.yml) first runs **every** test - the CI suite below plus
-the container tests - and publishes only if all pass: the container image (`:1.1.0`, `:1.1`), a
-GitHub Release with the tested phone app (`lifepi-web.zip`), and optionally the phone app on GitHub
-Pages (repository variable `DEPLOY_PAGES=true`, and Settings > Pages > Source: *GitHub Actions*).
-`:latest` is published from `main` only after CI has passed there. Running the Release workflow by
-hand on a branch is a dry run (tests only).
+Cut a release by pushing a version tag (bump `VERSION` in `lifepi.py` first):
+
+```bash
+git tag v1.2.0 && git push origin v1.2.0
+```
+
+[`release.yml`](.github/workflows/release.yml) first runs **every** test - the whole CI suite below
+plus the container tests - and publishes only if all of them pass:
+
+- the container image `ghcr.io/therealshadoh/lifepi-web:1.2.0` and `:1.2` (amd64 + arm64)
+- a [GitHub Release](https://github.com/TheRealShadoh/LifePi/releases) with release notes and the
+  tested phone app attached (`lifepi-web.zip`)
+- the phone app at https://therealshadoh.github.io/LifePi/ (GitHub Pages; controlled by the
+  repository variable `DEPLOY_PAGES`)
+
+Use tags rather than "Draft a new release" on GitHub - a release made on the website skips the
+tests. `:latest` is published from `main` only after CI has passed there. Running the Release
+workflow by hand on a branch is a dry run (tests only).
 
 ## Tests
 
-`SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` and `tests/companion_test.py` (phone / TV server) — headless; `python web/build.py && python tests/web_test.py` tests the phone app end to end in headless Chrome (touch, holds, Scryfall in the browser, reload, rotation, offline start); covers rotation/touch mapping, tap/hold, modals, persistence and a mocked Scryfall search. CI runs it on x86_64 and arm64 (the Pi's architecture), plus `tests/live_scryfall.py` against the real API.
+All headless; CI runs them on every push and before every release.
+
+| Test | Covers |
+|---|---|
+| `SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` | the app itself: rotation and touch mapping, tap / hold, every seating style for 1–8 players (each screen point belongs to one seat, clockwise order, taps on rotated seats), modals and rotated sheets, drag-to-swap, random first player (incl. fairness), search cache and suggestions (mocked Scryfall), saving / restart / crash / corrupt-save recovery |
+| `SDL_VIDEODRIVER=dummy python3 tests/companion_test.py` | the Phones & TV server: PIN and lock-out, every phone action, bad input, live updates, seat positions matching the Pi, art serving |
+| `python web/build.py && python tests/web_test.py` | the phone app end to end in headless Chrome at phone size: boot, real touch input, holds, Scryfall in the browser, reload, rotation, starting offline (needs Chrome and internet) |
+| `python3 tests/live_scryfall.py` | the real Scryfall API (non-blocking in CI) |
+
+CI runs the first two on x86_64 and arm64 (the Pi's architecture) with Python 3.11 and 3.13, and
+again with Pi OS's own `python3-pygame` package.
 
 ## Legal
 
