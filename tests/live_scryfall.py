@@ -29,3 +29,11 @@ app.grid_pick(grid, it)
 assert app.players[0]["art"] and "illus." in app.players[0]["credit"]
 app.render(); pygame.image.save(app.canvas, os.path.join(shots, "live_game.png"))
 print("live scryfall ok:", it["label"], "|", app.players[0]["credit"])
+
+# random commander art (what artless players get at start-up / new game)
+got = __import__("asyncio").run(app.random_card_art(set()))
+assert got, "no random art from Scryfall"
+path, credit, url = got
+assert os.path.getsize(path) > 5000 and app.cover(path, 266, 160) is not None, path
+assert "illus." in credit and url.startswith("https://"), (credit, url)
+print("live random art ok:", credit)

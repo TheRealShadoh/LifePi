@@ -24,6 +24,7 @@ life counter — released under the MIT licence so anyone can use, fork and impr
 - Tap **−/+** for 1, **hold** for 10; running delta ("−7") while you tap; true multi-touch, so two players can tap at once
 - Poison, commander tax, energy, experience; **commander damage per commander, your own included** - each source shows on your panel as a mini tile of that player's art (or colour) with the amount (optionally also subtracts life); automatic KO dimming at 0 life / 10 poison / 21 commander damage
 - **Images:** search any card on Scryfall with the on-screen keyboard - card names are suggested as you type - and use its art as your background, or drop your own PNG/JPGs in `~/.local/share/lifepi/images`. Searches, suggestions and art are cached on disk, so repeat searches cost no API calls and work offline
+- **Random card art:** players without art - at start-up, and new seats whenever a game grows - get a random commander's art from Scryfall (all different, credited). Art you pick is never replaced, a saved profile's art wins, and choosing **Colour** for a player keeps them on a colour. Offline it uses art already on the device, and tries again a minute later if there is none
 - **Player profiles** – name + art/colour are remembered and reloadable
 - **Random first player** on every new game (on by default; switch it in New game or on a phone): a highlight spins round the table and lands on who goes first, and a "1st" badge stays by their name all game
 - Dice (d4–d20), coin flip, random player
@@ -49,6 +50,7 @@ Or without installing: `sudo apt install python3-pygame && python3 lifepi.py`.
 | `--fps 30` | frame cap; the app only redraws when something changes, so idle CPU is near zero |
 | `--companion-port 8765` | port for the phone / TV pages |
 | `--no-companion` | don't serve the phone / TV pages at all |
+| `--no-random-art` | leave players without art on their colour instead of a random card's art |
 
 Keys (optional, a keyboard is never required): `Esc` menu/back · `R` rotate · `Ctrl+Q` quit.
 

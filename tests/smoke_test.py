@@ -273,6 +273,60 @@ app.toggle_random_first(); app.start_game(4, 40); assert app.first == -1 and app
 app.toggle_random_first(); app.start_game(1, 40); assert app.first == -1
 app.start_game(4, 40); land(app); app.first_anim = None
 print("random first player ok", counts)
+
+# --- random card art for players without art ------------------------------------------
+serial = [0]
+def scry_random(url, timeout=10):
+    if "cards/random" in url:
+        serial[0] += 1
+        k = serial[0]
+        return json.dumps({"id": f"rand{k}", "name": f"Commander {k}", "artist": f"Artist {k}",
+                           "image_uris": {"art_crop": f"https://img/rand{k}.jpg"}}).encode()
+    return png                                   # the image download
+def art_settle(a, secs=6):
+    end = time.time() + secs
+    while time.time() < end:
+        a.tick_art()
+        if not a.art_pending and a.art_results.empty():
+            return
+        time.sleep(0.02)
+    raise AssertionError("random art never arrived")
+lifepi.http_get = scry_random
+lifepi.STATE_FILE.unlink(missing_ok=True); lifepi.BACKUP_FILE.unlink(missing_ok=True)
+ra = lifepi.App(NS(windowed="800x480", rotate=None, fps=30, random_art=True))   # first start: no saved game
+art_settle(ra)
+arts = [p["art"] for p in ra.players]
+assert all(arts) and len(set(arts)) == 4, arts                                 # everyone, all different
+assert all(p["art_auto"] and "illus. Artist" in p["credit"] for p in ra.players)
+ra.render(); pygame.image.save(ra.canvas, os.path.join(shots, "random_art.png"))
+# choosing a colour opts out; a bigger game gives the new seats art and keeps the others'
+ra.recolor_player(2); kept = [p["art"] for p in ra.players]
+ra.start_game(6, 40); art_settle(ra)
+assert ra.players[2]["art"] is None and ra.players[2]["color_chosen"]
+assert [p["art"] for p in ra.players[:2]] == kept[:2] and ra.players[3]["art"] == kept[3]
+assert ra.players[4]["art"] and ra.players[5]["art"] and len({p["art"] for p in ra.players if p["art"]}) == 5
+# a saved profile's own art beats random art
+ra.profiles["Chris"] = {"color": 1, "art": ra.players[4]["art"], "credit": "theirs", "art_url": None,
+                        "art_auto": False, "color_chosen": False}
+ra.rename_player(0, "Chris"); assert ra.players[0]["art"] == ra.players[4]["art"] and not ra.players[0]["art_auto"]
+# choices survive a restart: the colour player still gets no art
+ra.save_state()
+rb = lifepi.App(NS(windowed="800x480", rotate=None, fps=30, random_art=True)); art_settle(rb)
+assert rb.players[2]["art"] is None and rb.players[2]["color_chosen"] and all(p["art"] for k, p in enumerate(rb.players) if k != 2)
+# offline: art already on this device (from earlier searches) is used instead
+lifepi.http_get = offline
+rb.start_game(8, 40); art_settle(rb)
+assert rb.players[6]["art"] and rb.players[7]["art"], [p["art"] for p in rb.players]
+# nothing cached either: keep the colour, try again later
+saved_dir = lifepi.SEARCH_DIR; lifepi.SEARCH_DIR = lifepi.Path(tempfile.mkdtemp())
+rb.players[7].update(art=None, art_auto=False); rb.fill_random_art(); art_settle(rb)
+assert rb.players[7]["art"] is None and rb.art_retry_at > time.time()
+lifepi.SEARCH_DIR = saved_dir
+# a result for a player who has since left the game is ignored
+lifepi.http_get = scry_random
+rb.players[7].update(art=None); gone = rb.players[7]; rb.fill_random_art(); rb.start_game(4, 40)
+art_settle(rb); assert gone["art"] is None and len(rb.players) == 4
+print("random card art ok")
 for n in range(1, 7):
     app.start_game(n, 40); app.render()
 app.save_state(); app2 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))

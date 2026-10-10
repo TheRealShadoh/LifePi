@@ -51,6 +51,8 @@ BACKUP_FILE = CONFIG_DIR / "state.json.bak"         # the save before the latest
 SAVE_INTERVAL = 0.5                                 # max seconds of play a power cut can lose
 COMPANION_PORT = 8765                               # phones + TV view, on the local network
 FIRST_SHOW = 3.0                                    # seconds "Goes first!" stays up after the spin
+RANDOM_ART_QUERY = "t:legendary t:creature game:paper"   # random art: commanders - big, characterful
+RANDOM_ART_RETRY = 60                               # seconds before trying again when offline
 SEARCH_DIR = CACHE_DIR.parent / "search"            # cached Scryfall search results
 SUGGEST_FILE = CACHE_DIR.parent / "autocomplete.json"
 SEARCH_TTL = 7 * 86400                              # re-ask Scryfall after a week
@@ -203,7 +205,7 @@ def unrotate(px, py, disp_w, disp_h, rot):
 
 def new_player(i, life):
     return {"name": f"Player {i + 1}", "life": life, "color": i % len(PALETTE),
-            "art": None, "credit": "", "art_url": None,
+            "art": None, "credit": "", "art_url": None, "art_auto": False, "color_chosen": False,
             "counters": {k: 0 for k, _, _ in COUNTERS}, "cmd": [0] * MAX_PLAYERS}
 
 
@@ -648,6 +650,9 @@ class App:
         self.fonts, self.img_cache = {}, {}
         self.zones, self.pointers, self.modals, self.fx = [], {}, [], {}
         self.dirty, self.last_save = True, 0.0
+        # random card art for artless players - only when launched as the app (tests stay offline)
+        self.random_art = bool(getattr(args, "random_art", False))
+        self.art_results, self.art_pending, self.art_retry_at = queue.Queue(), set(), 0
         self.seats = []
         self.toast = ("", 0.0)
         self.qr_cache = (None, None)
@@ -663,6 +668,7 @@ class App:
         self.publish()
         if WEB:
             spawn(self.restore_art)
+        self.fill_random_art()                    # players without art get a random card's art
 
     # ------------------------------------------------------------------ state
     def load_state(self):
@@ -733,6 +739,8 @@ class App:
                     b["credit"] = p["credit"]
                 if isinstance(p.get("art_url"), str) and p["art_url"].startswith("https://"):
                     b["art_url"] = p["art_url"]
+                for flag in ("art_auto", "color_chosen"):
+                    b[flag] = p.get(flag) is True
                 c = p.get("counters") or {}
                 b["counters"] = {k: max(0, as_int(c.get(k))) for k, _, _ in COUNTERS}
                 b["cmd"] = [max(0, as_int(x)) for x in (list(p.get("cmd") or []) + [0] * MAX_PLAYERS)[:MAX_PLAYERS]]
@@ -745,7 +753,8 @@ class App:
                                   "art": pr["art"] if isinstance(pr.get("art"), str) else None,
                                   "credit": pr["credit"] if isinstance(pr.get("credit"), str) else "",
                                   "art_url": pr["art_url"] if isinstance(pr.get("art_url"), str)
-                                  and pr["art_url"].startswith("https://") else None}
+                                  and pr["art_url"].startswith("https://") else None,
+                                  "art_auto": pr.get("art_auto") is True, "color_chosen": pr.get("color_chosen") is True}
         return settings, players, profiles
 
     def save_state(self):
@@ -1175,12 +1184,14 @@ class App:
         for i in range(n):
             p = new_player(i, life)
             if i < len(old):
-                p.update({k: old[i].get(k) for k in ("name", "color", "art", "credit", "art_url")})
+                p.update({k: old[i].get(k) for k in ("name", "color", "art", "credit", "art_url", "art_auto",
+                                                       "color_chosen")})
             self.players.append(p)
         self.fx.clear()
         self.modals.clear()
         self.game_id += 1
         self.pick_first()
+        self.fill_random_art()
         self.changed()
 
     def pick_first(self):
@@ -1230,7 +1241,7 @@ class App:
         if t.strip():
             p["name"] = t.strip()[:18]
             prof = self.profiles.get(p["name"])
-            if prof and not p["art"]:
+            if prof and (not p["art"] or p.get("art_auto")):     # their saved look beats random art
                 p.update(prof)
             self.remember_profile(p)
             self.changed()
@@ -1239,6 +1250,7 @@ class App:
         p = self.players[i]
         p["color"] = (p["color"] + 1) % len(PALETTE)
         p["art"], p["credit"], p["art_url"] = None, "", None
+        p["art_auto"], p["color_chosen"] = False, True   # a colour on purpose: no random art
         self.remember_profile(p)
         self.changed()
 
@@ -1265,7 +1277,8 @@ class App:
 
     def remember_profile(self, p):
         if not p["name"].startswith("Player "):
-            self.profiles[p["name"]] = {k: p.get(k) for k in ("color", "art", "credit", "art_url")}
+            self.profiles[p["name"]] = {k: p.get(k) for k in ("color", "art", "credit", "art_url", "art_auto",
+                                                               "color_chosen")}
 
     # ------------------------------------------------------------------ modal plumbing
     def push(self, kind, **kw):
@@ -1843,8 +1856,94 @@ class App:
         reload (its files don't survive one)."""
         p = self.players[i]
         p["art"], p["credit"], p["art_url"] = path, credit, url
+        p["art_auto"], p["color_chosen"] = False, False
         self.remember_profile(p)
         self.changed()
+
+    def wants_random_art(self, p):
+        return self.random_art and not p.get("art") and not p.get("color_chosen")
+
+    def fill_random_art(self):
+        """Give every player without art (who didn't choose a colour) a random card's art.
+        Runs in the background; results are applied by tick_art on the main thread."""
+        if not self.random_art:
+            return
+        want = [p for p in self.players if self.wants_random_art(p) and id(p) not in self.art_pending]
+        if not want:
+            return
+        self.art_pending.update(id(p) for p in want)
+        taken = {q["art"] for q in self.players if q.get("art")}
+
+        async def work():
+            missed = False
+            for p in want:
+                got = await self.random_card_art(taken)
+                if got:
+                    taken.add(got[0])
+                else:
+                    missed = True
+                self.art_results.put((p, got))
+            if missed:                                  # offline (e.g. a Pi before its Wi-Fi is up)
+                self.art_retry_at = time.time() + RANDOM_ART_RETRY
+            self.dirty = True
+        spawn(work)
+
+    async def random_card_art(self, taken):
+        """(path, credit, url) for a random commander's art: from Scryfall, else (offline) from
+        art already cached on this device. None if neither is available."""
+        for _ in range(4):                              # a few tries in case of a repeat
+            try:
+                c = await scryfall("/cards/random", q=RANDOM_ART_QUERY)
+            except Exception:
+                break
+            uris = c.get("image_uris") or (c.get("card_faces") or [{}])[0].get("image_uris") or {}
+            if not uris.get("art_crop") or not c.get("id"):
+                continue
+            path = CACHE_DIR / f"{c['id']}.jpg"
+            if str(path) in taken:
+                continue
+            try:
+                if not path.exists():
+                    tmp = path.with_suffix(".part")
+                    tmp.write_bytes(await fetch_bytes(uris["art_crop"]))
+                    os.replace(tmp, path)
+            except Exception:
+                break
+            credit = f"{c.get('name', '?')} - illus. {c.get('artist', 'unknown')} - (c) Wizards of the Coast"
+            return str(path), credit, uris["art_crop"]
+        return self.cached_card_art(taken)
+
+    def cached_card_art(self, taken):
+        """Offline fallback: a random card from earlier searches whose art is on disk."""
+        pool = {}
+        for f in SEARCH_DIR.glob("*.json"):
+            try:
+                for c in json.loads(f.read_text())["cards"]:
+                    path = CACHE_DIR / f"{c['id']}.jpg"
+                    if path.exists() and str(path) not in taken:
+                        pool[str(path)] = (str(path), f"{c['name']} - illus. {c['artist']} - (c) Wizards of the Coast",
+                                           c.get("art"))
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        return random.choice(list(pool.values())) if pool else None
+
+    def tick_art(self):
+        """Main thread: apply random art that arrived; retry later if we were offline."""
+        while True:
+            try:
+                p, got = self.art_results.get_nowait()
+            except queue.Empty:
+                break
+            self.art_pending.discard(id(p))
+            # still in the game, still without art, still no colour chosen?
+            if got and any(q is p for q in self.players) and self.wants_random_art(p):
+                p["art"], p["credit"], p["art_url"] = got
+                p["art_auto"] = True
+                self.remember_profile(p)
+                self.changed()
+        if self.art_retry_at and time.time() >= self.art_retry_at:
+            self.art_retry_at = 0
+            self.fill_random_art()
 
     async def restore_art(self):
         """Browser: re-download card art whose cached file is gone (it lived in memory)."""
@@ -2229,6 +2328,7 @@ class App:
         self.tick_holds()
         self.tick_suggest()
         self.tick_remote()
+        self.tick_art()
         now = time.time()
         if WEB and now - self.web_checked > 0.5:     # phone rotated / window resized
             self.web_checked = now
@@ -2899,7 +2999,7 @@ async def main_async():
     """Browser entry point (pygbag runs web/main.py, which awaits this)."""
     import types
     import platform
-    app = App(types.SimpleNamespace(windowed=None, rotate=None, fps=30, companion_port=None))
+    app = App(types.SimpleNamespace(windowed=None, rotate=None, fps=30, companion_port=None, random_art=True))
     if "selftest" in str(platform.window.location.search):
         spawn(lambda: web_selftest(app))
     await app.run_async()
@@ -2927,7 +3027,10 @@ def main():
     ap.add_argument("--companion-port", type=int, default=COMPANION_PORT, metavar="PORT",
                     help=f"port for the phone / TV web pages (default {COMPANION_PORT})")
     ap.add_argument("--no-companion", action="store_true", help="don't serve the phone / TV web pages")
+    ap.add_argument("--no-random-art", action="store_true",
+                    help="don't give players without art a random card's art")
     args = ap.parse_args()
+    args.random_art = not args.no_random_art
     if args.no_companion:
         args.companion_port = None
     App(args).run()
