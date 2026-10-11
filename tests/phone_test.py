@@ -57,6 +57,8 @@ def main():
 
         b = Browser()
         b.size(W, H)
+        if os.environ.get("CPU_THROTTLE"):          # e.g. 6: behave like a slow CI runner / old phone
+            b.call("Emulation.setCPUThrottlingRate", rate=float(os.environ["CPU_THROTTLE"]))
         b.call("Page.navigate", url=f"{base}/?k={pin}")
         for _ in range(60):
             if b.js("document.querySelectorAll('.cell').length === 4"):
@@ -71,7 +73,24 @@ def main():
             assert r, f"not found: {sel}[{i}]"
             return r
 
-        def tap(sel, i=0, ms=180, settle=0.45):   # a human-length tap
+        def still():
+            """Wait until the sheet has stopped scrolling (a fling can glide on after a swipe, and
+            a touch during it only stops the scroll - on a real phone too)."""
+            last, same = None, 0
+            for _ in range(60):
+                top = b.js("(document.getElementById('box') || {}).scrollTop || 0")
+                same = same + 1 if top == last else 0
+                if same >= 3:
+                    return
+                last = top
+                time.sleep(0.1)
+
+        def tap(sel, i=0, ms=180, settle=0.45):   # a human-length tap, on screen, scrolling done
+            still()
+            if not b.js(f"(() => {{ const e = document.querySelectorAll({json.dumps(sel)})[{i}]; if (!e) return true;"
+                        f" const r = e.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; }})()"):
+                b.js(f"document.querySelectorAll({json.dumps(sel)})[{i}].scrollIntoView({{block: 'center'}})")
+                still()
             x, y = centre(sel, i)
             b.touch(x, y, ms)
             time.sleep(settle)
@@ -100,7 +119,10 @@ def main():
         assert b.js("document.getElementById('box').scrollTop") > 0, "sheet did not scroll"
         assert b.js("document.querySelector('#box .chips.six button.on').textContent") == before_on
         tap("#box .big", 0)
-        assert "again" in b.js("document.querySelector('#box .big').textContent")
+        start = b.js("(() => { const e = document.querySelector('#box .big'), r = e.getBoundingClientRect();"
+                     " return {text: e.textContent, top: r.top, bottom: r.bottom, view: innerHeight,"
+                     " scroll: document.getElementById('box').scrollTop}; })()")
+        assert "again" in start["text"], f"first tap on Start did not arm it: {start}"
         tap("#box .big", 0, settle=1.0)
         st = state()
         assert len(st["players"]) == 6, f"new game from the phone: {len(st['players'])} players"
