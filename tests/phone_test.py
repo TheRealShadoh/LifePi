@@ -160,22 +160,41 @@ def main():
         assert b.js("!!document.querySelector('#box .cmdgrid')"), "life total did not open commander damage"
         assert b.js("document.querySelectorAll('#box .ctile').length") == 6
         b.shot("phone_cmd.png")
-        tap("#box .ctile .cadd", 3)                # 1 damage from seat 3
+        tap("#box .ctile .half2.plus", 3)          # right half of seat 3's tile: +1
         p = state()["players"][target]
         assert p["cmd"][3] == 1 and p["life"] == l0 - 1, (p["cmd"], p["life"], l0)
-        tap("#box .ctile .cminus", 3)
+        tap("#box .ctile .half2.minus", 3)         # left half: -1
         p = state()["players"][target]
         assert p["cmd"][3] == 0 and p["life"] == l0, (p["cmd"], p["life"])
-        x, y = centre("#box .ctile .cadd", 1)
+        halves = b.js("(() => { const t = document.querySelectorAll('#box .ctile')[3].getBoundingClientRect(),"
+                      " m = document.querySelectorAll('#box .ctile .half2.minus')[3].getBoundingClientRect(),"
+                      " p = document.querySelectorAll('#box .ctile .half2.plus')[3].getBoundingClientRect();"
+                      " return [m.left - t.left, m.width / t.width, p.right - t.right, p.width / t.width]; })()")
+        assert abs(halves[0]) < 4 and abs(halves[2]) < 4 and 0.45 < halves[1] < 0.55 and 0.45 < halves[3] < 0.55, halves
+        x, y = centre("#box .ctile .half2.plus", 1)
         b.touch(x, y, 1300)                        # hold keeps adding
         time.sleep(0.6)
         held = state()["players"][target]["cmd"][1]
         assert held >= 3, f"hold should repeat: {held}"
+        # partner commanders: switch one on for seat 1, its partner gets its own tile
+        tap("#box .chipbtn", 0)                    # "Counters & more" -> that player's sheet
+        tap("#box .chipbtn.go")
+        tap(".cell .strip.top", 1)
+        tap("#box .row.switch", 0, settle=0.8)     # "Partner commanders"
+        assert state()["players"][1]["partner"], "partner switch from the phone"
+        tap("#box .chipbtn.go")
+        tap(".cell .lifebtn", target)
+        assert b.js("document.querySelectorAll('#box .ctile').length") == 7     # 6 commanders + 1 partner
+        main_before = state()["players"][target]["cmd"][1]
+        tap("#box .ctile .half2.plus", 2)          # seat 1's partner tile is right after seat 1's
+        p = state()["players"][target]
+        assert p["cmd2"][1] == 1 and p["cmd"][1] == main_before, (p["cmd"], p["cmd2"], main_before)
+        b.shot("phone_cmd_partner.png")
         tap("#box .chipbtn.go")
         tap(".cell .strip.bot", target)            # the damage strip opens it too
         assert b.js("!!document.querySelector('#box .cmdgrid')")
         tap("#box .chipbtn.go")
-        print(f"commander damage sheet ok (tap +1, minus, hold +{held}, strip)")
+        print(f"commander damage sheet ok (left half -1, right half +1, hold +{held}, partner tile, strip)")
 
         # --- quick taps on the halves still change life --------------------------------
         l1 = state()["players"][4]["life"]

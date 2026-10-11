@@ -74,6 +74,13 @@ act(op="newgame", n=8, life=30, seating="ends")
 assert len(app.players) == 8 and app.settings["seating"] == "ends" and len(state()["players"][7]["cmd"]) == 8
 act(op="cmd", seat=0, src=7, d=3); assert app.players[0]["cmd"][7] == 3
 act(op="newgame", n=99, life=40); assert len(app.players) == 8                     # clamped
+# partner commanders from a phone: switch on, damage from the partner tracked on its own
+act(op="partner", seat=3, on=True); assert app.players[3]["partner"] and state()["players"][3]["partner"]
+act(op="cmd", seat=0, src=3, d=4, which=2); act(op="cmd", seat=0, src=3, d=2)
+s0 = state()["players"][0]; assert s0["cmd2"][3] == 4 and s0["cmd"][3] == 2, (s0["cmd"], s0["cmd2"])
+act(op="cmd", seat=0, src=5, d=4, which=2); assert app.players[0]["cmd2"][5] == 0          # no partner there
+act(op="partner", seat=3, on="yes"); assert app.players[3]["partner"]                      # bad input ignored
+act(op="partner", seat=3, on=False); assert app.players[0]["cmd2"][3] == 0
 # first player: hidden from phones while the device spins, revealed when it lands
 g0 = state()["game"]
 act(op="newgame", n=5, life=40)

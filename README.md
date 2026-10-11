@@ -22,7 +22,7 @@ life counter — released under the MIT licence so anyone can use, fork and impr
   - **Round** – a slice per player from the centre, each turned to face its player, for a round table
   - **Upright** – everything upright, for a monitor on a stand
 - Tap **−/+** for 1, **hold** for 10; running delta ("−7") while you tap; true multi-touch, so two players can tap at once
-- Poison, commander tax, energy, experience; **commander damage per commander, your own included** - each source shows on your panel as a mini tile of that player's art (or colour) with the amount (optionally also subtracts life); automatic KO dimming at 0 life / 10 poison / 21 commander damage
+- Poison, commander tax, energy, experience; **commander damage per commander, your own included, partners tracked separately** - each source shows on your panel as a mini tile of that player's art (or colour) with the amount (optionally also subtracts life); automatic KO dimming at 0 life / 10 poison / 21 commander damage
 - **Images:** search any card on Scryfall with the on-screen keyboard - card names are suggested as you type - and use its art as your background, or drop your own PNG/JPGs in `~/.local/share/lifepi/images`. Searches, suggestions and art are cached on disk, so repeat searches cost no API calls and work offline
 - **Random card art:** players without art - at start-up, and new seats whenever a game grows - get a random commander's art from Scryfall (all different, credited). Art you pick is never replaced, a saved profile's art wins, and choosing **Colour** for a player keeps them on a colour. Offline it uses art already on the device, and tries again a minute later if there is none
 - **Player profiles** – name + art/colour are remembered and reloadable
@@ -92,8 +92,11 @@ The same `lifepi.py` also runs in a phone's browser (compiled to WebAssembly wit
 2. **Add to Home Screen** - iPhone: Safari's Share menu; Android: the browser menu or the install prompt.
 3. Open it from the home screen: full screen, and it works offline from then on.
 
+The layout doesn't turn when the phone does (handy for a phone lying on the table); use the menu's
+*Rotate screen* to turn it on purpose, or switch *Auto-rotate* on to follow the phone.
+
 Everything on the Pi works there - seating styles, up to 8 players, card art from Scryfall, profiles,
-random first player - except Phones & TV (a web page can't run a server), casting, and local image
+random first player, commander damage and partners - except Phones & TV (a web page can't run a server), casting, and local image
 folders. The game is saved in the browser; card art is fetched again if the browser clears its cache.
 
 The site is published by each release (see [Releases](#releases)). To build or host it yourself:
@@ -142,7 +145,8 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 ## Controls
 
 - Middle of a panel: left side −, right side + (hold for ±10)
-- **Tap a life total** (or the damage / counters strip under it): commander damage, Lifetap style - a tile for every commander with their art; tap a tile for 1 damage, hold to keep adding, − to take one off; *Counters & more* opens the full sheet
+- **Tap a life total** (or the damage / counters strip under it): commander damage, Lifetap style - a tile for every commander with their art; like a life panel, the tile's left half is −1 and its right half +1 (hold to repeat); *Counters & more* opens the full sheet
+- **Partner commanders:** switch *Partner* on in a player's sheet and their second commander gets its own tile (gold "2" badge) - damage from each partner is tracked separately, and 21 from either one is a KO
 - **Hold a player's name and drag it** onto another panel to swap seats (commander damage follows the players)
 - Name strip or counter strip of a panel: opens that player's sheet (rename, card art, local image, colour, profiles, counters, commander damage) — oriented toward that player
 - Round button: main menu - new game, reset, dice / coin, rotate, seating, commander damage rule,

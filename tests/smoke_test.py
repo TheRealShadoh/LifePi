@@ -18,6 +18,9 @@ for rot in (0, 90, 180, 270):
     hits = [(x, y) for x in range(w) for y in range(h) if out.get_at((x, y))[0] == 255]
     assert lifepi.unrotate(*hits[0], w, h, rot) == (7, 5), rot
 print("rotation mapping ok")
+# install.sh runs lifepi.py directly: its first bytes must be the "#!" line (no BOM, no CRLF)
+head = open(lifepi.__file__, "rb").read(64)
+assert head.startswith(b"#!/usr/bin/env python3\n"), head[:24]
 
 app = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
 app.render()
@@ -260,23 +263,58 @@ app.modals.clear(); app.settings["seating"] = "ends"; app.start_game(6, 40); app
 end = next(k for k, s in enumerate(app.seats) if s.angle == 270)    # sideways pane at a table end
 tap(seat_point(app.seats[end], 0.5, 0.5)); app.render()
 pygame.image.save(app.canvas, os.path.join(shots, "cmd_pane_end.png"))
-z = app.zones                                                # [tile0, minus0, tile1, minus1, ..., more, done]
+z = app.zones                                  # [tile0 left -, tile0 right +, tile1 -, tile1 +, ..., more, done]
 assert len(z) == 2 * 6 + 2
 target, src = app.players[end], 2
 life0 = target["life"]
-pt = find_point(z[2 * src][0], avoid=[z[2 * src + 1][0]])
-tap(pt)                                                      # a real tap on the tile
+plus_pt, minus_pt = find_point(z[2 * src + 1][0]), find_point(z[2 * src][0])
+tap(plus_pt)                                                 # right half of the tile: +1
 assert target["cmd"][src] == 1 and target["life"] == life0 - 1, (target["cmd"], target["life"])
-tap(pt, hold=1.2)                                            # hold keeps adding
+tap(plus_pt, hold=1.2)                                       # hold keeps adding
 assert target["cmd"][src] >= 4, target["cmd"]
-for _ in range(target["cmd"][src]):
-    tap(find_point(z[2 * src + 1][0]))                       # the minus button on that tile
-assert target["cmd"][src] == 0 and target["life"] == life0
+tap(minus_pt, hold=2.0)                                      # left half: -1, held all the way down
+assert target["cmd"][src] == 0 and target["life"] == life0, (target["cmd"], target["life"])
+tap(minus_pt); assert target["cmd"][src] == 0                # never below 0
+# the halves are each half of the tile, facing that player: the left of the tile is -, right is +
+tile = [pt for pt in ((x, y) for x in range(0, W, 3) for y in range(0, H, 3)) if z[2 * src][0](pt) or z[2 * src + 1][0](pt)]
+assert abs(sum(1 for pt in tile if z[2 * src][0](pt)) - len(tile) / 2) < len(tile) * 0.06
 tap(seat_point(app.seats[end], 0.5, 0.5)) if not app.modals else None
 z[-2][1]()                                                   # "Counters & more"
 assert app.modals[-1]["kind"] == "player" and app.modals[-1]["idx"] == end
 app.modals.clear(); app.settings["seating"] = "table"; app.start_game(4, 40); app.first_anim = None; app.render()
-print("commander damage pane ok (tap, hold, minus, rotated, counters & more)")
+print("commander damage pane ok (left half -, right half +, hold, rotated, counters & more)")
+
+# --- partner commanders: two commanders for one seat, damage tracked separately -------
+app.settings["cmd_hits_life"] = True; app.start_game(4, 40); app.first_anim = None
+app.set_partner(1, True)
+assert app.commanders() == [(0, 1), (1, 1), (1, 2), (2, 1), (3, 1)]
+victim = app.players[0]
+app.change_cmd(0, 1, 11); app.change_cmd(0, 1, 10, which=2)       # 11 from one partner, 10 from the other
+assert victim["cmd"][1] == 11 and victim["cmd2"][1] == 10 and victim["life"] == 40 - 21   # both hit life
+assert app.ko_reason(victim) == "", "21 split across two partners is not a commander damage KO"
+victim["life"] = 40
+app.change_cmd(0, 1, 10, which=2); assert victim["cmd2"][1] == 20 and not app.ko_reason(victim)
+app.change_cmd(0, 1, 1, which=2); assert app.ko_reason(victim) == "commander"   # 21 from ONE partner
+app.change_cmd(0, 2, 5, which=2); assert victim["cmd2"][2] == 0, "seat 2 has no partner"
+# the pane gets a tile per commander; the partner tile's halves work on the partner's damage
+app.render(); app.push("cmd", idx=0, angle=0); app.render()
+pygame.image.save(app.canvas, os.path.join(shots, "cmd_pane_partner.png"))
+z = app.zones; assert len(z) == 2 * 5 + 2
+d2 = victim["cmd2"][1]; tap(find_point(z[2 * 2 + 1][0])); assert victim["cmd2"][1] == d2 + 1 and victim["cmd"][1] == 11
+tap(find_point(z[2 * 2][0])); assert victim["cmd2"][1] == d2
+app.modals.clear()
+# the player sheet has a row per commander and a Partner switch
+app.push("player", idx=0, angle=0); app.render()
+assert len([zz for zz in app.zones if zz[2]]) == 2 * (4 + 5)          # -/+ for 4 counters + 5 commanders
+app.modals.clear()
+# seats swap with partner damage; saved; turning partner off forgets the second commander's damage
+app.swap_seats(1, 3)
+assert app.players[0]["cmd2"][3] == d2 and app.players[0]["cmd2"][1] == 0 and app.players[3]["partner"]
+app.save_state(); rp = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
+assert rp.players[3]["partner"] and rp.players[0]["cmd2"][3] == d2
+app.set_partner(3, False); assert app.players[0]["cmd2"][3] == 0 and app.commanders() == [(j, 1) for j in range(4)]
+app.render()
+print("partner commanders ok (separate tracking, 21 from one partner, pane, sheet, swap, save)")
 
 # --- random first player on new game ------------------------------------------------
 def land(a):                                     # fast-forward the spin

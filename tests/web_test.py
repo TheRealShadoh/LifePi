@@ -85,8 +85,12 @@ class Browser:
         r = self.call("Runtime.evaluate", expression=expr, returnByValue=True, awaitPromise=True)
         return r.get("result", {}).get("value")
 
-    def size(self, w, h):
-        self.call("Emulation.setDeviceMetricsOverride", width=w, height=h, deviceScaleFactor=2, mobile=True)
+    def size(self, w, h, angle=0):
+        """Phone screen w x h, turned angle degrees (screen.orientation.angle: 90 = the phone
+        turned counter-clockwise into landscape)."""
+        kind = {0: "portraitPrimary", 90: "landscapePrimary", 180: "portraitSecondary", 270: "landscapeSecondary"}[angle]
+        self.call("Emulation.setDeviceMetricsOverride", width=w, height=h, deviceScaleFactor=2, mobile=True,
+                  screenOrientation={"type": kind, "angle": angle})
         self.call("Emulation.setTouchEmulationEnabled", enabled=True, maxTouchPoints=5)
 
     def touch(self, x, y, ms=80):
@@ -188,8 +192,9 @@ def main():
         assert b.js(LIVES) == L2, (b.js(LIVES), L2)
         print("reload keeps the game, no prompt, service worker active")
 
-        # turning the phone: the drawing size AND the on-screen size follow (not stretched)
-        b.size(H, W)
+        # turning the phone (auto-rotate is off): the canvas still covers the screen, unstretched,
+        # but the layout stays fixed to the phone - a phone lying on the table doesn't flip
+        b.size(H, W, angle=90)                    # turned 90 degrees counter-clockwise
         wait_for(b, "document.querySelector('#canvas').width > document.querySelector('#canvas').height",
                  10, "the canvas to follow a rotation")
         time.sleep(0.6)
@@ -198,10 +203,12 @@ def main():
         assert abs(c[2] - c[4]) <= 2 and abs(c[3] - c[5]) <= 2, f"canvas must cover the screen: {c}"
         assert abs(c[0] / c[1] - c[2] / c[3]) < 0.02, f"canvas would be stretched: {c}"
         before = b.js(LIVES)
-        L3 = lives_after(b, lambda: b.touch(H * 0.9, W * 0.75))       # landscape bottom-right, + half
-        assert L3[2] == before[2] + 1 and L3[:2] + L3[3:] == before[:2] + before[3:], (before, L3)
+        # the spot that was the bottom-right player's "+" in portrait (x 0.88, y 0.75) is, after a
+        # counter-clockwise quarter turn, at screen (y * H, W - x * W) - and must still be their "+"
+        L3 = lives_after(b, lambda: b.touch(0.75 * H, W - 0.88 * W))
+        assert L3[2] == before[2] + 1 and L3[:2] + L3[3:] == before[:2] + before[3:],             f"layout must stay fixed to the phone when it turns: {before} -> {L3}"
         b.shot("web_landscape.png")
-        b.size(W, H)
+        b.size(W, H, angle=0)
         time.sleep(1)
         L2 = b.js(LIVES)
         print("rotation ok", c)

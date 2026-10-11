@@ -39,7 +39,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -206,7 +206,9 @@ def unrotate(px, py, disp_w, disp_h, rot):
 def new_player(i, life):
     return {"name": f"Player {i + 1}", "life": life, "color": i % len(PALETTE),
             "art": None, "credit": "", "art_url": None, "art_auto": False, "color_chosen": False,
-            "counters": {k: 0 for k, _, _ in COUNTERS}, "cmd": [0] * MAX_PLAYERS}
+            "counters": {k: 0 for k, _, _ in COUNTERS}, "cmd": [0] * MAX_PLAYERS,
+            # partner commanders: damage from each seat's second commander, tracked on its own
+            "partner": False, "cmd2": [0] * MAX_PLAYERS}
 
 
 def point_in_poly(pt, poly):
@@ -620,7 +622,8 @@ class App:
         for d in (CONFIG_DIR, CACHE_DIR, SEARCH_DIR, IMAGE_DIR):
             d.mkdir(parents=True, exist_ok=True)
         self.settings = {"rotation": 0, "seating": "table", "cmd_hits_life": True,
-                         "start_life": 40, "companion": True, "companion_pin": "", "random_first": True}
+                         "start_life": 40, "companion": True, "companion_pin": "", "random_first": True,
+                         "auto_rotate": False}    # phone app: follow the phone turning (off = stay put)
         self.players = [new_player(i, 40) for i in range(4)]
         self.profiles = {}
         self.first, self.first_anim, self.game_id = -1, None, 0    # who goes first (-1: not picked)
@@ -637,10 +640,12 @@ class App:
         pygame.display.init()      # no audio needed; skips ALSA start-up
         pygame.font.init()
         pygame.display.set_caption("LifePi")
+        self.web_turn = 0                          # phone app: rotation undoing the phone's turn
         if WEB:                                   # the page decides: match its shape and size
             self.web_size = web_screen_size()
             self.screen = pygame.display.set_mode(self.web_size)
             self.web_checked = time.time()
+            self.web_angle0 = web_screen_angle()  # the orientation to stay in
         elif args.windowed:
             w, h = (int(v) for v in args.windowed.lower().split("x"))
             self.screen = pygame.display.set_mode((w, h))
@@ -722,6 +727,8 @@ class App:
             settings["companion_pin"] = pin
         if isinstance(s.get("random_first"), bool):
             settings["random_first"] = s["random_first"]
+        if isinstance(s.get("auto_rotate"), bool):
+            settings["auto_rotate"] = s["auto_rotate"]
         start = settings.get("start_life", self.settings["start_life"])
 
         players = []
@@ -744,6 +751,8 @@ class App:
                 c = p.get("counters") or {}
                 b["counters"] = {k: max(0, as_int(c.get(k))) for k, _, _ in COUNTERS}
                 b["cmd"] = [max(0, as_int(x)) for x in (list(p.get("cmd") or []) + [0] * MAX_PLAYERS)[:MAX_PLAYERS]]
+                b["cmd2"] = [max(0, as_int(x)) for x in (list(p.get("cmd2") or []) + [0] * MAX_PLAYERS)[:MAX_PLAYERS]]
+                b["partner"] = p.get("partner") is True
                 players.append(b)
 
         profiles = {}
@@ -855,6 +864,7 @@ class App:
                         "color": "#%02x%02x%02x" % PALETTE[p["color"] % len(PALETTE)],
                         "art": art, "credit": p["credit"] if art else "",
                         "counters": dict(p["counters"]), "cmd": p["cmd"][:n], "ko": self.ko_reason(p),
+                        "cmd2": p["cmd2"][:n], "partner": bool(p.get("partner")),
                         "pos": rects[i], "poly": polys[i]})
         return {"players": out, "start_life": self.settings["start_life"],
                 # who goes first - hidden while the device is still spinning, so no spoilers
@@ -906,8 +916,13 @@ class App:
             self.change_counter(seat, a["key"], num("d", -99, 99))
         elif op == "cmd":
             src = num("src", -1, 99)
+            which = 2 if a.get("which") == 2 else 1
             if 0 <= src < n:
-                self.change_cmd(seat, src, num("d", -99, 99))
+                self.change_cmd(seat, src, num("d", -99, 99), which)
+        elif op == "partner" and isinstance(a.get("on"), bool):
+            seat = num("seat", -1, 99)
+            if 0 <= seat < n:
+                self.set_partner(seat, a["on"])
         elif op == "name" and isinstance(a.get("name"), str):
             self.rename_player(seat, a["name"])
         elif op == "color":
@@ -946,9 +961,15 @@ class App:
         self.dirty = self.state_dirty = self.snap_dirty = True
 
     # ------------------------------------------------------------------ drawing utils
+    def rot(self):
+        """Screen rotation in effect: the Rotate setting, plus - in the phone app with auto-rotate
+        off - the opposite of however far the phone has turned since the app started, so the
+        layout stays fixed to the device (a phone lying on the table) instead of flipping."""
+        return (self.settings["rotation"] + self.web_turn) % 360
+
     def make_canvas(self):
         sw, sh = self.screen.get_size()
-        rot = self.settings["rotation"]
+        rot = self.rot()
         self.canvas = pygame.Surface((sw, sh) if rot in (0, 180) else (sh, sw))
         self.W, self.H = self.canvas.get_size()
         self.img_cache.clear()
@@ -1059,8 +1080,9 @@ class App:
         pill.blit(img, img.get_rect(center=pill.get_rect().center))
         return pill
 
-    def cmd_tile(self, j, dmg, side, number=True):
-        """Mini portrait of seat j's commander (art, else colour) with the damage it dealt."""
+    def cmd_tile(self, j, dmg, side, number=True, partner=False):
+        """Mini portrait of seat j's commander (art, else colour) with the damage it dealt;
+        partner=True marks the seat's second (partner) commander with a "2" badge."""
         side = max(12, int(side))
         src = self.players[j]
         col = PALETTE[src["color"] % len(PALETTE)]
@@ -1087,7 +1109,17 @@ class App:
         if number:
             self.text(t, str(dmg), side * 0.62, (255, 120, 120) if dmg >= 21 else WHITE,
                       maxw=side * 0.9, center=(side // 2, side // 2 + 1))
+        if partner:
+            self.partner_badge(t, (side - 1, 0), max(9, side // 3))
         return t
+
+    def partner_badge(self, surf, topright, size):
+        """A small gold "2" in a corner: the partner (second) commander."""
+        b = pygame.Surface((size, size), pygame.SRCALPHA)
+        pygame.draw.circle(b, (255, 220, 90, 255), (size // 2, size // 2), size // 2)
+        img = self.font(int(size * 0.95)).render("2", True, (30, 24, 0))
+        b.blit(img, img.get_rect(center=(size // 2, size // 2 + 1)))
+        surf.blit(b, b.get_rect(topright=topright))
 
     def draw_strip(self, surf, area, extra, cmds, chips):
         """Panel bottom strip: commander-damage tiles [(seat, dmg)], then counter pills
@@ -1095,7 +1127,7 @@ class App:
         strip grows `extra` px upward and the tiles get their own grid (1 or 2 rows, whichever
         gives bigger tiles) with the pills on a line below."""
         def tiles(side):
-            return [self.cmd_tile(j, d, side) for j, d in cmds]
+            return [self.cmd_tile(j, d, side, partner=w == 2) for j, d, w in cmds]
 
         def pills(rh):
             return [self.make_pill(label, rh * 0.5, bg=c, alpha=225) for label, c in chips]
@@ -1156,11 +1188,28 @@ class App:
         c[key] = max(0, c[key] + d)
         self.changed()
 
-    def change_cmd(self, i, src, d):
+    def commanders(self):
+        """Every commander at the table, in seat order: (seat, which) - which 2 is a partner."""
+        return [(j, w) for j, q in enumerate(self.players) for w in ((1, 2) if q.get("partner") else (1,))]
+
+    def set_partner(self, i, on):
+        """Seat i plays two partner commanders (or not). Turning it off forgets the damage the
+        second one dealt (life already lost stays lost)."""
+        self.players[i]["partner"] = bool(on)
+        if not on:
+            for q in self.players:
+                q["cmd2"][i] = 0
+        self.changed()
+
+    def change_cmd(self, i, src, d, which=1):
+        """Commander damage to player i from seat src's commander (which=2: its partner)."""
         p = self.players[i]
-        new = max(0, p["cmd"][src] + d)
-        applied = new - p["cmd"][src]
-        p["cmd"][src] = new
+        if which == 2 and not self.players[src].get("partner"):
+            return
+        track = p["cmd2"] if which == 2 else p["cmd"]
+        new = max(0, track[src] + d)
+        applied = new - track[src]
+        track[src] = new
         if applied and self.settings["cmd_hits_life"]:
             self.change_life(i, -applied)
         self.changed()
@@ -1168,7 +1217,7 @@ class App:
     def ko_reason(self, p):
         if p["counters"]["poison"] >= 10:
             return "poison"
-        if max(p["cmd"]) >= 21:
+        if max(max(p["cmd"]), max(p["cmd2"])) >= 21:     # 21 from any one commander
             return "commander"
         if p["life"] <= 0:
             return "life"
@@ -1185,7 +1234,7 @@ class App:
             p = new_player(i, life)
             if i < len(old):
                 p.update({k: old[i].get(k) for k in ("name", "color", "art", "credit", "art_url", "art_auto",
-                                                       "color_chosen")})
+                                                       "color_chosen", "partner")})
             self.players.append(p)
         self.fx.clear()
         self.modals.clear()
@@ -1260,6 +1309,7 @@ class App:
         P[a], P[b] = P[b], P[a]
         for p in P:
             p["cmd"][a], p["cmd"][b] = p["cmd"][b], p["cmd"][a]
+            p["cmd2"][a], p["cmd2"][b] = p["cmd2"][b], p["cmd2"][a]
         fa, fb = self.fx.pop(a, None), self.fx.pop(b, None)
         if fa:
             self.fx[b] = fa
@@ -1382,7 +1432,8 @@ class App:
                 s.blit(pl, pl.get_rect(center=(w // 2, h // 2 - int(size * 0.5))))
 
         chips = [(f"{short} {p['counters'][k]}", CHIP_COLORS[k]) for k, _, short in COUNTERS if p["counters"][k]]
-        cmds = [(j, d) for j, d in enumerate(p["cmd"][:len(self.players)]) if d]   # includes self
+        cmds = [(j, d, w) for j, w in self.commanders()                         # includes self
+                for d in [(p["cmd"] if w == 1 else p["cmd2"])[j]] if d]
         cy = h - bot // 2 - bot // 8
         if chips or cmds:
             credit_h = int(max(11, h * 0.05)) + 3 if bg and p["credit"] else 0
@@ -1455,6 +1506,7 @@ class App:
         ]
         if WEB:                                   # no server, casting or quitting in a browser tab
             items = [it for it in items if it[0] not in ("Phones & TV", "Cast to TV", "Quit")]
+            items.insert(5, (f"Auto-rotate: {'on' if st['auto_rotate'] else 'off'}", self.toggle_auto_rotate, BTN))
         rh = (v.h - u - u // 2) // ((len(items) + 1) // 2)
         for k, (label, fn, bg) in enumerate(items):
             r = (k % 2 * W // 2, u + k // 2 * rh, W // 2, rh)
@@ -1597,6 +1649,14 @@ class App:
             self.settings["seating"] = seating
             self.changed()
 
+    def toggle_auto_rotate(self):
+        """Phone app: follow the phone turning, or stay in the orientation it's in now."""
+        self.settings["auto_rotate"] = not self.settings["auto_rotate"]
+        if WEB and not self.settings["auto_rotate"]:
+            self.web_angle0 = web_screen_angle()   # lock to how it's held right now
+        self.web_checked = 0                       # re-check on the next frame
+        self.changed()
+
     def toggle_cmd(self):
         self.settings["cmd_hits_life"] = not self.settings["cmd_hits_life"]
         self.changed()
@@ -1716,13 +1776,14 @@ class App:
                     pick=lambda name: self.open_art_search(i, f'!"{name}"', ang, label=name))),
                 ("Local image", lambda: self.open_local_images(i, ang)),
                 ("Colour", recolor),
-                ("Profiles", lambda: self.open_profiles(i, ang))]
+                ("Profiles", lambda: self.open_profiles(i, ang)),
+                (f"Partner: {'on' if p.get('partner') else 'off'}", lambda: self.set_partner(i, not p.get("partner")))]
         if WEB:                                   # no image folder in a browser
             acts = [a for a in acts if a[0] != "Local image"]
         for k, (label, fn) in enumerate(acts):
             self.button(v, (k * W // len(acts), u, W // len(acts), u), label, fn, size=u * 0.38)
 
-        sources = range(len(self.players))          # commander damage, own commander included
+        sources = self.commanders()                 # commander damage, own commander(s) included
         portrait = W < H                            # opened at a table end: one column
         if portrait:
             nrows = len(COUNTERS) + len(sources) + 1
@@ -1734,11 +1795,11 @@ class App:
         y0 = 2 * u + u // 6
         cx, cy0 = (0, y0 + (len(COUNTERS) + 1) * rh) if portrait else (cw, y0)   # damage column
 
-        def row(x, y, label, value, minus, plus, warn=False, tile=None):
+        def row(x, y, label, value, minus, plus, warn=False, tile=None, partner=False):
             b = min(rh, cw // 5)
             lx = x + 14
             if tile is not None:
-                t = self.cmd_tile(tile, value, rh * 0.82, number=False)
+                t = self.cmd_tile(tile, value, rh * 0.82, number=False, partner=partner)
                 v.surf.blit(t, t.get_rect(midleft=(lx, y + rh // 2)))
                 lx += t.get_width() + 10
             self.text(v.surf, label, rh * 0.42, maxw=x + cw - 3 * b - 10 - lx, shadow=False,
@@ -1756,11 +1817,12 @@ class App:
                 warn=key == "poison" and p["counters"][key] >= 10)
         self.text(v.surf, "Commander damage from", rh * 0.4, GREY, shadow=False,
                   midleft=(cx + 14, cy0 + rh // 2))
-        for k, j in enumerate(sources):
-            name = self.players[j]["name"] + (" (you)" if j == i else "")
-            row(cx, cy0 + (k + 1) * rh, name, p["cmd"][j],
-                lambda j=j: self.change_cmd(i, j, -1), lambda j=j: self.change_cmd(i, j, 1),
-                warn=p["cmd"][j] >= 21, tile=j)
+        for k, (j, w) in enumerate(sources):
+            name = self.players[j]["name"] + (" partner" if w == 2 else "") + (" (you)" if j == i else "")
+            dmg = (p["cmd"] if w == 1 else p["cmd2"])[j]
+            row(cx, cy0 + (k + 1) * rh, name, dmg,
+                lambda j=j, w=w: self.change_cmd(i, j, -1, w), lambda j=j, w=w: self.change_cmd(i, j, 1, w),
+                warn=dmg >= 21, tile=j, partner=w == 2)
         v.finish()
 
     def cmd_layout(self, n, W, H):
@@ -1775,8 +1837,9 @@ class App:
         return best[1]
 
     def draw_cmd(self, m):
-        """Commander damage to one player: a tile per commander (their art), tap = +1 damage,
-        hold keeps adding, - takes one off. Opened by tapping a player's life total."""
+        """Commander damage to one player: a tile per commander (their art; partners get their
+        own tile). Like a life panel: left half -1, right half +1, hold repeats. Opened by
+        tapping a player's life total."""
         i = m["idx"]
         if i >= len(self.players):
             return self.pop()
@@ -1786,19 +1849,21 @@ class App:
         u, W, H = v.u, v.w, v.h
         why = self.ko_reason(p)
         info = f"Life {p['life']}" + (f"   KO - {why}" if why else "")
-        hint = ("Tap a commander for 1 damage" + (" (and -1 life)" if self.settings["cmd_hits_life"] else "")
-                + " - hold to keep adding")
+        hint = ("Left side -1, right side +1 - hold to repeat" +
+                (" (damage also comes off life)" if self.settings["cmd_hits_life"] else ""))
         iy = u + u * 0.35
         r = self.text(v.surf, info, u * 0.5, (255, 120, 120) if why else WHITE, shadow=False, midleft=(16, iy))
         self.text(v.surf, hint, u * 0.3, GREY, maxw=W - r.right - 40, shadow=False, midleft=(r.right + 24, iy))
 
-        n = len(self.players)
+        sources = self.commanders()
+        n = len(sources)
         area = pygame.Rect(0, int(u * 1.75), W, H - int(u * 1.75) - u)
         cols = self.cmd_layout(n, area.w, area.h)
         rows = -(-n // cols)
         tw, th = area.w // cols, area.h // rows
-        for k, src in enumerate(self.players):
-            dmg = p["cmd"][k]
+        for k, (j, w) in enumerate(sources):
+            src = self.players[j]
+            dmg = (p["cmd"] if w == 1 else p["cmd2"])[j]
             r = pygame.Rect(area.x + k % cols * tw, area.y + k // cols * th, tw, th).inflate(-10, -10)
             col = PALETTE[src["color"] % len(PALETTE)]
             art = self.cover(src["art"], r.w, r.h) if src["art"] else None
@@ -1815,15 +1880,21 @@ class App:
             lethal = dmg >= 21
             pygame.draw.rect(v.surf, (255, 70, 70) if lethal else tuple(min(255, c + 70) for c in col), r,
                              max(2, min(r.w, r.h) // 40) + (2 if lethal else 0), border_radius=rad)
-            name = src["name"] + (" (own)" if k == i else "")
-            self.text(v.surf, name, max(14, min(r.h * 0.13, r.w * 0.1)), maxw=r.w * 0.9, midtop=(r.centerx, r.y + r.h * 0.06))
-            self.text(v.surf, str(dmg), max(20, min(r.h * 0.45, r.w * 0.4)), (255, 120, 120) if lethal else WHITE,
+            name = src["name"] + (" partner" if w == 2 else "") + (" (own)" if j == i else "")
+            self.text(v.surf, name, max(14, min(r.h * 0.13, r.w * 0.1)), maxw=r.w * 0.9,
+                      midtop=(r.centerx, r.y + r.h * 0.06))
+            self.text(v.surf, str(dmg), max(20, min(r.h * 0.45, r.w * 0.36)), (255, 120, 120) if lethal else WHITE,
                       center=(r.centerx, r.centery + r.h * 0.04))
-            add = lambda k=k: self.change_cmd(i, k, 1)
-            v.zone(r, add, add, 0.25)                         # the tile: +1, hold repeats
-            b = max(36, int(min(r.h * 0.26, r.w * 0.24)))
-            sub = lambda k=k: self.change_cmd(i, k, -1)
-            self.button(v, (r.x + 4, r.bottom - b - 4, b, b), "-", sub, hold=sub, bg=(25, 26, 34), size=b * 0.7)
+            if w == 2:
+                self.partner_badge(v.surf, (r.right - 6, r.y + 6), max(14, int(min(r.w, r.h) * 0.16)))
+            gs = min(r.h * 0.22, r.w * 0.12, 44)              # - / + hints on the two halves
+            for plus, gx in ((False, r.x + r.w * 0.12), (True, r.right - r.w * 0.12)):
+                g = self.sign(plus, gs)
+                v.surf.blit(g, g.get_rect(center=(int(gx), r.centery)))
+            sub = lambda j=j, w=w: self.change_cmd(i, j, -1, w)
+            add = lambda j=j, w=w: self.change_cmd(i, j, 1, w)
+            v.zone((r.x, r.y, r.w // 2, r.h), sub, sub, 0.25)            # left half: -1
+            v.zone((r.x + r.w // 2, r.y, r.w - r.w // 2, r.h), add, add, 0.25)   # right half: +1
 
         y = H - u
         angle = m.get("angle", 0)
@@ -2196,7 +2267,7 @@ class App:
                 pl.set_alpha(int(255 * (3.2 - age) / 0.6))
             self.canvas.blit(pl, pl.get_rect(midbottom=(self.W // 2, self.H - 12)))
 
-        rot = self.settings["rotation"]
+        rot = self.rot()
         out = self.canvas if rot == 0 else pygame.transform.rotate(self.canvas, -rot)
         self.screen.blit(out, (0, 0))
         pygame.display.flip()
@@ -2274,7 +2345,7 @@ class App:
     # ------------------------------------------------------------------ input
     def to_canvas(self, sx, sy):
         sw, sh = self.screen.get_size()
-        return unrotate(int(sx), int(sy), sw, sh, self.settings["rotation"])
+        return unrotate(int(sx), int(sy), sw, sh, self.rot())
 
     def pointer_down(self, pid, pos):
         for z in reversed(self.zones):
@@ -2406,8 +2477,13 @@ class App:
         if WEB and now - self.web_checked > 0.5:     # phone rotated / window resized
             self.web_checked = now
             size = web_screen_size()
-            if size != self.web_size:
-                self.web_size = size
+            # When the phone turns counter-clockwise by a, the browser turns the page's drawing
+            # clockwise by a to keep it upright (screen.orientation.angle = a). With auto-rotate
+            # off, turn our drawing back counter-clockwise by a - our rotation is clockwise, so -a -
+            # and the layout stays fixed to the phone.
+            turn = 0 if self.settings["auto_rotate"] else (self.web_angle0 - web_screen_angle()) % 360
+            if size != self.web_size or turn != self.web_turn:
+                self.web_size, self.web_turn = size, turn
                 self.screen = pygame.display.set_mode(size)
                 self.make_canvas()
         if self.toast[0] and now - self.toast[1] < 3.2:
@@ -2510,6 +2586,10 @@ function trackFirst(s) {
   revealedGame = s.game;
 }
 const firstFlash = (seat) => state && state.first === seat && Date.now() - firstFlashAt < FIRST_FLASH;
+
+// every commander at the table: [player, which] - which 2 is a partner (second) commander
+const commanders = (s) => s.players.flatMap((q) => q.partner ? [[q, 1], [q, 2]] : [[q, 1]]);
+const dmgFrom = (p, src, which) => (which === 2 ? (p.cmd2 || []) : p.cmd)[src.seat] || 0;
 
 // round table: each player's wedge as a clipped background, plus the gaps between wedges
 const pct = (poly) => "polygon(" + poly.map(([x, y]) => `${x * 100}% ${y * 100}%`).join(",") + ")";
@@ -2619,17 +2699,24 @@ PHONE_HTML = r"""<!doctype html>
   .ctile { position:relative; aspect-ratio:1.25; border-radius:16px; overflow:hidden; background-size:cover;
            background-position:center; border:3px solid rgba(255,255,255,.35); }
   .ctile.lethal { border-color:#ff4a4a; }
-  .ctile .cadd { position:absolute; inset:0; border:0; padding:8px 8px 10px; background:none; color:#fff;
-                 display:flex; flex-direction:column; align-items:center; justify-content:space-between; touch-action:manipulation; }
-  .ctile .cadd:active { background:rgba(255,255,255,.12); }
+  .ctile .face { position:absolute; inset:0; padding:8px 8px 10px; pointer-events:none; color:#fff;
+                 display:flex; flex-direction:column; align-items:center; justify-content:space-between; }
+  .ctile .half2 { position:absolute; top:0; bottom:0; width:50%; border:0; background:none; color:#fff; padding:0 10px;
+                  display:flex; align-items:center; font-size:26px; font-weight:800; text-shadow:0 1px 4px #000;
+                  touch-action:manipulation; }
+  .ctile .half2.minus { left:0; justify-content:flex-start; }
+  .ctile .half2.plus { right:0; justify-content:flex-end; }
+  .ctile .half2:active { background:rgba(255,255,255,.14); }
+  .p2 { display:inline-flex; align-items:center; justify-content:center; width:1.35em; height:1.35em; border-radius:50%;
+        background:#ffdc5a; color:#1e1800; font-weight:800; font-size:.7em; margin-left:.3em; text-shadow:none; vertical-align:middle; }
+  .tile { position:relative; }
+  .tile .p2 { position:absolute; top:-.35em; right:-.35em; margin:0; font-size:.55em; }
   .ctile .cname { font-weight:700; font-size:15px; text-shadow:0 1px 3px #000; max-width:100%; overflow:hidden;
                   text-overflow:ellipsis; white-space:nowrap; }
   .ctile .cname small { font-weight:500; opacity:.8; }
   .ctile .cval { font-size:46px; font-weight:800; line-height:1; text-shadow:0 2px 6px #000; font-variant-numeric:tabular-nums; }
   .ctile.lethal .cval { color:#ff8a8a; }
   .ctile .cplus { font-size:12px; font-weight:700; opacity:.75; text-shadow:0 1px 3px #000; }
-  .ctile .cminus { position:absolute; left:6px; bottom:6px; width:44px; height:44px; border-radius:12px; z-index:1;
-                   border:1px solid rgba(255,255,255,.3); background:rgba(0,0,0,.6); color:#fff; font-size:24px; font-weight:800; }
   .hbtn { margin-left:auto; height:36px; padding:0 14px; border-radius:999px; border:1px solid var(--line);
           background:#22232f; font-size:14px; font-weight:600; max-width:46vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .hbtn + .hbtn { margin-left:0; }
@@ -2835,10 +2922,11 @@ function ask(title, value, cb) {
 // ------------------------------------------------------------------ the table (mirrors the device)
 function panel(p) {
   const seat = p.seat, d = deltaOf(seat), bottom = [];
-  state.players.forEach((src) => {
-    const v = p.cmd[src.seat];
+  commanders(state).forEach(([src, which]) => {
+    const v = dmgFrom(p, src, which);
     if (v) bottom.push(el("span", { class: "tile" + (v >= 21 ? " lethal" : ""),
-      style: Object.assign(cardBg(src, "rgba(0,0,0,.2), rgba(0,0,0,.45)"), { borderColor: v >= 21 ? null : src.color }) }, v));
+      style: Object.assign(cardBg(src, "rgba(0,0,0,.2), rgba(0,0,0,.45)"), { borderColor: v >= 21 ? null : src.color }) },
+      v, which === 2 ? el("span", { class: "p2" }, "2") : null));
   });
   for (const [key] of state.counters)
     if (p.counters[key]) bottom.push(el("span", { class: "pill", style: { background: CHIP[key] || "#444" } },
@@ -2894,34 +2982,42 @@ function playerSheet(seat) {
          stepper(p.counters[key], () => act({ op: "counter", seat, key, d: -1 }), () => act({ op: "counter", seat, key, d: 1 }),
                  key === "poison" && p.counters[key] >= 10)))),
     el("h4", {}, "Commander damage taken"),
-    el("div", { class: "rows" }, s.players.map((src) =>
+    el("div", { class: "rows" }, commanders(s).map(([src, which]) =>
       el("div", { class: "row" },
          el("span", { class: "stile", style: cardBg(src, "rgba(0,0,0,.1), rgba(0,0,0,.1)") }),
-         el("span", { class: "label" }, src.name, src.seat === seat ? el("small", {}, " (own)") : null),
-         stepper(p.cmd[src.seat], () => act({ op: "cmd", seat, src: src.seat, d: -1 }),
-                 () => act({ op: "cmd", seat, src: src.seat, d: 1 }), p.cmd[src.seat] >= 21)))),
+         el("span", { class: "label" }, src.name, which === 2 ? el("span", { class: "p2" }, "2") : null,
+            src.seat === seat ? el("small", {}, " (own)") : null),
+         stepper(dmgFrom(p, src, which), () => act({ op: "cmd", seat, src: src.seat, which, d: -1 }),
+                 () => act({ op: "cmd", seat, src: src.seat, which, d: 1 }), dmgFrom(p, src, which) >= 21)))),
+    el("h4", {}, "Commander"),
+    el("div", { class: "rows" },
+      tapBtn({ class: "row switch" + (p.partner ? " on" : "") }, () => act({ op: "partner", seat, on: !p.partner }),
+        el("span", { class: "label" }, "Partner commanders (two commanders, damage tracked separately)"), el("i"))),
   ];
 }
 
 function cmdSheet(seat) {
   const s = state, p = s.players[seat];
-  const hit = s.cmd_hits_life ? " (also −1 life)" : "";
+  const hit = s.cmd_hits_life ? " Damage also comes off life." : "";
   return [
-    el("div", { class: "shead" }, el("h3", {}, "Cmdr damage"),
+    el("div", { class: "shead" }, el("h3", {}, "Damage"),
        tapBtn({ class: "chipbtn" }, () => openSheet({ kind: "player", seat }), "Counters & more"),
        tapBtn({ class: "chipbtn go" }, closeSheet, "Done")),
     el("div", { class: "cmdto" }, el("span", { class: "stile", style: cardBg(p, "rgba(0,0,0,.1), rgba(0,0,0,.1)") }),
        el("b", {}, "to " + p.name), el("span", { class: "life2" + (p.ko ? " dead" : "") }, p.life)),
-    el("p", { class: "muted" }, `Tap a commander for 1 damage${hit}; hold to keep adding.`),
-    el("div", { class: "cmdgrid" }, s.players.map((src) => {
-      const v = p.cmd[src.seat], add = () => act({ op: "cmd", seat, src: src.seat, d: 1 });
-      const sub = () => act({ op: "cmd", seat, src: src.seat, d: -1 });
+    el("p", { class: "muted" }, `Left side \u22121, right side +1, hold to repeat.${hit}`),
+    el("div", { class: "cmdgrid" }, commanders(s).map(([src, which]) => {
+      const v = dmgFrom(p, src, which);
+      const add = () => act({ op: "cmd", seat, src: src.seat, which, d: 1 });
+      const sub = () => act({ op: "cmd", seat, src: src.seat, which, d: -1 });
       return el("div", { class: "ctile" + (v >= 21 ? " lethal" : ""),
                          style: Object.assign(cardBg(src, "rgba(0,0,0,.25), rgba(0,0,0,.6)"), v >= 21 ? {} : { borderColor: src.color }) },
-        pressable("button", { class: "cadd", "aria-label": "damage from " + src.name }, add, add, 220,
-          el("span", { class: "cname" }, src.name, src.seat === seat ? el("small", {}, " (own)") : null),
-          el("span", { class: "cval" }, v), el("span", { class: "cplus" }, "+1")),
-        pressable("button", { class: "cminus", "aria-label": "less damage from " + src.name }, sub, sub, 220, "−"));
+        el("div", { class: "face" },
+          el("span", { class: "cname" }, src.name, which === 2 ? el("span", { class: "p2" }, "2") : null,
+             src.seat === seat ? el("small", {}, " (own)") : null),
+          el("span", { class: "cval" }, v), el("span", { class: "cplus" }, which === 2 ? "partner" : "")),
+        pressable("button", { class: "half2 minus", "aria-label": "less damage from " + src.name }, sub, sub, 220, "−"),
+        pressable("button", { class: "half2 plus", "aria-label": "damage from " + src.name }, add, add, 220, "+"));
     })),
   ];
 }
@@ -3004,10 +3100,10 @@ function sheetKey() {
   const s = state, base = [sheet, confirmAt, ng.n, ng.life, me];
   if (sheet.kind === "game")
     return JSON.stringify([base, s.players.length, s.start_life, s.seating, s.random_first, s.cmd_hits_life, s.max_players]);
-  const looks = s.players.map((p) => [p.name, p.color, p.art]);
+  const looks = s.players.map((p) => [p.name, p.color, p.art, p.partner]);
   if (sheet.kind === "seat") return JSON.stringify([base, looks]);
   const p = s.players[sheet.seat];
-  return JSON.stringify([base, looks, s.cmd_hits_life, p.life, p.ko, p.counters, p.cmd]);
+  return JSON.stringify([base, looks, s.cmd_hits_life, p.life, p.ko, p.counters, p.cmd, p.cmd2]);
 }
 document.getElementById("seatbtn").onclick = () => openSheet({ kind: "seat" });
 addEventListener("resize", () => render());          // wedge boxes depend on the screen shape
@@ -3092,6 +3188,8 @@ TV_HTML = r"""<!doctype html>
           display:flex; align-items:center; justify-content:center; font-weight:800;
           font-size:2.6vmin; font-size:min(7.5cqh, 6cqw); text-shadow:0 .2vmin .8vmin #000; }
   .tile.lethal { border-color:#ff4a4a; color:#ff8a8a; }
+  .p2 { position:absolute; top:-.3em; right:-.3em; width:1.2em; height:1.2em; border-radius:50%; background:#ffdc5a;
+        color:#1e1800; font-size:.5em; display:flex; align-items:center; justify-content:center; text-shadow:none; }
   .credit { position:absolute; bottom:1.2%; left:0; right:0; font-size:max(9px, 1.2vmin); font-size:max(9px, 2.6cqh); color:rgba(255,255,255,.55); }
   #hint { position:fixed; left:50%; bottom:1.2vmin; transform:translateX(-50%); padding:.5vmin 1.6vmin; border-radius:999px;
           background:rgba(13,13,18,.82); color:#c8c9d6; font-size:max(12px, 1.7vmin); max-width:94vw; text-align:center; }
@@ -3115,11 +3213,12 @@ function render() {
                                                    ...s.players.map((p) => {
     const d = deltaOf(p.seat);
     const bottom = [];
-    s.players.forEach((src) => {
-      const v = p.cmd[src.seat];
+    commanders(s).forEach(([src, which]) => {
+      const v = dmgFrom(p, src, which);
       if (v) bottom.push(el("div", { class: "tile" + (v >= 21 ? " lethal" : ""),
                                      style: Object.assign(cardBg(src, "rgba(0,0,0,.25), rgba(0,0,0,.45)"),
-                                                          { borderColor: v >= 21 ? null : src.color }) }, v));
+                                                          { borderColor: v >= 21 ? null : src.color }) },
+                            v, which === 2 ? el("span", { class: "p2" }, "2") : null));
     });
     for (const [key] of s.counters)
       if (p.counters[key]) bottom.push(el("span", { class: "pill", style: { background: CHIP[key] || "#444" } },
@@ -3153,6 +3252,24 @@ start();
 </script>
 </body></html>
 """.replace("/*CLIENT*/", CLIENT_JS)
+
+
+def web_screen_angle():
+    """Browser: how far the page's drawing is turned (clockwise) from the device's natural
+    orientation - 90 when the phone is turned 90 degrees counter-clockwise
+    (screen.orientation.angle; window.orientation on older iPhones)."""
+    import platform
+    w = platform.window
+    try:
+        a = w.screen.orientation.angle
+    except Exception:
+        a = None
+    if a is None or str(a) in ("undefined", "null"):
+        try:
+            a = w.orientation
+        except Exception:
+            a = 0
+    return as_int(a, 0) % 360 // 90 * 90
 
 
 def web_screen_size():
