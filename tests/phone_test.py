@@ -87,8 +87,12 @@ def main():
 
         def tap(sel, i=0, ms=180, settle=0.45):   # a human-length tap, on screen, scrolling done
             still()
+            # visible = inside the area that actually shows it: the sheet's scroll box (a button
+            # scrolled half under the sheet's top edge has its centre over the backdrop), else the screen
             if not b.js(f"(() => {{ const e = document.querySelectorAll({json.dumps(sel)})[{i}]; if (!e) return true;"
-                        f" const r = e.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; }})()"):
+                        f" const r = e.getBoundingClientRect(), box = e.closest('#box');"
+                        f" const v = box ? box.getBoundingClientRect() : {{top: 0, bottom: innerHeight}};"
+                        f" return r.top >= v.top && r.bottom <= v.bottom; }})()"):
                 b.js(f"document.querySelectorAll({json.dumps(sel)})[{i}].scrollIntoView({{block: 'center'}})")
                 still()
             x, y = centre(sel, i)
@@ -103,6 +107,21 @@ def main():
                 time.sleep(0.016)
             b.call("Input.dispatchTouchEvent", type="touchEnd", touchPoints=[])
             time.sleep(0.6)
+
+        # --- a drag that starts in a sheet and ends on the dimmed backdrop must not close it
+        # (the browser sends that "click" to the backdrop; a sheet too short to scroll shows it)
+        tap("#seatbtn")
+        assert b.js("!document.getElementById('sheet').hidden"), "seat sheet did not open"
+        bx = b.js("(() => { const r = document.getElementById('box').getBoundingClientRect(); return [r.left, r.top, r.width]; })()")
+        swipe(bx[0] + bx[2] / 2, bx[1] + 40, bx[0] + bx[2] / 2, max(5, bx[1] - 60))
+        assert b.js("!document.getElementById('sheet').hidden"), "dragging out of a sheet closed it"
+        tap("#box .chipbtn.go")
+        # ...but a real tap on the backdrop still closes it
+        tap("#seatbtn")
+        b.touch(W / 2, max(5, b.js("document.getElementById('box').getBoundingClientRect().top") - 30), 150)
+        time.sleep(0.5)
+        assert b.js("document.getElementById('sheet').hidden"), "tapping the backdrop should close the sheet"
+        print("drag out of a sheet keeps it open; tap on the backdrop closes it")
 
         # --- Game sheet on a busy table ---------------------------------------------
         tap("#gamebtn")

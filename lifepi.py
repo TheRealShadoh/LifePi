@@ -2869,7 +2869,14 @@ let sheetSig = "";
 function openSheet(s) { sheet = s; sheetSig = ""; render(); document.getElementById("box").scrollTop = 0; }
 function closeSheet() { sheet = null; sheetSig = ""; confirmAt = ""; render(); }
 function redrawSheet() { sheetSig = ""; render(); }
-document.getElementById("sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") closeSheet(); });
+// tapping the dimmed backdrop closes a sheet - only if the touch also started there: a drag
+// from inside the sheet that ends over the backdrop gets its "click" sent to the backdrop
+let backdropDown = false;
+document.getElementById("sheet").addEventListener("pointerdown", (e) => { backdropDown = e.target.id === "sheet"; });
+document.getElementById("sheet").addEventListener("click", (e) => {
+  if (e.target.id === "sheet" && backdropDown) closeSheet();
+  backdropDown = false;
+});
 
 function playerSheet(seat) {
   const s = state, p = s.players[seat];
