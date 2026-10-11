@@ -70,6 +70,11 @@ jobs:
         run: |
           # pygbag's runtime comes from its CDN: retry once before calling it a failure
           python tests/web_test.py || { echo "retrying once"; sleep 20; python tests/web_test.py; }
+      - name: Phone page (QR code) end to end - busy table, commander damage, force landscape
+        env:
+          SDL_VIDEODRIVER: dummy
+          LIFEPI_SHOTS: ${{ runner.temp }}/web-shots
+        run: python tests/phone_test.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:

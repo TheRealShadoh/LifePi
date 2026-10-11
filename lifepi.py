@@ -1367,7 +1367,7 @@ class App:
             s.blit(badge, badge.get_rect(midleft=(nr.right + max(4, top // 8), top // 2)))
 
         size = int(min(h * 0.56, w * 0.5))
-        self.text(s, str(p["life"]), size, maxw=w * 0.62, center=(w // 2, h // 2))
+        life_rect = self.text(s, str(p["life"]), size, maxw=w * 0.62, center=(w // 2, h // 2))
         for plus, x in ((False, w * 0.08), (True, w * 0.92)):
             g = self.sign(plus, min(size * 0.2, w * 0.07, 44))
             s.blit(g, g.get_rect(center=(int(x), h // 2)))
@@ -1415,8 +1415,13 @@ class App:
                lambda: self.change_life(i, 10), 0.5)
         sheet_angle = round(seat.angle / 90) * 90 % 360   # sheets open facing that player
         opener = lambda: self.push("player", idx=i, angle=sheet_angle)
+        cmd_pane = lambda: self.push("cmd", idx=i, angle=sheet_angle)
+        # the life total itself opens commander damage (the -/+ halves stay either side of it)
+        lw = int(min(life_rect.w + size * 0.15, w * 0.34))
+        lh = int(min(life_rect.h, mid * 0.75))
+        v.zone((w // 2 - lw // 2, h // 2 - lh // 2, lw, lh), cmd_pane)
         v.zone((0, 0, w, top), opener, drag=i)       # hold + drag the name to swap seats
-        v.zone((0, h - bot, w, bot), opener)
+        v.zone((0, h - bot, w, bot), cmd_pane)       # damage tiles / counters strip
         v.finish()
 
     # ------------------------------------------------------------------ modals
@@ -1756,6 +1761,74 @@ class App:
             row(cx, cy0 + (k + 1) * rh, name, p["cmd"][j],
                 lambda j=j: self.change_cmd(i, j, -1), lambda j=j: self.change_cmd(i, j, 1),
                 warn=p["cmd"][j] >= 21, tile=j)
+        v.finish()
+
+    def cmd_layout(self, n, W, H):
+        """Columns for n commander tiles in W x H: the arrangement with the biggest tiles."""
+        best = (0, 1)
+        for cols in range(1, n + 1):
+            rows = -(-n // cols)
+            tw, th = W / cols, H / rows
+            size = min(tw, th * 1.35)               # tiles look best a little wider than tall
+            if size > best[0]:
+                best = (size, cols)
+        return best[1]
+
+    def draw_cmd(self, m):
+        """Commander damage to one player: a tile per commander (their art), tap = +1 damage,
+        hold keeps adding, - takes one off. Opened by tapping a player's life total."""
+        i = m["idx"]
+        if i >= len(self.players):
+            return self.pop()
+        p = self.players[i]
+        v = self.modal_view(m, f"Commander damage to {p['name']}",
+                            tuple(c * 3 // 4 for c in PALETTE[p["color"] % len(PALETTE)]))
+        u, W, H = v.u, v.w, v.h
+        why = self.ko_reason(p)
+        info = f"Life {p['life']}" + (f"   KO - {why}" if why else "")
+        hint = ("Tap a commander for 1 damage" + (" (and -1 life)" if self.settings["cmd_hits_life"] else "")
+                + " - hold to keep adding")
+        iy = u + u * 0.35
+        r = self.text(v.surf, info, u * 0.5, (255, 120, 120) if why else WHITE, shadow=False, midleft=(16, iy))
+        self.text(v.surf, hint, u * 0.3, GREY, maxw=W - r.right - 40, shadow=False, midleft=(r.right + 24, iy))
+
+        n = len(self.players)
+        area = pygame.Rect(0, int(u * 1.75), W, H - int(u * 1.75) - u)
+        cols = self.cmd_layout(n, area.w, area.h)
+        rows = -(-n // cols)
+        tw, th = area.w // cols, area.h // rows
+        for k, src in enumerate(self.players):
+            dmg = p["cmd"][k]
+            r = pygame.Rect(area.x + k % cols * tw, area.y + k // cols * th, tw, th).inflate(-10, -10)
+            col = PALETTE[src["color"] % len(PALETTE)]
+            art = self.cover(src["art"], r.w, r.h) if src["art"] else None
+            tile = pygame.Surface(r.size)
+            if art:
+                tile.blit(art, (0, 0))
+                tile.blit(self.shade(r.w, r.h, 120, 140, 190), (0, 0))
+            else:
+                tile.fill(col)
+                tile.blit(self.shade(r.w, r.h, 20, 40, 110), (0, 0))
+            rad = max(6, min(r.w, r.h) // 10)
+            v.surf.blit(tile, r)
+            v.surf.blit(self.corners(r.w, r.h, rad), r)      # round the tile's corners
+            lethal = dmg >= 21
+            pygame.draw.rect(v.surf, (255, 70, 70) if lethal else tuple(min(255, c + 70) for c in col), r,
+                             max(2, min(r.w, r.h) // 40) + (2 if lethal else 0), border_radius=rad)
+            name = src["name"] + (" (own)" if k == i else "")
+            self.text(v.surf, name, max(14, min(r.h * 0.13, r.w * 0.1)), maxw=r.w * 0.9, midtop=(r.centerx, r.y + r.h * 0.06))
+            self.text(v.surf, str(dmg), max(20, min(r.h * 0.45, r.w * 0.4)), (255, 120, 120) if lethal else WHITE,
+                      center=(r.centerx, r.centery + r.h * 0.04))
+            add = lambda k=k: self.change_cmd(i, k, 1)
+            v.zone(r, add, add, 0.25)                         # the tile: +1, hold repeats
+            b = max(36, int(min(r.h * 0.26, r.w * 0.24)))
+            sub = lambda k=k: self.change_cmd(i, k, -1)
+            self.button(v, (r.x + 4, r.bottom - b - 4, b, b), "-", sub, hold=sub, bg=(25, 26, 34), size=b * 0.7)
+
+        y = H - u
+        angle = m.get("angle", 0)
+        self.button(v, (0, y, W // 2, u), "Counters & more", lambda: (self.pop(), self.push("player", idx=i, angle=angle)))
+        self.button(v, (W // 2, y, W - W // 2, u), "Done", self.pop, bg=BTN_ON)
         v.finish()
 
     def draw_keyboard(self, m):
@@ -2525,6 +2598,38 @@ PHONE_HTML = r"""<!doctype html>
   header b { font-size:17px; }
   #dot { width:9px; height:9px; border-radius:50%; background:var(--bad); flex:none; }
   #dot.on { background:var(--good); }
+  .hbtn.rot { margin-left:0; width:40px; padding:0; font-size:20px; flex:none; }
+  .hbtn.rot.on { background:var(--accent); border-color:var(--accent); }
+  /* force landscape: on a portrait screen, turn the whole page a quarter turn (works with the
+     phone's rotation lock on, and on iPhones, where pages can't lock orientation themselves) */
+  @media (orientation: portrait) {
+    html.land90 body, html.land270 body { inset:auto; top:0; left:0; width:100vh; width:100dvh; height:100vw;
+                                          transform-origin:top left; }
+    html.land90 body { transform:rotate(90deg) translateY(-100%); }
+    html.land270 body { transform:rotate(-90deg) translateX(-100%); }
+  }
+  .lifebtn { position:absolute; left:33%; right:33%; top:30%; bottom:30%; z-index:1; border:0; padding:0;
+             background:none; border-radius:14px; touch-action:none; }
+  .lifebtn:active { background:rgba(255,255,255,.1); }
+  .cmdto { display:flex; align-items:center; gap:10px; margin:2px 2px 6px; }
+  .cmdto b { font-size:17px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .cmdto .life2 { margin-left:auto; font-size:34px; font-weight:800; font-variant-numeric:tabular-nums; }
+  .cmdto .life2.dead { color:#ff7a7a; }
+  .cmdgrid { display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; }
+  .ctile { position:relative; aspect-ratio:1.25; border-radius:16px; overflow:hidden; background-size:cover;
+           background-position:center; border:3px solid rgba(255,255,255,.35); }
+  .ctile.lethal { border-color:#ff4a4a; }
+  .ctile .cadd { position:absolute; inset:0; border:0; padding:8px 8px 10px; background:none; color:#fff;
+                 display:flex; flex-direction:column; align-items:center; justify-content:space-between; touch-action:manipulation; }
+  .ctile .cadd:active { background:rgba(255,255,255,.12); }
+  .ctile .cname { font-weight:700; font-size:15px; text-shadow:0 1px 3px #000; max-width:100%; overflow:hidden;
+                  text-overflow:ellipsis; white-space:nowrap; }
+  .ctile .cname small { font-weight:500; opacity:.8; }
+  .ctile .cval { font-size:46px; font-weight:800; line-height:1; text-shadow:0 2px 6px #000; font-variant-numeric:tabular-nums; }
+  .ctile.lethal .cval { color:#ff8a8a; }
+  .ctile .cplus { font-size:12px; font-weight:700; opacity:.75; text-shadow:0 1px 3px #000; }
+  .ctile .cminus { position:absolute; left:6px; bottom:6px; width:44px; height:44px; border-radius:12px; z-index:1;
+                   border:1px solid rgba(255,255,255,.3); background:rgba(0,0,0,.6); color:#fff; font-size:24px; font-weight:800; }
   .hbtn { margin-left:auto; height:36px; padding:0 14px; border-radius:999px; border:1px solid var(--line);
           background:#22232f; font-size:14px; font-weight:600; max-width:46vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .hbtn + .hbtn { margin-left:0; }
@@ -2643,6 +2748,7 @@ PHONE_HTML = r"""<!doctype html>
   <span id="dot"></span><b>LifePi</b>
   <button class="hbtn" id="seatbtn" type="button">Pick your seat</button>
   <button class="hbtn" id="gamebtn" type="button">Game</button>
+  <button class="hbtn rot" id="rotbtn" type="button" aria-label="Turn the screen sideways">↻</button>
 </header>
 <main id="table"></main>
 <div class="sheet" id="sheet" hidden><div class="box" id="box"></div></div>
@@ -2685,13 +2791,17 @@ function followMe(s) {                 // seats can be swapped on the device: fo
 
 // presses: like the device - tap = 1 step, hold = big steps repeating. Tracked per pointer on
 // window, because a live update can replace the element under a finger mid-press.
+// Every button works this way (not "click"): when other phones are playing, the page redraws
+// several times a second, and Safari drops a click if the element under the finger was
+// replaced before it lifted. A swipe that turns into a scroll cancels (pointercancel / moved).
 const presses = new Map();
 function press(e, tap, hold, every) {
   e.preventDefault();
-  const pr = { held: false, timer: null, tap };
+  const pr = { held: false, timer: null, tap, x: e.clientX, y: e.clientY };
   pr.timer = setTimeout(() => {
+    if (!hold) return;                       // plain buttons: a long press is still a tap
     pr.held = true;
-    if (hold) { hold(); pr.timer = setInterval(hold, every); }
+    hold(); pr.timer = setInterval(hold, every);
   }, 450);
   presses.set(e.pointerId, pr);
 }
@@ -2699,7 +2809,8 @@ function release(e, cancel) {
   const pr = presses.get(e.pointerId);
   if (!pr) return;
   presses.delete(e.pointerId); clearTimeout(pr.timer); clearInterval(pr.timer);
-  if (!pr.held && !cancel) pr.tap();
+  const moved = Math.hypot(e.clientX - pr.x, e.clientY - pr.y) > 16;
+  if (!pr.held && !cancel && !moved) pr.tap();
 }
 addEventListener("pointerup", (e) => release(e, false));
 addEventListener("pointercancel", (e) => release(e, true));
@@ -2708,6 +2819,7 @@ function pressable(tag, attrs, tap, hold, every, ...kids) {
     onpointerdown: (e) => press(e, tap, hold, every) }), ...kids);
 }
 const stepBtn = (label, fn) => pressable("button", {}, fn, fn, 150, label);   // sheets: hold repeats the step
+const tapBtn = (attrs, fn, ...kids) => pressable("button", attrs, fn, null, 0, ...kids);
 function stepper(value, minus, plus, warn) {
   return el("div", { class: "stepper" }, stepBtn("−", minus),
             el("span", { class: "v" + (warn ? " warn" : "") }, value), stepBtn("+", plus));
@@ -2733,10 +2845,11 @@ function panel(p) {
                                         `${SHORT[key] || key} ${p.counters[key]}`));
   if (!bottom.length) bottom.push(el("span", { class: "pill empty" }, "counters"));
   const open = () => openSheet({ kind: "player", seat });
+  const openCmd = () => openSheet({ kind: "cmd", seat });
   return el("div", { class: "cell" + (p.poly ? " inwedge" : ""), style: placeAt(boxOf(p, document.getElementById("table"))) },
     el("div", { class: "panel" + (seat === me ? " me" : "") + (p.ko ? " dead" : "") + (firstFlash(seat) ? " goesfirst" : ""),
                 style: p.poly ? {} : cardBg(p, "rgba(0,0,0,.6), rgba(0,0,0,.32) 45%, rgba(0,0,0,.66)") },
-      el("button", { class: "strip top", type: "button", onclick: open },
+      tapBtn({ class: "strip top" }, open,
          el("span", {}, p.name), seat === me ? el("small", {}, "you") : null,
          seat === state.first ? el("span", { class: "first1" }, "1st") : null),
       firstFlash(seat) ? el("div", { class: "goes" }, "Goes first!") : null,
@@ -2744,25 +2857,28 @@ function panel(p) {
                 () => act({ op: "life", seat, d: -10 }), 500, el("i", {}, "−")),
       pressable("button", { class: "half plus", "aria-label": "plus" }, () => act({ op: "life", seat, d: 1 }),
                 () => act({ op: "life", seat, d: 10 }), 500, el("i", {}, "+")),
+      tapBtn({ class: "lifebtn", "aria-label": "commander damage to " + p.name }, openCmd),
       el("div", { class: "life" }, p.life),
       d ? el("div", { class: "delta" + (d < 0 ? " neg" : "") }, fmt(d)) : null,
       p.ko ? el("div", { class: "ko" }, p.ko === "life" ? "KO" : "KO · " + p.ko) : null,
-      el("button", { class: "strip bot", type: "button", onclick: open }, bottom)));
+      tapBtn({ class: "strip bot" }, openCmd, bottom)));
 }
 
 // ------------------------------------------------------------------ sheets
-function openSheet(s) { sheet = s; render(); document.getElementById("box").scrollTop = 0; }
-function closeSheet() { sheet = null; confirmAt = ""; render(); }
+let sheetSig = "";
+function openSheet(s) { sheet = s; sheetSig = ""; render(); document.getElementById("box").scrollTop = 0; }
+function closeSheet() { sheet = null; sheetSig = ""; confirmAt = ""; render(); }
+function redrawSheet() { sheetSig = ""; render(); }
 document.getElementById("sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") closeSheet(); });
 
 function playerSheet(seat) {
   const s = state, p = s.players[seat];
   return [
     el("div", { class: "shead" }, el("h3", {}, p.name),
-       el("button", { class: "chipbtn", type: "button", onclick: () => ask("Rename", p.name.startsWith("Player ") ? "" : p.name,
-                                                                         (t) => act({ op: "name", seat, name: t })) }, "Rename"),
-       el("button", { class: "chipbtn", type: "button", onclick: () => act({ op: "color", seat }) }, "Colour"),
-       el("button", { class: "chipbtn go", type: "button", onclick: closeSheet }, "Done")),
+       tapBtn({ class: "chipbtn" }, () => ask("Rename", p.name.startsWith("Player ") ? "" : p.name,
+                                              (t) => act({ op: "name", seat, name: t })), "Rename"),
+       tapBtn({ class: "chipbtn" }, () => act({ op: "color", seat }), "Colour"),
+       tapBtn({ class: "chipbtn go" }, closeSheet, "Done")),
     el("div", { class: "lifebig" }, p.life),
     el("div", { class: "steps" }, [-5, -1, 1, 5].map((d) => stepBtn(fmt(d), () => act({ op: "life", seat, d })))),
     el("h4", {}, "Counters"),
@@ -2780,24 +2896,46 @@ function playerSheet(seat) {
   ];
 }
 
+function cmdSheet(seat) {
+  const s = state, p = s.players[seat];
+  const hit = s.cmd_hits_life ? " (also −1 life)" : "";
+  return [
+    el("div", { class: "shead" }, el("h3", {}, "Cmdr damage"),
+       tapBtn({ class: "chipbtn" }, () => openSheet({ kind: "player", seat }), "Counters & more"),
+       tapBtn({ class: "chipbtn go" }, closeSheet, "Done")),
+    el("div", { class: "cmdto" }, el("span", { class: "stile", style: cardBg(p, "rgba(0,0,0,.1), rgba(0,0,0,.1)") }),
+       el("b", {}, "to " + p.name), el("span", { class: "life2" + (p.ko ? " dead" : "") }, p.life)),
+    el("p", { class: "muted" }, `Tap a commander for 1 damage${hit}; hold to keep adding.`),
+    el("div", { class: "cmdgrid" }, s.players.map((src) => {
+      const v = p.cmd[src.seat], add = () => act({ op: "cmd", seat, src: src.seat, d: 1 });
+      const sub = () => act({ op: "cmd", seat, src: src.seat, d: -1 });
+      return el("div", { class: "ctile" + (v >= 21 ? " lethal" : ""),
+                         style: Object.assign(cardBg(src, "rgba(0,0,0,.25), rgba(0,0,0,.6)"), v >= 21 ? {} : { borderColor: src.color }) },
+        pressable("button", { class: "cadd", "aria-label": "damage from " + src.name }, add, add, 220,
+          el("span", { class: "cname" }, src.name, src.seat === seat ? el("small", {}, " (own)") : null),
+          el("span", { class: "cval" }, v), el("span", { class: "cplus" }, "+1")),
+        pressable("button", { class: "cminus", "aria-label": "less damage from " + src.name }, sub, sub, 220, "−"));
+    })),
+  ];
+}
+
 function seatSheet() {
   return [
-    el("div", { class: "shead" }, el("h3", {}, "Which seat are you?"),
-       el("button", { class: "chipbtn go", type: "button", onclick: closeSheet }, "Done")),
+    el("div", { class: "shead" }, el("h3", {}, "Which seat are you?"), tapBtn({ class: "chipbtn go" }, closeSheet, "Done")),
     el("div", { class: "seatpick" }, state.players.map((p) =>
-      el("button", { type: "button", class: p.seat === me ? "on" : "", style: cardBg(p, "rgba(0,0,0,.3), rgba(0,0,0,.5)"),
-                     onclick: () => { setMe(p.seat); closeSheet(); } }, p.name)),
-      el("button", { type: "button", class: me < 0 ? "on" : "", onclick: () => { setMe(-1); closeSheet(); } }, "Just watching")),
+      tapBtn({ class: p.seat === me ? "on" : "", style: cardBg(p, "rgba(0,0,0,.3), rgba(0,0,0,.5)") },
+             () => { setMe(p.seat); closeSheet(); }, p.name)),
+      tapBtn({ class: me < 0 ? "on" : "" }, () => { setMe(-1); closeSheet(); }, "Just watching")),
     el("p", { class: "muted" }, "Your seat gets a yellow outline. Everyone can still adjust any player."),
   ];
 }
 
 function confirmBtn(id, label, cls, fn) {
   const armed = confirmAt === id;
-  return el("button", { class: "big " + cls, type: "button", onclick: () => {
+  return tapBtn({ class: "big " + cls + (armed ? " armed" : "") }, () => {
     if (armed) { confirmAt = ""; fn(); closeSheet(); return; }
-    confirmAt = id; setTimeout(() => { if (confirmAt === id) { confirmAt = ""; render(); } }, 3000); render();
-  } }, armed ? "Tap again to confirm" : label);
+    confirmAt = id; setTimeout(() => { if (confirmAt === id) { confirmAt = ""; redrawSheet(); } }, 4000); redrawSheet();
+  }, armed ? "Tap again to confirm" : label);
 }
 
 function gameSheet() {
@@ -2805,30 +2943,27 @@ function gameSheet() {
   if (ng.n === null) { ng.n = s.players.length; ng.life = s.start_life; }
   const lifeOpts = [20, 30, 40];
   return [
-    el("div", { class: "shead" }, el("h3", {}, "Game"),
-       el("button", { class: "chipbtn go", type: "button", onclick: closeSheet }, "Done")),
+    el("div", { class: "shead" }, el("h3", {}, "Game"), tapBtn({ class: "chipbtn go" }, closeSheet, "Done")),
     el("h4", {}, "Players"),
     el("div", { class: "chips six" }, Array.from({ length: s.max_players || 6 }, (_, i) => i + 1).map((n) =>
-      el("button", { type: "button", class: ng.n === n ? "on" : "", onclick: () => { ng.n = n; render(); } }, n))),
+      tapBtn({ class: ng.n === n ? "on" : "" }, () => { ng.n = n; redrawSheet(); }, n))),
     el("h4", {}, "Starting life"),
     el("div", { class: "chips" }, lifeOpts.map((l) =>
-      el("button", { type: "button", class: ng.life === l ? "on" : "", onclick: () => { ng.life = l; render(); } }, l)),
+      tapBtn({ class: ng.life === l ? "on" : "" }, () => { ng.life = l; redrawSheet(); }, l)),
       el("input", { type: "number", inputmode: "numeric", min: "1", max: "9999", placeholder: "Other",
                     value: lifeOpts.includes(ng.life) ? null : String(ng.life),
-                    onchange: (e) => { const v = parseInt(e.target.value, 10); if (v > 0) ng.life = Math.min(9999, v); render(); } })),
+                    onchange: (e) => { const v = parseInt(e.target.value, 10); if (v > 0) ng.life = Math.min(9999, v); redrawSheet(); } })),
     confirmBtn("new", `Start ${ng.n}-player game at ${ng.life}`, "go", () => act({ op: "newgame", n: ng.n, life: ng.life })),
     confirmBtn("reset", "Reset this game", "danger", () => act({ op: "reset" })),
     el("h4", {}, "Seating"),
     el("div", { class: "chips seat4" }, (s.seatings || []).map(([key, label]) =>
-      el("button", { type: "button", class: s.seating === key ? "on" : "", onclick: () => act({ op: "seating", value: key }) }, label))),
+      tapBtn({ class: s.seating === key ? "on" : "" }, () => act({ op: "seating", value: key }), label))),
     el("p", { class: "muted" }, "Changes the current game's layout on LifePi and every screen."),
     el("h4", {}, "Rules"),
     el("div", { class: "rows" },
-      el("button", { type: "button", class: "row switch" + (s.random_first ? " on" : ""),
-                     onclick: () => act({ op: "random_first", on: !s.random_first }) },
+      tapBtn({ class: "row switch" + (s.random_first ? " on" : "") }, () => act({ op: "random_first", on: !s.random_first }),
         el("span", { class: "label" }, "Pick a random first player on new game"), el("i")),
-      el("button", { type: "button", class: "row switch" + (s.cmd_hits_life ? " on" : ""),
-                     onclick: () => act({ op: "cmd_hits_life", on: !s.cmd_hits_life }) },
+      tapBtn({ class: "row switch" + (s.cmd_hits_life ? " on" : "") }, () => act({ op: "cmd_hits_life", on: !s.cmd_hits_life }),
         el("span", { class: "label" }, "Commander damage also reduces life"), el("i"))),
     el("h4", {}, "Big screen"),
     el("p", { class: "muted" }, "Open the TV view on a TV browser, cast this tab, or mirror this phone to a Roku. ",
@@ -2844,18 +2979,45 @@ function render() {
   document.getElementById("table").replaceChildren(
     ...wedgeLayers(state.players, "rgba(0,0,0,.5), rgba(0,0,0,.5)", me), ...state.players.map(panel));
   const sh = document.getElementById("sheet"), box = document.getElementById("box");
-  if (sheet && sheet.kind === "player" && !state.players[sheet.seat]) sheet = null;
+  if (sheet && (sheet.kind === "player" || sheet.kind === "cmd") && !state.players[sheet.seat]) sheet = null;
   sh.hidden = !sheet;
-  if (sheet) {
-    const top = box.scrollTop;
-    box.replaceChildren(el("div", { class: "grab" }),
-      ...(sheet.kind === "player" ? playerSheet(sheet.seat) : sheet.kind === "seat" ? seatSheet() : gameSheet()));
-    box.scrollTop = top;                 // live updates must not jump the sheet back to the top
-  }
+  if (!sheet) { sheetSig = ""; return; }
+  // Rebuild the open sheet only when something it shows changed - not on every update
+  // from the other phones - so buttons stay put under a finger and scrolling isn't disturbed.
+  const sig = sheetKey();
+  if (sig === sheetSig) return;
+  sheetSig = sig;
+  const top = box.scrollTop;
+  box.replaceChildren(el("div", { class: "grab" }),
+    ...(sheet.kind === "player" ? playerSheet(sheet.seat) : sheet.kind === "cmd" ? cmdSheet(sheet.seat)
+        : sheet.kind === "seat" ? seatSheet() : gameSheet()));
+  box.scrollTop = top;                   // live updates must not jump the sheet back to the top
+}
+function sheetKey() {
+  const s = state, base = [sheet, confirmAt, ng.n, ng.life, me];
+  if (sheet.kind === "game")
+    return JSON.stringify([base, s.players.length, s.start_life, s.seating, s.random_first, s.cmd_hits_life, s.max_players]);
+  const looks = s.players.map((p) => [p.name, p.color, p.art]);
+  if (sheet.kind === "seat") return JSON.stringify([base, looks]);
+  const p = s.players[sheet.seat];
+  return JSON.stringify([base, looks, s.cmd_hits_life, p.life, p.ko, p.counters, p.cmd]);
 }
 document.getElementById("seatbtn").onclick = () => openSheet({ kind: "seat" });
 addEventListener("resize", () => render());          // wedge boxes depend on the screen shape
 document.getElementById("gamebtn").onclick = () => { ng.n = null; openSheet({ kind: "game" }); };
+// force landscape: off -> turned one way -> the other way -> off (remembered on this phone)
+const TURNS = ["", "land90", "land270"];
+let turn = store.get("lifepi-turn", "");
+function applyTurn() {
+  document.documentElement.classList.remove("land90", "land270");
+  if (turn) document.documentElement.classList.add(turn);
+  document.getElementById("rotbtn").classList.toggle("on", !!turn);
+  render();
+}
+document.getElementById("rotbtn").onclick = () => {
+  turn = TURNS[(TURNS.indexOf(turn) + 1) % TURNS.length]; store.set("lifepi-turn", turn); applyTurn();
+};
+applyTurn();
 
 onState = render;
 onStatus = (what, code) => {

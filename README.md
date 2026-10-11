@@ -64,8 +64,9 @@ Open the menu (round button) > **Phones & TV**. It shows a QR code, the address 
 
 - **Phones / tablets:** scan the QR code (or type the address and PIN). The phone shows the whole
   table, laid out exactly like the Pi (same seats, seating style and player count), on one screen
-  with no scrolling: tap a panel's left / right half for −1 / +1, hold for ±10, tap a name or the
-  counters strip for that player's counters and commander damage. **Pick your seat** gives your panel
+  with no scrolling: tap a panel's left / right side for −1 / +1, hold for ±10, tap a life total (or the
+  strip under it) for commander damage, tap a name for that player's counters and settings. **↻** turns
+  the page sideways (landscape) while the phone stays upright - handy with the rotation lock on. **Pick your seat** gives your panel
   a yellow outline; **Game** starts a new game (1–8 players, starting life, seating style) and holds
   the rules (random first player, commander damage reduces life). Changes show up instantly on the Pi
   and every other phone. Phones must be on the same network as LifePi; nothing is installed.
@@ -140,7 +141,8 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 
 ## Controls
 
-- Middle of a panel: left half −, right half + (hold for ±10)
+- Middle of a panel: left side −, right side + (hold for ±10)
+- **Tap a life total** (or the damage / counters strip under it): commander damage, Lifetap style - a tile for every commander with their art; tap a tile for 1 damage, hold to keep adding, − to take one off; *Counters & more* opens the full sheet
 - **Hold a player's name and drag it** onto another panel to swap seats (commander damage follows the players)
 - Name strip or counter strip of a panel: opens that player's sheet (rename, card art, local image, colour, profiles, counters, commander damage) — oriented toward that player
 - Round button: main menu - new game, reset, dice / coin, rotate, seating, commander damage rule,
@@ -177,6 +179,7 @@ All headless; CI runs them on every push and before every release.
 |---|---|
 | `SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` | the app itself: rotation and touch mapping, tap / hold, every seating style for 1–8 players (each screen point belongs to one seat, clockwise order, taps on rotated seats), modals and rotated sheets, drag-to-swap, random first player (incl. fairness), search cache and suggestions (mocked Scryfall), saving / restart / crash / corrupt-save recovery |
 | `SDL_VIDEODRIVER=dummy python3 tests/companion_test.py` | the Phones & TV server: PIN and lock-out, every phone action, bad input, live updates, seat positions matching the Pi, art serving |
+| `python tests/phone_test.py` | the phone page (QR code) in headless Chrome on a busy table (another phone tapping every 150 ms): starting games and changing seating from the phone, scrolling sheets, commander damage, force landscape (needs Chrome) |
 | `python web/build.py && python tests/web_test.py` | the phone app end to end in headless Chrome at phone size: boot, real touch input, holds, Scryfall in the browser, reload, rotation, starting offline (needs Chrome and internet) |
 | `python3 tests/live_scryfall.py` | the real Scryfall API (non-blocking in CI) |
 

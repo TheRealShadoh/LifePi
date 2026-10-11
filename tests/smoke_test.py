@@ -40,7 +40,7 @@ print("tap / hold ok")
 app.rotate_screen(); app.render()
 assert (app.W, app.H) == (480, 800)
 before = [p["life"] for p in app.players]
-cx, cy = 360, 600            # canvas point: bottom-right seat (2), '+' half
+cx, cy = 420, 600            # canvas point: bottom-right seat (2), + half (its middle is the life total)
 sx, sy = 480 * 0 + (800 - 1 - cy), cx   # forward map for 90 cw on an 800x480 screen
 assert app.to_canvas(sx, sy) == (cx, cy)
 tap(app.to_canvas(sx, sy)); assert app.players[2]["life"] == before[2] + 1
@@ -230,6 +230,53 @@ app.save_state(); r8 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
 assert len(r8.players) == 8 and r8.players[0]["cmd"][7] == 4 and r8.settings["seating"] == "round"
 app.settings["seating"] = "table"; app.start_game(4, 40); app.render()
 print("8 players / rotated sheets ok")
+
+# --- commander damage pane (Lifetap style): tap a life total ---------------------------
+def find_point(zone, avoid=()):
+    """A canvas point inside zone (a hit function) and outside the zones in avoid."""
+    for x in range(2, W, 6):
+        for y in range(2, H, 6):
+            if zone((x, y)) and not any(a((x, y)) for a in avoid):
+                return (x, y)
+    raise AssertionError("zone not on screen")
+for seating in ("table", "ends", "round"):
+    app.modals.clear(); app.settings["seating"] = seating; app.start_game(6, 40); app.first_anim = None; app.render()
+    for k, s in enumerate(app.seats):
+        app.modals.clear(); app.render()
+        tap(seat_point(s, 0.5, 0.5))                         # on the life total
+        m = app.modals[-1] if app.modals else None
+        assert m and m["kind"] == "cmd" and m["idx"] == k, (seating, k, m)
+        assert m["angle"] == round(s.angle / 90) * 90 % 360
+        app.render()                                         # draws facing that player
+    app.modals.clear(); app.render()
+    life = app.players[1]["life"]
+    tap(seat_point(app.seats[1], 0.12, 0.5)); tap(seat_point(app.seats[1], 0.88, 0.5))
+    assert app.players[1]["life"] == life and not app.modals  # the halves either side still -1 / +1
+    tap(seat_point(app.seats[1], 0.5, 0.95))                 # the damage strip opens it too
+    assert app.modals[-1]["kind"] == "cmd" and app.modals[-1]["idx"] == 1
+print("life total / damage strip open commander damage; halves still -/+")
+
+app.modals.clear(); app.settings["seating"] = "ends"; app.start_game(6, 40); app.first_anim = None; app.render()
+end = next(k for k, s in enumerate(app.seats) if s.angle == 270)    # sideways pane at a table end
+tap(seat_point(app.seats[end], 0.5, 0.5)); app.render()
+pygame.image.save(app.canvas, os.path.join(shots, "cmd_pane_end.png"))
+z = app.zones                                                # [tile0, minus0, tile1, minus1, ..., more, done]
+assert len(z) == 2 * 6 + 2
+target, src = app.players[end], 2
+life0 = target["life"]
+pt = find_point(z[2 * src][0], avoid=[z[2 * src + 1][0]])
+tap(pt)                                                      # a real tap on the tile
+assert target["cmd"][src] == 1 and target["life"] == life0 - 1, (target["cmd"], target["life"])
+tap(pt, hold=1.2)                                            # hold keeps adding
+assert target["cmd"][src] >= 4, target["cmd"]
+for _ in range(target["cmd"][src]):
+    tap(find_point(z[2 * src + 1][0]))                       # the minus button on that tile
+assert target["cmd"][src] == 0 and target["life"] == life0
+tap(seat_point(app.seats[end], 0.5, 0.5)) if not app.modals else None
+z[-2][1]()                                                   # "Counters & more"
+assert app.modals[-1]["kind"] == "player" and app.modals[-1]["idx"] == end
+app.modals.clear(); app.settings["seating"] = "table"; app.start_game(4, 40); app.first_anim = None; app.render()
+print("commander damage pane ok (tap, hold, minus, rotated, counters & more)")
 
 # --- random first player on new game ------------------------------------------------
 def land(a):                                     # fast-forward the spin
