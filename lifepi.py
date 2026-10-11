@@ -39,7 +39,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
