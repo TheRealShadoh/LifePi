@@ -25,7 +25,9 @@ import os
 import queue
 import random
 import secrets
+import shutil
 import signal
+import subprocess
 import socket
 import sys
 import threading
@@ -53,6 +55,8 @@ COMPANION_PORT = 8765                               # phones + TV view, on the l
 FIRST_SHOW = 3.0                                    # seconds "Goes first!" stays up after the spin
 RANDOM_ART_QUERY = "t:legendary t:creature game:paper"   # random art: commanders - big, characterful
 RANDOM_ART_RETRY = 60                               # seconds before trying again when offline
+REPO = "TheRealShadoh/LifePi"
+UPDATE_EVERY = 6 * 3600                             # check GitHub for a new release at most this often
 SEARCH_DIR = CACHE_DIR.parent / "search"            # cached Scryfall search results
 SUGGEST_FILE = CACHE_DIR.parent / "autocomplete.json"
 SEARCH_TTL = 7 * 86400                              # re-ask Scryfall after a week
@@ -374,6 +378,30 @@ def layout(n, w, h, seating):
     return tuple(rows_layout(n, w, h, flip=seating != "upright"))
 
 
+def parse_version(v):
+    """"v1.4.0" / "1.4.0" -> (1, 4, 0); None if it isn't a version."""
+    parts = str(v).strip().lstrip("vV").split(".")
+    if not 1 <= len(parts) <= 4 or not all(x.isdigit() for x in parts):
+        return None
+    return tuple(int(x) for x in parts) + (0,) * (4 - len(parts))
+
+
+def newer_version(candidate, current):
+    a, b = parse_version(candidate), parse_version(current)
+    return bool(a and b and a > b)
+
+
+def check_release_source(src, tag):
+    """A downloaded lifepi.py must look like the release before it replaces anything."""
+    if not src.startswith(b"#!/usr/bin/env python3\n"):
+        raise ValueError("download is not LifePi")
+    text = src.decode("utf-8")
+    want = tag.lstrip("vV")
+    if f'VERSION = "{want}"' not in text:
+        raise ValueError(f"download is not version {want}")
+    compile(text, "lifepi.py", "exec")                    # a SyntaxError aborts the update
+
+
 def lan_ip():
     """This machine's address on the local network: the interface of the default route
     (where phones on the same Wi-Fi are). UDP connect() sends no packets."""
@@ -623,7 +651,10 @@ class App:
             d.mkdir(parents=True, exist_ok=True)
         self.settings = {"rotation": 0, "seating": "table", "cmd_hits_life": True,
                          "start_life": 40, "companion": True, "companion_pin": "", "random_first": True,
-                         "auto_rotate": False}    # phone app: follow the phone turning (off = stay put)
+                         "auto_rotate": False,    # phone app: follow the phone turning (off = stay put)
+                         # installed copies: newest release seen, when we last asked, and the
+                         # version whose "update available" banner was closed
+                         "update_latest": "", "update_checked": 0, "update_dismissed": ""}
         self.players = [new_player(i, 40) for i in range(4)]
         self.profiles = {}
         self.first, self.first_anim, self.game_id = -1, None, 0    # who goes first (-1: not picked)
@@ -657,6 +688,10 @@ class App:
         self.dirty, self.last_save = True, 0.0
         # random card art for artless players - only when launched as the app (tests stay offline)
         self.random_art = bool(getattr(args, "random_art", False))
+        # update check: only when launched as the app (main()), never in tests or the browser
+        self.update_check = bool(getattr(args, "update_check", False))
+        self.install_path = Path(getattr(args, "install_path", None) or __file__).resolve()
+        self.update_state, self.update_error, self.restart_after = "", "", False
         self.art_results, self.art_pending, self.art_retry_at = queue.Queue(), set(), 0
         self.seats = []
         self.toast = ("", 0.0)
@@ -674,6 +709,7 @@ class App:
         if WEB:
             spawn(self.restore_art)
         self.fill_random_art()                    # players without art get a random card's art
+        self.check_for_update()                   # a newer release on GitHub? (background)
 
     # ------------------------------------------------------------------ state
     def load_state(self):
@@ -729,6 +765,11 @@ class App:
             settings["random_first"] = s["random_first"]
         if isinstance(s.get("auto_rotate"), bool):
             settings["auto_rotate"] = s["auto_rotate"]
+        for key in ("update_latest", "update_dismissed"):
+            if isinstance(s.get(key), str) and parse_version(s[key]):
+                settings[key] = s[key]
+        if isinstance(s.get("update_checked"), (int, float)):
+            settings["update_checked"] = s["update_checked"]
         start = settings.get("start_life", self.settings["start_life"])
 
         players = []
@@ -1507,6 +1548,9 @@ class App:
         if WEB:                                   # no server, casting or quitting in a browser tab
             items = [it for it in items if it[0] not in ("Phones & TV", "Cast to TV", "Quit")]
             items.insert(5, (f"Auto-rotate: {'on' if st['auto_rotate'] else 'off'}", self.toggle_auto_rotate, BTN))
+        if self.update_available():
+            items.insert(len(items) - (0 if WEB else 1),
+                         (f"Update to {self.settings['update_latest'].lstrip('v')}", self.start_update, BTN_OK))
         rh = (v.h - u - u // 2) // ((len(items) + 1) // 2)
         for k, (label, fn, bg) in enumerate(items):
             r = (k % 2 * W // 2, u + k // 2 * rh, W // 2, rh)
@@ -2253,6 +2297,7 @@ class App:
         hit = pygame.Rect(0, 0, int(r * 2.6), int(r * 2.6))
         hit.center = c
         self.zones.append((hit.collidepoint, lambda: self.push("menu"), None, 0, None))
+        self.draw_update_banner()
 
         if self.modals:
             self.zones = []
@@ -2288,6 +2333,122 @@ class App:
         mid = (lo + hi) // 2
         x = min(range(lo, hi + 1, 2), key=lambda x: (-min(clear, min(abs(x - c) for c in xs)), abs(x - mid)))
         return (x, self.H // 2)
+
+    # ------------------------------------------------------------------ updates (installed copies)
+    def update_mode(self):
+        """How this copy can update itself: "self" (replace the installed file), "git" (a clone:
+        git pull), or "" (browser and Docker update their own way; or no write access).
+        Worked out once - it can't change while the app runs."""
+        if getattr(self, "_update_mode", None) is None:
+            mode = ""
+            if not WEB and not os.path.exists("/.dockerenv"):
+                f = self.install_path
+                if any((d / ".git").exists() for d in [f.parent, *f.parents]):
+                    mode = "git"
+                elif os.access(f, os.W_OK) and os.access(f.parent, os.W_OK):
+                    mode = "self"
+            self._update_mode = mode
+        return self._update_mode
+
+    def update_available(self):
+        latest = self.settings["update_latest"]
+        return bool(self.update_mode()) and newer_version(latest, VERSION)
+
+    def check_for_update(self, force=False):
+        """Ask GitHub for the latest release - at most every UPDATE_EVERY, in the background."""
+        if not self.update_check or not self.update_mode():
+            return
+        if not force and time.time() - self.settings["update_checked"] < UPDATE_EVERY:
+            return
+
+        async def work():
+            try:
+                rel = json.loads(await fetch_bytes(f"https://api.github.com/repos/{REPO}/releases/latest"))
+                tag = rel.get("tag_name", "")
+                if parse_version(tag):
+                    self.update_found = tag
+            except Exception as e:                    # offline: try again next start
+                print("update check failed:", e, file=sys.stderr)
+        self.update_found = None
+        spawn(work)
+
+    def tick_update(self):
+        """Main thread: record what the check found; finish an update (restart into it)."""
+        found = getattr(self, "update_found", None)
+        if found:
+            self.update_found = None
+            self.settings["update_latest"], self.settings["update_checked"] = found, time.time()
+            self.changed()
+        if self.update_state == "done":
+            self.update_state = ""
+            self.say(f"Updated to {self.settings['update_latest'].lstrip('v')} - restarting")
+            self.restart_after, self.running = True, False   # main() starts the new version
+        elif self.update_state == "failed":
+            self.update_state = ""
+            self.say(f"Update failed: {self.update_error} - still on {VERSION}")
+
+    def dismiss_update(self):
+        self.settings["update_dismissed"] = self.settings["update_latest"]
+        self.changed()
+
+    def start_update(self):
+        """Install the latest release, then restart into it. The new file has to compile, carry
+        the release's version and start like the old one before it replaces anything; the old
+        file is kept as <file>.previous."""
+        if self.update_state == "working" or not self.update_available():
+            return
+        tag, mode, f = self.settings["update_latest"], self.update_mode(), self.install_path
+        self.modals.clear()
+        self.update_state, self.update_error = "working", ""
+        self.say(f"Updating to {tag.lstrip('v')}...")
+
+        async def work():
+            try:
+                if mode == "git":
+                    repo = next(d for d in [f.parent, *f.parents] if (d / ".git").exists())
+                    r = subprocess.run(["git", "-C", str(repo), "pull", "--ff-only"], capture_output=True,
+                                       text=True, timeout=120)
+                    if r.returncode:
+                        raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[-1][:80])
+                else:
+                    src = await fetch_bytes(f"https://raw.githubusercontent.com/{REPO}/{tag}/lifepi.py")
+                    check_release_source(src, tag)
+                    tmp = f.with_name(f.name + ".new")
+                    tmp.write_bytes(src)
+                    os.chmod(tmp, os.stat(f).st_mode)
+                    shutil.copy2(f, f.with_name(f.name + ".previous"))
+                    os.replace(tmp, f)
+                self.update_state = "done"
+            except Exception as e:
+                self.update_error = str(e) or type(e).__name__
+                self.update_state = "failed"
+            self.dirty = True
+        spawn(work)
+
+    def draw_update_banner(self):
+        """'Update available' bar at the bottom: Update, or x to close it for this version."""
+        latest = self.settings["update_latest"]
+        if (self.modals or not self.update_available() or self.settings["update_dismissed"] == latest
+                or self.update_state == "working"):
+            return
+        h = max(40, min(self.W, self.H) // 11)
+        w = min(self.W - 24, int(h * 11))
+        bar = pygame.Rect((self.W - w) // 2, self.H - h - 10, w, h)
+        pygame.draw.rect(self.canvas, (0, 0, 0), bar.move(0, 3), border_radius=h // 2)
+        pygame.draw.rect(self.canvas, (36, 38, 52), bar, border_radius=h // 2)
+        pygame.draw.rect(self.canvas, (255, 220, 90), bar, 2, border_radius=h // 2)
+        upd = pygame.Rect(bar.right - int(h * 3.3) - h, bar.y + 5, int(h * 3.2), h - 10)
+        close = pygame.Rect(bar.right - h, bar.y, h, h)
+        self.text(self.canvas, f"Update available: LifePi {latest.lstrip('v')}", h * 0.42, WHITE, shadow=False,
+                  maxw=upd.x - bar.x - h * 0.6, midleft=(bar.x + h * 0.45, bar.centery))
+        pygame.draw.rect(self.canvas, BTN_OK, upd, border_radius=upd.h // 2)
+        self.text(self.canvas, "Update", h * 0.42, WHITE, shadow=False, center=upd.center)
+        cx, cy, k = close.centerx, close.centery, h // 6
+        pygame.draw.line(self.canvas, GREY, (cx - k, cy - k), (cx + k, cy + k), 3)
+        pygame.draw.line(self.canvas, GREY, (cx - k, cy + k), (cx + k, cy - k), 3)
+        self.zones.append((bar.collidepoint, None, None, 0, None))          # the bar itself: swallow taps
+        self.zones.append((upd.inflate(8, 10).collidepoint, self.start_update, None, 0, None))
+        self.zones.append((close.collidepoint, self.dismiss_update, None, 0, None))
 
     def draw_first_spin(self):
         """Random first player: a highlight runs round the table, slows and lands; then
@@ -2473,6 +2634,7 @@ class App:
         self.tick_suggest()
         self.tick_remote()
         self.tick_art()
+        self.tick_update()
         now = time.time()
         if WEB and now - self.web_checked > 0.5:     # phone rotated / window resized
             self.web_checked = now
@@ -3315,11 +3477,17 @@ def main():
     ap.add_argument("--no-companion", action="store_true", help="don't serve the phone / TV web pages")
     ap.add_argument("--no-random-art", action="store_true",
                     help="don't give players without art a random card's art")
+    ap.add_argument("--no-update-check", action="store_true",
+                    help="don't check GitHub for new releases")
     args = ap.parse_args()
     args.random_art = not args.no_random_art
+    args.update_check = not args.no_update_check
     if args.no_companion:
         args.companion_port = None
-    App(args).run()
+    app = App(args)
+    app.run()
+    if app.restart_after:                         # updated: start the new version in this process
+        os.execv(sys.executable, [sys.executable, str(app.install_path)] + sys.argv[1:])
 
 
 if __name__ == "__main__":

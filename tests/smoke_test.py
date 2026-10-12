@@ -412,6 +412,83 @@ lifepi.http_get = scry_random
 rb.players[7].update(art=None); gone = rb.players[7]; rb.fill_random_art(); rb.start_game(4, 40)
 art_settle(rb); assert gone["art"] is None and len(rb.players) == 4
 print("random card art ok")
+
+# --- update check for installed copies ------------------------------------------------
+assert lifepi.newer_version("v1.10.0", "1.9.3") and not lifepi.newer_version("v1.4.0", "1.4.0")
+assert not lifepi.newer_version("v1.3.9", "1.4.0") and not lifepi.newer_version("nonsense", "1.0.0")
+install = lifepi.Path(tempfile.mkdtemp()) / "lifepi"          # like ~/.local/bin/lifepi (no .git above)
+install.write_bytes(open(lifepi.__file__, "rb").read())
+original = install.read_bytes()
+release = {"tag": "v9.9.0", "src": None, "calls": 0}
+def as_release(tag):
+    return original.replace(f'VERSION = "{lifepi.VERSION}"'.encode(), f'VERSION = "{tag[1:]}"'.encode(), 1)
+def github(url, timeout=10):
+    release["calls"] += 1
+    if "releases/latest" in url:
+        return json.dumps({"tag_name": release["tag"]}).encode()
+    if url.endswith(f"/{release['tag']}/lifepi.py"):
+        return release["src"] if release["src"] is not None else as_release(release["tag"])
+    raise lifepi.urllib.error.URLError("unexpected " + url)
+lifepi.http_get = github
+def updater():
+    a = lifepi.App(NS(windowed="800x480", rotate=None, fps=30, update_check=True, install_path=str(install)))
+    end = time.time() + 5
+    while time.time() < end and a.settings["update_latest"] != release["tag"]:
+        a.tick_update(); time.sleep(0.02)
+    return a
+def settle_update(a):
+    end = time.time() + 8
+    while time.time() < end and (a.update_state == "working" or a.update_state in ("done", "failed")):
+        a.tick_update(); time.sleep(0.02)
+    a.tick_update()
+lifepi.STATE_FILE.unlink(missing_ok=True)
+up = updater()
+assert up.update_mode() == "self" and up.settings["update_latest"] == "v9.9.0" and up.update_available()
+up.modals.clear(); up.first_anim = None; up.render()
+pygame.image.save(up.canvas, os.path.join(shots, "update_banner.png"))
+banner = up.zones[-3:]                                     # bar, Update, x
+assert all(z[1] is None for z in banner[:1]) and banner[1][1] == up.start_update and banner[2][1] == up.dismiss_update
+# x closes it for this version (it stays in the menu)...
+pt_close = next((x, y) for x in range(W - 1, 0, -2) for y in range(H - 1, H // 2, -2) if banner[2][0]((x, y)))
+up.pointer_down("t", pt_close); up.pointer_up("t", pt_close); up.render()
+assert up.settings["update_dismissed"] == "v9.9.0"
+assert not any(z[1] == up.dismiss_update for z in up.zones), "banner still shown after closing"
+up.push("menu"); up.render()
+assert any(z[1] == up.start_update for z in up.zones), "menu should still offer the update"
+up.modals.clear()
+up.save_state()
+# ...and a newer release brings it back; the check runs at most every UPDATE_EVERY
+calls = release["calls"]; again = lifepi.App(NS(windowed="800x480", rotate=None, fps=30, update_check=True,
+                                               install_path=str(install)))
+time.sleep(0.3); again.tick_update(); assert release["calls"] == calls, "checked again too soon"
+release["tag"] = "v9.9.1"; again.settings["update_checked"] = 0; again.check_for_update()
+end = time.time() + 5
+while time.time() < end and again.settings["update_latest"] != "v9.9.1":
+    again.tick_update(); time.sleep(0.02)
+again.modals.clear(); again.first_anim = None; again.render()
+assert any(z[1] == again.dismiss_update for z in again.zones), "a newer version shows the banner again"
+# a bad download never replaces the installed file
+for bad, why in ((as_release("v1.0.0"), "version"), (b"#!/usr/bin/env python3\nthis is ( not python\n", "syntax"),
+                 (b"<html>rate limited</html>", "not LifePi")):
+    release["src"] = bad
+    again.start_update(); settle_update(again)
+    assert install.read_bytes() == original and not again.restart_after and again.running, why
+    assert "Update failed" in again.toast[0], again.toast
+# a good one: replaced (old kept as .previous), game saved, restart requested
+release["src"] = None
+again.players[0]["life"] = 33; again.changed()
+again.start_update(); settle_update(again)
+assert again.restart_after and not again.running
+assert b'VERSION = "9.9.1"' in install.read_bytes() and install.with_name("lifepi.previous").read_bytes() == original
+assert again.state_dirty
+again.save_state()                                         # what run() does on the way out (end())
+assert json.loads(lifepi.STATE_FILE.read_text())["players"][0]["life"] == 33
+# a git clone updates with git pull; the browser / Docker don't use this at all
+clone = lifepi.Path(tempfile.mkdtemp()); (clone / ".git").mkdir(); (clone / "lifepi.py").write_bytes(original)
+gc = lifepi.App(NS(windowed="800x480", rotate=None, fps=30, install_path=str(clone / "lifepi.py")))
+assert gc.update_mode() == "git"
+lifepi.http_get = scry_random
+print("update check ok (banner, close, menu, interval, bad downloads rejected, update + restart, git mode)")
 for n in range(1, 7):
     app.start_game(n, 40); app.render()
 app.save_state(); app2 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))

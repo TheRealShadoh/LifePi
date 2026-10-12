@@ -43,6 +43,14 @@ git clone https://github.com/TheRealShadoh/LifePi.git && cd LifePi
 
 Or without installing: `sudo apt install python3-pygame && python3 lifepi.py`.
 
+**Updates:** LifePi checks GitHub for a new release when it starts (at most every 6 hours; skipped when
+offline). If there is one, a bar at the bottom says *Update available* - **Update** downloads that release,
+checks it (it must compile and carry the release's version), swaps it in (the old file stays as
+`lifepi.previous`) and restarts, keeping your game; **x** hides it until the next version (the menu still
+offers *Update to ...*). Running from a git clone, Update does `git pull`. Only published releases are
+offered. `--no-update-check` turns it off. (Versions before 1.5.0 don't have this: update those once with
+`git pull && ./install.sh`.) The phone app and Docker update their own way.
+
 | Option | Meaning |
 |---|---|
 | `--rotate 0\|90\|180\|270` | set (and remember) screen rotation |
@@ -51,6 +59,7 @@ Or without installing: `sudo apt install python3-pygame && python3 lifepi.py`.
 | `--companion-port 8765` | port for the phone / TV pages |
 | `--no-companion` | don't serve the phone / TV pages at all |
 | `--no-random-art` | leave players without art on their colour instead of a random card's art |
+| `--no-update-check` | don't check GitHub for new releases |
 
 Keys (optional, a keyboard is never required): `Esc` menu/back · `R` rotate · `Ctrl+Q` quit.
 
