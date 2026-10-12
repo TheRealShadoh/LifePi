@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -89,6 +89,7 @@ SEATINGS = {"table": "Table  ===", "ends": "Ends  -=-", "round": "Round", "uprig
 HOLD_DELAY = 0.45
 BOARD_GUARD = 0.4                  # s after a sheet closes during which board taps are ignored
 NAME_MAX = 24
+CONFIRM_GAP = 0.35                                 # a confirming tap must come at least this late
 ARM_TIME = 4.0                                      # "Tap again to ..." stays armed this long
 MERGE_TIME = 2.0                                    # taps this close together are one undo step
 UNDO_MAX = 60
@@ -398,6 +399,21 @@ def layout(n, w, h, seating):
     if seating == "ends" and n >= 3:
         return tuple(ends_layout(n, w, h))
     return tuple(rows_layout(n, w, h, flip=seating != "upright"))
+
+
+def rank_card_names(names, text):
+    """Order card-name guesses for the 3-slot strip: commanders first. Scryfall lists "Atraxa's
+    Fall" and "Atraxi Warden" before "Atraxa, Praetors' Voice"; legendary names read
+    "Name, Title", so a match on the part before the comma goes first, then other names that
+    start with what was typed, then the rest - each group in Scryfall's order."""
+    q = " ".join(text.lower().split())
+
+    def group(name):
+        n = name.lower()
+        if "," in n and n.split(",")[0].startswith(q):
+            return 0
+        return 1 if n.startswith(q) else 2
+    return sorted(names, key=group)                     # stable: keeps the order within a group
 
 
 def parse_version(v):
@@ -1346,6 +1362,8 @@ class App:
     def confirm(self, key, fn):
         def tap():
             if self.is_armed(key):
+                if time.time() - self.armed[1] < CONFIRM_GAP:
+                    return                        # the 2nd tap of a double tap is not a confirm
                 self.armed = None
                 fn()
             else:
@@ -1719,6 +1737,8 @@ class App:
         return v
 
     def draw_menu(self, m):
+        if self.update_badge():
+            self.dismiss_update()                 # seen: the menu offers it from here on
         v = self.modal_view(m, f"LifePi {VERSION}")
         u, W = v.u, v.w
         st = self.settings
@@ -2035,11 +2055,7 @@ class App:
         acts = [("Rename", lambda: self.ask_text(
                     "Player name", "" if p["name"].startswith("Player ") else p["name"], rename, ang,
                     local=self.profile_names, pick=pick_name, hint="Saved profiles appear here")),
-                ("Card art", lambda: self.ask_text(
-                    "Search Scryfall for a card", "", search, ang,
-                    local=self.local_card_names, suggest=self.suggest_cards,
-                    hint="Type 2+ letters for suggestions",
-                    pick=lambda name: self.open_art_search(i, f'!"{name}"', ang, label=name))),
+                ("Card art", lambda: self.ask_card_art(i, ang)),
                 ("Local image", lambda: self.open_local_images(i, ang)),
                 ("Colour", recolor),
                 ("Profiles", lambda: self.open_profiles(i, ang))]
@@ -2313,6 +2329,11 @@ class App:
             self.text(v.surf, f"{m['page'] + 1} / {pages}", u * 0.4, GREY, shadow=False,
                       center=(W * 3 // 8, y + u // 2))
             self.button(v, (W // 2, y, W // 4, u), "Next >", lambda: page(1))
+        elif m.get("retry") and not items and not m.get("status", "").startswith("Searching"):
+            def again():                        # nothing found (or offline): back to the keyboard
+                self.pop()
+                m["retry"]()
+            self.button(v, (0, y, W // 2, u), "Search again", again, bg=BTN_ON)
         self.button(v, (3 * W // 4, y, W // 4, u), "Cancel", self.pop, bg=BTN_BAD)
         v.finish()
 
@@ -2474,18 +2495,21 @@ class App:
         with self.cache_lock:
             hit = self.ac_cache.get(q)
         if hit and time.time() - hit[0] < SUGGEST_TTL:
-            return hit[1]
+            return rank_card_names(hit[1], q)
         try:
             names = (await scryfall("/cards/autocomplete", q=q)).get("data", [])[:20]
         except Exception:
-            return hit[1] if hit else self.local_card_names(text)
+            return rank_card_names(hit[1], q) if hit else self.local_card_names(text)
         with self.cache_lock:
             self.ac_cache[q] = [time.time(), names]
             self.ac_dirty = True
             self.known_names.update(names)
-        return names
+        return rank_card_names(names, q)
 
     def local_card_names(self, text):
+        return rank_card_names(self._local_card_names(text), text)
+
+    def _local_card_names(self, text):
         """Instant guesses from card names seen before (no network)."""
         q = " ".join(text.lower().split())
         if len(q) < 2:
@@ -2500,9 +2524,20 @@ class App:
         t = text.strip().lower()
         return [n for n in sorted(self.profiles) if n.lower().startswith(t)]
 
+    def ask_card_art(self, i, angle, text=""):
+        """The Card art keyboard: type a name (Scryfall suggests as you type), pick or search."""
+        def search(t):
+            if t.strip():
+                self.open_art_search(i, t.strip(), angle)
+        self.ask_text("Search Scryfall for a card", text, search, angle,
+                      local=self.local_card_names, suggest=self.suggest_cards,
+                      hint="Type 2+ letters for suggestions",
+                      pick=lambda name: self.open_art_search(i, f'!"{name}"', angle, label=name))
+
     def open_art_search(self, i, query, angle, label=None):
         grid = dict(title=f"Card art: {label or query}", items=[], page=0, status="Searching Scryfall...",
-                    angle=angle, on_pick=lambda it: self.set_art(i, it["img"], it["value"], it.get("url")))
+                    angle=angle, on_pick=lambda it: self.set_art(i, it["img"], it["value"], it.get("url")),
+                    retry=lambda: self.ask_card_art(i, angle, label or query))
         self.push("grid", **grid)
         grid = self.modals[-1]
 
@@ -2582,7 +2617,7 @@ class App:
         hit.center = c
         self.zones.append((hit.collidepoint, lambda: self.push("menu"), None, 0, None))
         self.draw_undo_button(r)
-        self.draw_update_banner()
+        self.draw_update_badge(c, r)
 
         if self.modals:
             self.zones = []
@@ -2690,6 +2725,8 @@ class App:
             self.update_found = None
             self.settings["update_latest"], self.settings["update_checked"] = found, time.time()
             self.changed()
+            if self.update_badge():
+                self.say(f"LifePi {found.lstrip('v')} is available - open the menu to update")
         if self.update_state == "done":
             self.update_state = ""
             self.say(f"Updated to {self.settings['update_latest'].lstrip('v')} - restarting")
@@ -2736,30 +2773,21 @@ class App:
             self.dirty = True
         spawn(work)
 
-    def draw_update_banner(self):
-        """'Update available' bar at the bottom: Update, or x to close it for this version."""
+    def update_badge(self):
+        """Show the gold dot on the menu button: there's an update the menu hasn't shown yet."""
         latest = self.settings["update_latest"]
-        if (self.modals or not self.update_available() or self.settings["update_dismissed"] == latest
-                or self.update_state == "working"):
+        return (self.update_available() and self.settings["update_dismissed"] != latest
+                and self.update_state != "working")
+
+    def draw_update_badge(self, c, r):
+        """Gold dot on the menu button's corner - nothing over the seats. Opening the menu (which
+        offers "Update to ...") clears it for that version."""
+        if not self.update_badge():
             return
-        h = max(40, min(self.W, self.H) // 11)
-        w = min(self.W - 24, int(h * 11))
-        bar = pygame.Rect((self.W - w) // 2, self.H - h - 10, w, h)
-        pygame.draw.rect(self.canvas, (0, 0, 0), bar.move(0, 3), border_radius=h // 2)
-        pygame.draw.rect(self.canvas, (36, 38, 52), bar, border_radius=h // 2)
-        pygame.draw.rect(self.canvas, (255, 220, 90), bar, 2, border_radius=h // 2)
-        upd = pygame.Rect(bar.right - int(h * 3.3) - h, bar.y + 5, int(h * 3.2), h - 10)
-        close = pygame.Rect(bar.right - h, bar.y, h, h)
-        self.text(self.canvas, f"Update available: LifePi {latest.lstrip('v')}", h * 0.42, WHITE, shadow=False,
-                  maxw=upd.x - bar.x - h * 0.6, midleft=(bar.x + h * 0.45, bar.centery))
-        pygame.draw.rect(self.canvas, BTN_OK, upd, border_radius=upd.h // 2)
-        self.text(self.canvas, "Update", h * 0.42, WHITE, shadow=False, center=upd.center)
-        cx, cy, k = close.centerx, close.centery, h // 6
-        pygame.draw.line(self.canvas, GREY, (cx - k, cy - k), (cx + k, cy + k), 3)
-        pygame.draw.line(self.canvas, GREY, (cx - k, cy + k), (cx + k, cy - k), 3)
-        self.zones.append((bar.collidepoint, None, None, 0, None))          # the bar itself: swallow taps
-        self.zones.append((upd.inflate(8, 10).collidepoint, self.start_update, None, 0, None))
-        self.zones.append((close.collidepoint, self.dismiss_update, None, 0, None))
+        d = (c[0] + int(r * 0.72), c[1] - int(r * 0.72))
+        k = max(6, int(r * 0.34))
+        pygame.draw.circle(self.canvas, (0, 0, 0), d, k + 2)
+        pygame.draw.circle(self.canvas, (255, 210, 70), d, k)
 
     def draw_first_spin(self):
         """Random first player: a highlight runs round the table, slows and lands; then

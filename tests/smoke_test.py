@@ -181,6 +181,26 @@ app.push("player", idx=2, angle=0); app.render(); app.zones[1][1]()
 m = app.modals[-1]; assert "Chris" in m["sugg"]
 app.keyboard_pick(m, "Chris"); assert app.players[2]["name"] == "Chris" and app.players[2]["art"]
 app.players[2]["name"] = "Player 3"; app.modals.clear()
+ac = ["Atraxa's Fall", "Atraxi Warden", "Atraxa's Skitterfang", "Atraxa, Grand Unifier",
+      "Atraxa, Praetors' Voice", "Heat Ray", "Ixhel, Scion of Atraxa"]       # Scryfall's order for "atra"
+ranked = lifepi.rank_card_names(ac, "Atra")
+assert ranked[:2] == ["Atraxa, Grand Unifier", "Atraxa, Praetors' Voice"], ranked   # commanders in the strip
+assert ranked[2:4] == ["Atraxa's Fall", "Atraxi Warden"] and ranked[-1] == "Ixhel, Scion of Atraxa", ranked
+assert lifepi.rank_card_names(["Lightning Bolt", "Lightning Helix"], "lig") == ["Lightning Bolt", "Lightning Helix"]
+# nothing found: "Search again" goes back to the keyboard with the search filled in
+def nothing(url, timeout=10):
+    if "cards/search" in url:
+        raise lifepi.urllib.error.HTTPError(url, 404, "not found", {}, None)
+    return counting(url)
+lifepi.http_get = nothing
+app.open_art_search(1, "Zzyzx", 0); grid = app.modals[-1]; wait_grid(grid)
+assert grid["status"] == "No cards found", grid["status"]
+app.render(); pygame.image.save(app.canvas, os.path.join(shots, "no_cards.png"))
+again_btn = [z for z in app.zones if z[1] and z[1].__name__ == "again"]
+assert len(again_btn) == 1, "Search again button missing"
+again_btn[0][1](); m = app.modals[-1]
+assert m["kind"] == "keyboard" and m["text"] == "Zzyzx" and "pick" in m, m
+app.modals.clear(); lifepi.http_get = counting
 print("suggestions ok")
 
 # long-press a name strip and drag it onto another seat to swap
@@ -404,7 +424,9 @@ app.push("menu"); app.render()
 reset = app.zones[1]                                        # 2nd menu button: Reset this game
 tap(find_point(reset[0])); assert app.players[0]["life"] == 34 and app.is_armed("reset")
 app.render(); pygame.image.save(app.canvas, os.path.join(shots, "menu_armed.png"))
-tap(find_point(reset[0])); assert app.players[0]["life"] == 40 and not app.modals    # second tap: reset
+tap(find_point(reset[0])); assert app.players[0]["life"] == 34 and app.is_armed("reset")  # a double tap isn't a confirm
+def later(): app.armed = (app.armed[0], app.armed[1] - lifepi.CONFIRM_GAP)              # ...a deliberate 2nd tap is
+later(); tap(find_point(reset[0])); assert app.players[0]["life"] == 40 and not app.modals    # second tap: reset
 app.undo_last(); assert app.players[0]["life"] == 34
 app.push("menu"); app.render(); tap(find_point(app.zones[1][0])); app.armed = ("reset", time.time() - 5)
 app.step(); app.render(); tap(find_point(app.zones[1][0])); assert app.players[0]["life"] == 34   # timed out: arms again
@@ -416,7 +438,8 @@ app.armed = None; app.modals.clear()
 # New game over a game in progress: Start needs two taps; a fresh table starts at once
 app.push("newgame", n=4, life=40); app.render(); start = app.zones[-1]
 tap(find_point(start[0])); assert app.players[0]["life"] == 34 and app.is_armed("start")
-tap(find_point(app.zones[-1][0])); assert app.players[0]["life"] == 40 and not app.modals
+tap(find_point(app.zones[-1][0])); assert app.players[0]["life"] == 34 and app.modals    # double tap: no wipe
+later(); tap(find_point(app.zones[-1][0])); assert app.players[0]["life"] == 40 and not app.modals
 app.push("newgame", n=3, life=40); app.render(); tap(find_point(app.zones[-1][0]))
 assert len(app.players) == 3 and not app.modals                 # nothing to lose: one tap
 # partner off takes two taps (it forgets that commander's damage)
@@ -425,10 +448,10 @@ app.push("player", idx=2, angle=0); app.render()
 acts = [z for z in app.zones if not z[2]]                   # the top row of buttons (Done first)
 partner_btn = acts[-1]
 tap(find_point(partner_btn[0])); assert app.players[2]["partner"]
-tap(find_point(partner_btn[0])); assert not app.players[2]["partner"] and app.players[0]["cmd2"][2] == 0
+later(); tap(find_point(partner_btn[0])); assert not app.players[2]["partner"] and app.players[0]["cmd2"][2] == 0
 app.undo_last(); assert app.players[2]["partner"] and app.players[0]["cmd2"][2] == 4
 app.modals.clear()
-print("two-tap confirm ok (reset, quit, start over a game, partner off; times out)")
+print("two-tap confirm ok (reset, quit, start over a game, partner off; double taps don't confirm; times out)")
 
 # --- formats, each opponent, planar die, initials, warnings ------------------------------
 app.start_game(2, 20, fmt="duel"); app.first_anim = None
@@ -603,16 +626,16 @@ lifepi.STATE_FILE.unlink(missing_ok=True)
 up = updater()
 assert up.update_mode() == "self" and up.settings["update_latest"] == "v9.9.0" and up.update_available()
 up.modals.clear(); up.first_anim = None; up.render()
-pygame.image.save(up.canvas, os.path.join(shots, "update_banner.png"))
-banner = up.zones[-3:]                                     # bar, Update, x
-assert all(z[1] is None for z in banner[:1]) and banner[1][1] == up.start_update and banner[2][1] == up.dismiss_update
-# x closes it for this version (it stays in the menu)...
-pt_close = next((x, y) for x in range(W - 1, 0, -2) for y in range(H - 1, H // 2, -2) if banner[2][0]((x, y)))
-up.pointer_down("t", pt_close); up.pointer_up("t", pt_close); up.render()
-assert up.settings["update_dismissed"] == "v9.9.0"
-assert not any(z[1] == up.dismiss_update for z in up.zones), "banner still shown after closing"
+pygame.image.save(up.canvas, os.path.join(shots, "update_badge.png"))
+assert "9.9.0 is available" in up.toast[0], up.toast         # a toast says so once...
+assert up.update_badge(), "...and the menu button carries a dot"
+assert not any(z[1] in (up.start_update, up.dismiss_update) for z in up.zones), "nothing over the seats"
+# the menu offers it; having seen it there clears the dot for this version
 up.push("menu"); up.render()
-assert any(z[1] == up.start_update for z in up.zones), "menu should still offer the update"
+assert any(z[1] == up.start_update for z in up.zones), "menu should offer the update"
+up.modals.clear(); up.render()
+assert up.settings["update_dismissed"] == "v9.9.0" and not up.update_badge()
+up.push("menu"); up.render(); assert any(z[1] == up.start_update for z in up.zones), "still in the menu"
 up.modals.clear()
 up.save_state()
 # ...and a newer release brings it back; the check runs at most every UPDATE_EVERY
@@ -624,7 +647,7 @@ end = time.time() + 5
 while time.time() < end and again.settings["update_latest"] != "v9.9.1":
     again.tick_update(); time.sleep(0.02)
 again.modals.clear(); again.first_anim = None; again.render()
-assert any(z[1] == again.dismiss_update for z in again.zones), "a newer version shows the banner again"
+assert again.update_badge(), "a newer version brings the dot back"
 # a bad download never replaces the installed file
 for bad, why in ((as_release("v1.0.0"), "version"), (b"#!/usr/bin/env python3\nthis is ( not python\n", "syntax"),
                  (b"<html>rate limited</html>", "not LifePi")):
@@ -646,7 +669,7 @@ clone = lifepi.Path(tempfile.mkdtemp()); (clone / ".git").mkdir(); (clone / "lif
 gc = lifepi.App(NS(windowed="800x480", rotate=None, fps=30, install_path=str(clone / "lifepi.py")))
 assert gc.update_mode() == "git"
 lifepi.http_get = scry_random
-print("update check ok (banner, close, menu, interval, bad downloads rejected, update + restart, git mode)")
+print("update check ok (toast + dot, menu, interval, bad downloads rejected, update + restart, git mode)")
 for n in range(1, 7):
     app.start_game(n, 40); app.render()
 app.save_state(); app2 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))

@@ -36,7 +36,7 @@ life counter — released under the MIT licence so anyone can use, fork and impr
 - Player colours chosen to stay distinguishable with colour blindness; a short line under every life total shows which way is up (6 vs 9 from across the table)
 - **Phones as controllers:** everyone on the same Wi-Fi scans a QR code and runs their own life, counters and commander damage from their phone - changes show up instantly on the Pi and on every other phone
 - **TV view:** a live scoreboard for a big screen - cast it to a Chromecast / Google TV / Nvidia Shield from the menu, open it in a smart-TV browser, or mirror a phone to a Roku
-- **Keeps itself up to date** (installed with `install.sh`): an *Update available* bar when there's a new release - one tap updates and restarts, or close it
+- **Keeps itself up to date** (installed with `install.sh`): when there's a new release the menu button gets a gold dot and the menu offers *Update to ...* - one tap updates and restarts, keeping your game
 - **Manual screen rotation: 0 / 90 / 180 / 270°**, from the menu, the `R` key, or `--rotate`. It is done inside the app (render + touch remap), so it behaves identically on X11, Wayland (labwc/wayfire) and bare KMS/DRM, and doesn't touch the rest of the OS
 - Survives restarts: life, counters, commander damage, seats, names, art, profiles and settings autosave to `~/.config/lifepi/state.json` within half a second, are flushed to disk (safe against pulling the Pi's plug), saved on shutdown / `docker stop` / Ctrl+C / crashes, and the previous save is kept as `state.json.bak` in case the latest is damaged
 
@@ -58,10 +58,11 @@ LifePi at it - `WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/$(id -u) ~/.
 Without that SDL reports `kmsdrm not available` / `wayland not available`.
 
 **Updates:** LifePi checks GitHub for a new release when it starts (at most every 6 hours; skipped when
-offline). If there is one, a bar at the bottom says *Update available* - **Update** downloads that release,
-checks it (it must compile and carry the release's version), swaps it in (the old file stays as
-`lifepi.previous`) and restarts, keeping your game; **x** hides it until the next version (the menu still
-offers *Update to ...*). Running from a git clone, Update does `git pull`. Only published releases are
+offline). If there is one, a short message says so and the menu button gets a gold dot (nothing covers
+the seats mid-game); the menu then offers **Update to ...**, which downloads that release, checks it (it must
+compile and carry the release's version), swaps it in (the old file stays as `lifepi.previous`) and restarts,
+keeping your game. Opening the menu clears the dot until the next version. Running from a git clone, Update
+does `git pull`. Only published releases are
 offered. `--no-update-check` turns it off. (Versions before 1.5.0 don't have this: update those once with
 `git pull && ./install.sh`.) The phone app and Docker update their own way.
 
@@ -187,18 +188,18 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 Cut a release by pushing a version tag (bump `VERSION` in `lifepi.py` first):
 
 ```bash
-git tag v1.6.0 && git push origin v1.6.0
+git tag v1.7.0 && git push origin v1.7.0
 ```
 
 [`release.yml`](.github/workflows/release.yml) first runs **every** test - the whole CI suite below
 plus the container tests - and publishes only if all of them pass:
 
-- the container image `ghcr.io/therealshadoh/lifepi-web:1.6.0` and `:1.6` (amd64 + arm64)
+- the container image `ghcr.io/therealshadoh/lifepi-web:1.7.0` and `:1.7` (amd64 + arm64)
 - a [GitHub Release](https://github.com/TheRealShadoh/LifePi/releases) with release notes and the
   tested phone app attached (`lifepi-web.zip`)
 - the phone app at https://therealshadoh.github.io/LifePi/ (GitHub Pages; controlled by the
   repository variable `DEPLOY_PAGES`) - installed phone apps pick it up the next time they're opened
-- and from then on, installed Pis show *Update available*
+- and from then on, installed Pis offer it (gold dot on the menu button, *Update to ...* in the menu)
 
 Use tags rather than "Draft a new release" on GitHub - a release made on the website skips the
 tests. `:latest` is published from `main` only after CI has passed there. Running the Release
