@@ -17,9 +17,11 @@ Type=Application
 Name=LifePi
 Comment=MTG life counter
 Exec=$HOME/.local/bin/lifepi
-Icon=applications-games
+Icon=lifepi
+StartupWMClass=lifepi
 Categories=Game;
 DESK
+python3 "$HOME/.local/bin/lifepi" --write-icon >/dev/null || echo "(icon not installed - the menu entry uses a generic one)"
 if [[ "${1:-}" == "--autostart" ]]; then
   mkdir -p "$HOME/.config/autostart"
   cp "$HOME/.local/share/applications/lifepi.desktop" "$HOME/.config/autostart/"

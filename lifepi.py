@@ -41,13 +41,15 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.7.1"
+VERSION = "1.8.0"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / APP
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / APP / "art"
 IMAGE_DIR = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / APP / "images"
+DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share"))
+ICON_FILE = DATA_HOME / "icons" / "hicolor" / "256x256" / "apps" / "lifepi.png"   # menu / taskbar icon
 STATE_FILE = CONFIG_DIR / "state.json"
 BACKUP_FILE = CONFIG_DIR / "state.json.bak"         # the save before the latest one
 SAVE_INTERVAL = 0.5                                 # max seconds of play a power cut can lose
@@ -90,7 +92,8 @@ HOLD_DELAY = 0.45
 BOARD_GUARD = 0.4                  # s after a sheet closes during which board taps are ignored
 NAME_MAX = 24
 CONFIRM_GAP = 0.35                                 # a confirming tap must come at least this late
-ARM_TIME = 4.0                                      # "Tap again to ..." stays armed this long
+ARM_TIME = 4.0
+TURN = (110, 210, 255)                               # turn tracker colour (gold is "goes first")                                      # "Tap again to ..." stays armed this long
 MERGE_TIME = 2.0                                    # taps this close together are one undo step
 UNDO_MAX = 60
 HISTORY_MAX = 300
@@ -401,6 +404,56 @@ def layout(n, w, h, seating):
     return tuple(rows_layout(n, w, h, flip=seating != "upright"))
 
 
+def app_icon(size, pad):
+    """The LifePi icon (four seats around a life total), drawn with pygame - the same picture
+    as the phone app's. Needs pygame's display + font modules initialised."""
+    colours = [(46, 78, 140), (150, 42, 42), (38, 108, 62), (176, 150, 84)]
+    s = pygame.Surface((size, size), pygame.SRCALPHA)
+    pygame.draw.rect(s, (18, 18, 24), s.get_rect(), border_radius=size // 6)
+    inner = size - 2 * pad
+    gap = max(2, inner // 40)
+    half = (inner - gap) // 2
+    for k, c in enumerate(colours):
+        r = pygame.Rect(pad + (k % 2) * (half + gap), pad + (k // 2) * (half + gap), half, half)
+        pygame.draw.rect(s, c, r, border_radius=max(3, inner // 10))
+    rad = inner // 4
+    centre = (size // 2, size // 2)
+    pygame.draw.circle(s, (18, 18, 24), centre, rad + gap * 2)
+    pygame.draw.circle(s, (240, 240, 246), centre, rad, max(2, size // 64))
+    t = pygame.font.Font(None, int(rad * 1.25)).render("40", True, (255, 255, 255))
+    s.blit(t, t.get_rect(center=(centre[0], centre[1] + size // 90)))
+    return s
+
+
+def install_desktop_icon():
+    """Installed copies: put the icon where the desktop finds it and point LifePi's menu and
+    autostart entries at it. Runs on every start, so copies that update themselves (or were
+    installed before there was an icon) get it too. Quietly does nothing it can't do."""
+    try:
+        if not ICON_FILE.exists():
+            ICON_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = ICON_FILE.with_name("lifepi.tmp.png")   # pygame picks the format by extension
+            pygame.image.save(app_icon(256, 14), str(tmp))
+            os.replace(tmp, ICON_FILE)
+    except (OSError, pygame.error) as e:
+        print("icon not installed:", e, file=sys.stderr)
+        return
+    for f in (DATA_HOME / "applications" / "lifepi.desktop",
+              Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "autostart" / "lifepi.desktop"):
+        try:
+            text = f.read_text()
+        except OSError:
+            continue
+        new = text.replace("Icon=applications-games", "Icon=lifepi")
+        if "StartupWMClass=" not in new:
+            new = new.rstrip("\n") + "\nStartupWMClass=lifepi\n"
+        if new != text:
+            try:
+                write_atomic(f, new)
+            except OSError:
+                pass
+
+
 def rank_card_names(names, text):
     """Order card-name guesses for the 3-slot strip: commanders first. Scryfall lists "Atraxa's
     Fall" and "Atraxi Warden" before "Atraxa, Praetors' Voice"; legendary names read
@@ -689,6 +742,7 @@ class App:
             d.mkdir(parents=True, exist_ok=True)
         self.settings = {"rotation": 0, "seating": "table", "cmd_hits_life": True,
                          "start_life": 40, "format": "commander", "companion": True, "companion_pin": "", "random_first": True,
+                         "turn_tracker": False,   # optional: whose turn it is + the turn number
                          "auto_rotate": False,    # phone app: follow the phone turning (off = stay put)
                          # installed copies: newest release seen, when we last asked, and the
                          # version whose "update available" banner was closed
@@ -696,6 +750,7 @@ class App:
         self.players = [new_player(i, 40) for i in range(4)]
         self.profiles = {}
         self.first, self.first_anim, self.game_id = -1, None, 0    # who goes first (-1: not picked)
+        self.turn = None          # turn tracker: {"round": n, "seat": whose turn, "start": who began}
         # what happened this game (saved), and the steps Undo can take back (this session)
         self.history, self.undo = [], []
         self.armed = None                         # (key, time): a button waiting for its second tap
@@ -709,9 +764,19 @@ class App:
         if args.rotate is not None:
             self.settings["rotation"] = args.rotate % 360 // 90 * 90
 
+        if not WEB:                                # the window's app id matches lifepi.desktop
+            os.environ.setdefault("SDL_VIDEO_WAYLAND_WMCLASS", "lifepi")
+            os.environ.setdefault("SDL_VIDEO_X11_WMCLASS", "lifepi")
         pygame.display.init()      # no audio needed; skips ALSA start-up
         pygame.font.init()
         pygame.display.set_caption("LifePi")
+        if not WEB:
+            try:
+                pygame.display.set_icon(app_icon(64, 2))
+            except pygame.error:
+                pass
+            if getattr(args, "desktop_icon", False):   # main() only - tests leave $HOME alone
+                install_desktop_icon()
         self.web_turn = 0                          # phone app: rotation undoing the phone's turn
         if WEB:                                   # the page decides: match its shape and size
             self.web_size = web_screen_size()
@@ -783,10 +848,21 @@ class App:
                 self.players = players
             first = as_int(data.get("first"), -1)
             self.first = first if 0 <= first < len(self.players) else -1
+            self.turn = self.parse_turn(data.get("turn"))
             self.history = [e for e in (data.get("history") or [])[-HISTORY_MAX:]
                             if isinstance(e, dict) and isinstance(e.get("text"), str)
                             and isinstance(e.get("t"), (int, float))]
             return
+
+    def parse_turn(self, t):
+        """A saved turn tracker position, or None if it doesn't fit this game."""
+        if not isinstance(t, dict):
+            return None
+        n = len(self.players)
+        r, seat, start = as_int(t.get("round"), 0), as_int(t.get("seat"), -1), as_int(t.get("start"), -1)
+        if r < 1 or not 0 <= seat < n or not 0 <= start < n:
+            return None
+        return {"round": r, "seat": seat, "start": start}
 
     def parse_state(self, data):
         """Validate saved JSON field by field, so one bad value can't sink the whole game."""
@@ -809,6 +885,8 @@ class App:
             settings["companion_pin"] = pin
         if isinstance(s.get("random_first"), bool):
             settings["random_first"] = s["random_first"]
+        if isinstance(s.get("turn_tracker"), bool):
+            settings["turn_tracker"] = s["turn_tracker"]
         if isinstance(s.get("auto_rotate"), bool):
             settings["auto_rotate"] = s["auto_rotate"]
         for key in ("update_latest", "update_dismissed"):
@@ -856,7 +934,7 @@ class App:
     def save_state(self):
         """Durably save the game. The previous save is kept as state.json.bak."""
         data = {"settings": self.settings, "players": self.players, "profiles": self.profiles,
-                "first": self.first, "history": [self.history_entry(e) for e in self.history]}
+                "first": self.first, "turn": self.turn, "history": [self.history_entry(e) for e in self.history]}
         if WEB:
             try:
                 prev = web_store("state")
@@ -1313,6 +1391,8 @@ class App:
             return f"{name}: partner commanders {'on' if new else 'off'}"
         if k == "swap":
             return f"{name} and {e.get('src', '')} swapped seats"
+        if k == "turn":
+            return f"Turn {new}: {name}" + ("  (back)" if d < 0 else "")
         if k in ("game", "reset"):
             return e.get("text") or "New game"
         return e.get("text", "")
@@ -1324,6 +1404,7 @@ class App:
 
     def game_copy(self):
         return {"players": json.loads(json.dumps(self.players)), "first": self.first,
+                "turn": dict(self.turn) if self.turn else None,
                 "settings": {k: self.settings[k] for k in ("start_life", "format", "seating")},
                 "game_id": self.game_id}
 
@@ -1347,6 +1428,7 @@ class App:
                     old[k] = cur.get(k)
         self.players = players
         self.first, self.game_id = g["first"], g["game_id"]
+        self.turn = dict(g["turn"]) if g.get("turn") else None
         seating_changed = self.settings["seating"] != g["settings"]["seating"]
         self.settings.update(g["settings"])
         del self.history[u["hist"]:]
@@ -1476,6 +1558,9 @@ class App:
         self.modals.clear()
         self.game_id += 1
         self.pick_first()
+        if 0 <= self.first < len(self.players):     # history keeps who started
+            self.history[-1]["text"] = f"{label} - {self.players[self.first]['name']} goes first"
+        self.reset_turn()
         self.fill_random_art()
         self.changed()
 
@@ -1516,6 +1601,75 @@ class App:
         self.settings["random_first"] = not self.settings["random_first"]
         self.changed()
 
+    # ---- optional turn tracker: whose turn it is and the turn number (a round of the table)
+    def reset_turn(self):
+        """Turn 1 for whoever goes first (seat 1 when nobody was picked)."""
+        n = len(self.players)
+        start = self.first if 0 <= self.first < n else 0
+        self.turn = {"round": 1, "seat": start, "start": start} if n >= 2 else None
+
+    def toggle_turn_tracker(self):
+        self.settings["turn_tracker"] = not self.settings["turn_tracker"]
+        if self.settings["turn_tracker"] and not self.turn:
+            self.reset_turn()
+        self.changed()
+
+    def turn_on(self):
+        return bool(self.settings["turn_tracker"] and self.turn and len(self.players) >= 2)
+
+    def next_turn(self, d=1):
+        """Pass the turn clockwise (d=1) or take it back (d=-1), skipping knocked-out players.
+        The turn number goes up each time play comes back round to whoever started."""
+        if not self.turn_on():
+            return
+        n, t = len(self.players), self.turn
+        seat, rnd = t["seat"], t["round"]
+        if d < 0 and seat == t["start"] and rnd == 1:
+            return self.say("Already at the start of turn 1")
+        for _ in range(n):
+            if d > 0:
+                seat = (seat + 1) % n
+                rnd += seat == t["start"]
+            else:
+                rnd -= seat == t["start"]
+                seat = (seat - 1) % n
+            if not self.ko_reason(self.players[seat]) or seat == t["seat"]:
+                break
+        rnd = max(1, rnd)
+        self.record(("turn",), seat, "turn", d, rnd, merge=False)
+        t["seat"], t["round"] = seat, rnd
+        self.changed()
+
+    def turn_pill_rect(self, r):
+        """Where the "Turn n - name" pill goes: beside the menu button, opposite Undo."""
+        mx, my = self.menu_pos(r)
+        ux, _ = self.undo_pos(r)
+        pill = self.make_pill(self.turn_label(), max(20, int(r * 0.95)), fg=(10, 30, 40), bg=TURN, alpha=245)
+        rect = pill.get_rect()
+        if ux <= mx:
+            rect.midleft = (mx + r + 10, my)
+        else:
+            rect.midright = (mx - r - 10, my)
+        rect.clamp_ip(self.canvas.get_rect())
+        return pill, rect
+
+    def turn_label(self):
+        name = self.players[self.turn["seat"]]["name"]
+        name = name if len(name) <= 12 else name[:11] + "."
+        return f"Turn {self.turn['round']} - {name}  >"
+
+    def draw_turn(self, r):
+        """Turn tracker: outline the active seat; the pill passes the turn (hold: back one)."""
+        if not self.turn_on() or self.first_spinning():
+            return
+        seat = self.seats[self.turn["seat"]] if self.turn["seat"] < len(self.seats) else None
+        if seat:
+            pygame.draw.polygon(self.canvas, TURN, seat.poly, max(4, min(self.W, self.H) // 90))
+        pill, rect = self.turn_pill_rect(r)
+        self.canvas.blit(pill, rect)
+        self.zones.append((rect.inflate(12, 14).collidepoint, lambda: self.next_turn(1),
+                           lambda: self.next_turn(-1), 10 ** 6, None))
+
     def rotate_screen(self):
         self.settings["rotation"] = (self.settings["rotation"] + 90) % 360
         self.make_canvas()
@@ -1554,6 +1708,10 @@ class App:
             self.fx[a] = fb
         if self.first in (a, b):                    # "goes first" stays with the player
             self.first = b if self.first == a else a
+        if self.turn:                               # ...and so does the turn
+            for k in ("seat", "start"):
+                if self.turn[k] in (a, b):
+                    self.turn[k] = b if self.turn[k] == a else a
         self.changed()
 
     def seat_at(self, pos):
@@ -1752,6 +1910,8 @@ class App:
             (f"Rotate screen ({st['rotation']} deg)", self.rotate_screen, BTN_ON),
             (f"Seating: {SEATINGS[st['seating']]}", self.toggle_seating, BTN),
             (f"Cmdr dmg hits life: {'on' if st['cmd_hits_life'] else 'off'}", self.toggle_cmd, BTN),
+            (f"Turn tracker: {'on' if st['turn_tracker'] else 'off'}", self.toggle_turn_tracker,
+             BTN_ON if st["turn_tracker"] else BTN),
             ("Phones & TV", self.open_remote, BTN_ON),
             ("Cast to TV", self.open_cast, BTN),
             ("Back to game", self.pop, BTN),
@@ -2619,6 +2779,7 @@ class App:
         hit.center = c
         self.zones.append((hit.collidepoint, lambda: self.push("menu"), None, 0, None))
         self.draw_undo_button(r)
+        self.draw_turn(r)
         self.draw_update_badge(c, r)
 
         if self.modals:
@@ -3995,7 +4156,17 @@ def main():
                     help="don't give players without art a random card's art")
     ap.add_argument("--no-update-check", action="store_true",
                     help="don't check GitHub for new releases")
+    ap.add_argument("--write-icon", action="store_true",
+                    help="install the menu icon and point the menu entry at it, then exit (install.sh)")
     args = ap.parse_args()
+    if args.write_icon:
+        os.environ["SDL_VIDEODRIVER"] = "dummy"
+        pygame.display.init()
+        pygame.font.init()
+        install_desktop_icon()
+        print("icon:", ICON_FILE if ICON_FILE.exists() else "not written")
+        return
+    args.desktop_icon = True
     args.random_art = not args.no_random_art
     args.update_check = not args.no_update_check
     if args.no_companion:

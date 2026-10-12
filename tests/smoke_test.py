@@ -540,6 +540,51 @@ app.toggle_random_first(); app.start_game(1, 40); assert app.first == -1
 app.start_game(4, 40); land(app); app.first_anim = None
 print("random first player ok", counts)
 
+# history records who went first; the optional turn tracker
+app.modals.clear(); app.settings["random_first"] = True
+app.start_game(4, 40); app.first_anim = None
+f = app.first
+assert app.history[-1]["text"].endswith(f"{app.players[f]['name']} goes first"), app.history[-1]["text"]
+assert app.settings["turn_tracker"] is False and not app.turn_on()
+app.render(); assert not app.zones or True
+app.push("menu"); app.render()
+tt = [z for z in app.zones if z[1] == app.toggle_turn_tracker]; assert len(tt) == 1, "menu should offer the turn tracker"
+tt[0][1](); app.modals.clear(); app.render()
+assert app.turn_on() and app.turn == {"round": 1, "seat": f, "start": f}, app.turn
+R = max(22, min(app.W, app.H) // 22)
+def pill_center():
+    app.render(); return app.turn_pill_rect(R)[1].center
+tap(pill_center())                                          # tap the pill: next player, clockwise
+assert app.turn == {"round": 1, "seat": (f + 1) % 4, "start": f}, app.turn
+for _ in range(3): app.next_turn()
+assert app.turn == {"round": 2, "seat": f, "start": f}, app.turn   # back round to the starter: turn 2
+assert app.history[-1]["text"] == f"Turn 2: {app.players[f]['name']}", app.history[-1]["text"]
+ko = (f + 1) % 4; app.players[ko]["life"] = 0                # knocked-out players are skipped
+app.next_turn(); assert app.turn["seat"] == (f + 2) % 4, app.turn
+tap(pill_center(), hold=lifepi.HOLD_DELAY + 0.2)             # hold the pill: back one turn (once)
+assert app.turn == {"round": 2, "seat": f, "start": f}, app.turn
+app.next_turn(); app.undo_last(); assert app.turn["seat"] == f   # undo takes a pass back
+app.next_turn(-1); assert app.turn == {"round": 1, "seat": (f - 1) % 4, "start": f}, app.turn
+app.players[ko]["life"] = 40
+cur = app.turn["seat"]; name = app.players[cur]["name"]
+app.swap_seats(cur, (cur + 2) % 4); assert app.players[app.turn["seat"]]["name"] == name   # turn follows the player
+app.save_state(); r2 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
+assert r2.turn == app.turn and r2.settings["turn_tracker"]
+app.render(); pygame.image.save(app.canvas, os.path.join(shots, "turn_tracker.png"))
+app.start_game(4, 40); app.first_anim = None
+assert app.turn == {"round": 1, "seat": app.first, "start": app.first}   # new game: turn 1, whoever goes first
+app.toggle_turn_tracker(); assert not app.turn_on()
+print("first player in history, turn tracker ok")
+
+# installed copies get a menu / taskbar icon (also after updating themselves)
+desk = lifepi.DATA_HOME / "applications" / "lifepi.desktop"; desk.parent.mkdir(parents=True, exist_ok=True)
+desk.write_text("[Desktop Entry]\nType=Application\nName=LifePi\nExec=lifepi\nIcon=applications-games\n")
+lifepi.install_desktop_icon()
+assert lifepi.ICON_FILE.exists() and pygame.image.load(str(lifepi.ICON_FILE)).get_size() == (256, 256)
+assert "Icon=lifepi" in desk.read_text() and "StartupWMClass=lifepi" in desk.read_text(), desk.read_text()
+lifepi.install_desktop_icon(); assert desk.read_text().count("StartupWMClass") == 1     # idempotent
+print("desktop icon ok")
+
 # --- random card art for players without art ------------------------------------------
 serial = [0]
 def scry_random(url, timeout=10):

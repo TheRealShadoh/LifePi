@@ -31,7 +31,8 @@ life counter — released under the MIT licence so anyone can use, fork and impr
 - **Images:** search any card on Scryfall with the on-screen keyboard - card names are suggested as you type - and use its art as your background, or drop your own PNG/JPGs in `~/.local/share/lifepi/images`. Searches, suggestions and art are cached on disk, so repeat searches cost no API calls and work offline
 - **Random card art:** players without art - at start-up, and new seats whenever a game grows - get a random commander's art from Scryfall (all different, credited). Art you pick is never replaced, a saved profile's art wins, and choosing **Colour** for a player keeps them on a colour. Offline it uses art already on the device, and tries again a minute later if there is none
 - **Player profiles** – name + art/colour are remembered and reloadable
-- **Random first player** on every new game (on by default; switch it in New game or on a phone): a highlight spins round the table and lands on who goes first, and a "1st" badge stays by their name all game
+- **Random first player** on every new game (on by default; switch it in New game or on a phone): a highlight spins round the table and lands on who goes first, and a "1st" badge stays by their name all game; the game's history notes who went first
+- **Turn tracker** (optional - menu > *Turn tracker*): a blue outline on whoever's turn it is and a *Turn 3 - Ana* pill by the menu button; tap the pill to pass the turn clockwise (knocked-out players are skipped), hold it to go back one. The turn number goes up each time play comes back round to whoever started; passes are in the history and can be undone
 - Dice (d4–d20), coin flip, planar die, random player
 - Player colours chosen to stay distinguishable with colour blindness; a short line under every life total shows which way is up (6 vs 9 from across the table)
 - **Phones as controllers:** everyone on the same Wi-Fi scans a QR code and runs their own life, counters and commander damage from their phone - changes show up instantly on the Pi and on every other phone
@@ -174,12 +175,13 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 - Middle of a panel: left side −, right side + (hold for ±10)
 - **Cmdr dmg strip** at the bottom of a panel (or its damage tiles): commander damage, Lifetap style - a tile for every commander with their art, and one for poison; like a life panel, the tile's left half is −1 and its right half +1 (hold to repeat); *Counters & more* opens the full sheet. In formats without commanders the strip opens the player's sheet
 - **↶ (next to the menu button):** undo the last change; hold it for the history
+- **Turn pill** (turn tracker on): tap to pass the turn, hold to take it back
 - **Partner commanders:** switch *Partner* on in a player's sheet and their second commander gets its own tile (gold "2" badge) - damage from each partner is tracked separately, and 21 from either one is a KO
 - **Hold a player's name and drag it** onto another panel to swap seats (commander damage follows the players)
 - **Name strip** of a panel: opens that player's sheet, turned toward them - rename, card art, local image, colour,
   profiles, partner on / off, counters, *Each opponent* ±1, and every commander's damage as a list
 - Round button: main menu - new game, reset, history / undo, dice / coin, rotate, seating, commander damage rule,
-  Phones & TV, Cast to TV, *Update to ...* (when there is one), quit; in the phone app also *Auto-rotate*
+  turn tracker, Phones & TV, Cast to TV, *Update to ...* (when there is one) or *Check for updates*, quit; in the phone app also *Auto-rotate*
 - **New game:** format (Commander / 1 v 1 / Two-Headed Giant), 1–8 players, starting life (20 / 30 / 40 / custom), seating style,
   random first player on / off, and *Same players* (keep names and art) or *New players*
 - With a keyboard on the card-art search: Tab picks the first suggestion, Enter searches
@@ -189,13 +191,13 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 Cut a release by pushing a version tag (bump `VERSION` in `lifepi.py` first):
 
 ```bash
-git tag v1.7.1 && git push origin v1.7.1
+git tag v1.8.0 && git push origin v1.8.0
 ```
 
 [`release.yml`](.github/workflows/release.yml) first runs **every** test - the whole CI suite below
 plus the container tests - and publishes only if all of them pass:
 
-- the container image `ghcr.io/therealshadoh/lifepi-web:1.7.1` and `:1.7` (amd64 + arm64)
+- the container image `ghcr.io/therealshadoh/lifepi-web:1.8.0` and `:1.8` (amd64 + arm64)
 - a [GitHub Release](https://github.com/TheRealShadoh/LifePi/releases) with release notes and the
   tested phone app attached (`lifepi-web.zip`)
 - the phone app at https://therealshadoh.github.io/LifePi/ (GitHub Pages; controlled by the
@@ -212,7 +214,7 @@ All headless; CI runs them on every push and before every release.
 
 | Test | Covers |
 |---|---|
-| `SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` | the app itself: rotation and touch mapping, tap / hold, every seating style for 1–8 players (each screen point belongs to one seat, clockwise order, taps on rotated seats), modals and rotated sheets, drag-to-swap, the commander damage pane (halves, hold, rotated, poison tile), partner commanders (separate tracking, KO rules, swaps, saves), undo + history (merged taps, resets, swaps, the button, saved), two-tap confirms (and their time-out), formats, each opponent, the planar die, warnings, random first player (incl. fairness), random card art, search cache and suggestions (mocked Scryfall), the update check (banner, close, bad downloads rejected, update + restart), saving / restart / crash / corrupt-save recovery |
+| `SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` | the app itself: rotation and touch mapping, tap / hold, every seating style for 1–8 players (each screen point belongs to one seat, clockwise order, taps on rotated seats), modals and rotated sheets, drag-to-swap, the commander damage pane (halves, hold, rotated, poison tile), partner commanders (separate tracking, KO rules, swaps, saves), undo + history (merged taps, resets, swaps, the button, saved), two-tap confirms (and their time-out), formats, each opponent, the planar die, warnings, random first player (incl. fairness), random card art, search cache and suggestions (mocked Scryfall), the turn tracker and first player in history, the desktop icon, the update check (toast + dot, Check for updates, bad downloads rejected, update + restart), saving / restart / crash / corrupt-save recovery |
 | `SDL_VIDEODRIVER=dummy python3 tests/companion_test.py` | the Phones & TV server: PIN and lock-out, every phone action (undo, each opponent, formats included), bad input, live updates, seat positions matching the Pi, art serving |
 | `python tests/phone_test.py` | the phone page (QR code) in headless Chrome on a busy table (another phone tapping every 150 ms): the seat picker on first join, the life number as -/+, starting games (two taps, formats) and changing seating from the phone, scrolling sheets, the commander damage sheet (halves, hold, partner and poison tiles), undo, history, the offline banner, force landscape (needs Chrome) |
 | `python web/build.py && python tests/web_test.py` | the phone app end to end in headless Chrome at phone size: boot, real touch input, holds, Scryfall in the browser, reload, the layout staying put when the phone turns, starting offline (needs Chrome and internet) |

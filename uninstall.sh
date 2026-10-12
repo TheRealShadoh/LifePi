@@ -11,7 +11,8 @@ pkill -TERM -f "[p]ython3 .*$HOME/.local/bin/lifepi" 2>/dev/null && sleep 1 || t
 
 removed=()
 for f in "$HOME/.local/bin/lifepi" "$HOME/.local/bin/lifepi.previous" "$HOME/.local/bin/lifepi.new" \
-         "$HOME/.local/share/applications/lifepi.desktop" "$HOME/.config/autostart/lifepi.desktop"; do
+         "$HOME/.local/share/applications/lifepi.desktop" "$HOME/.config/autostart/lifepi.desktop" \
+         "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps/lifepi.png"; do
   [[ -e "$f" ]] && rm -f "$f" && removed+=("$f")
 done
 if (( purge )); then
