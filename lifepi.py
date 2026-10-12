@@ -87,6 +87,7 @@ MAX_PLAYERS = 8
 ROWS = {1: [1], 2: [1, 1], 3: [2, 1], 4: [2, 2], 5: [3, 2], 6: [3, 3], 7: [4, 3], 8: [4, 4]}
 SEATINGS = {"table": "Table  ===", "ends": "Ends  -=-", "round": "Round", "upright": "Upright"}
 HOLD_DELAY = 0.45
+BOARD_GUARD = 0.4                  # s after a sheet closes during which board taps are ignored
 NAME_MAX = 24
 ARM_TIME = 4.0                                      # "Tap again to ..." stays armed this long
 MERGE_TIME = 2.0                                    # taps this close together are one undo step
@@ -2556,6 +2557,8 @@ class App:
 
     # ------------------------------------------------------------------ render
     def render(self):
+        if self.modals:
+            self.modal_seen = time.time()          # see board_guard()
         self.zones = []
         self.canvas.fill(DARK)
         n = len(self.players)
@@ -2819,7 +2822,8 @@ class App:
     def pointer_down(self, pid, pos):
         for z in reversed(self.zones):
             if z[0](pos):
-                self.pointers[pid] = {"zone": z, "t": time.time(), "held": False, "next": 0, "pos": pos}
+                self.pointers[pid] = {"zone": z, "t": time.time(), "held": False, "next": 0, "pos": pos,
+                                      "start": pos, "moved": False}
                 return
 
     def pointer_move(self, pid, pos):
@@ -2828,6 +2832,9 @@ class App:
             ptr["pos"] = pos
             if ptr.get("drag") is not None:
                 self.dirty = True
+            elif not ptr["moved"] and math.dist(pos, ptr.get("start", pos)) > self.slop():
+                ptr["moved"] = True          # a finger sliding (or a palm brushing) is not a press:
+                                             # no tap on release, and a running +/-10 repeat stops
 
     def pointer_up(self, pid, pos):
         ptr = self.pointers.pop(pid, None)
@@ -2836,20 +2843,24 @@ class App:
             if dst is not None and dst != ptr["drag"] and not self.modals:
                 self.swap_seats(ptr["drag"], dst)
             self.dirty = True
-        elif ptr and not ptr["held"] and ptr["zone"][1] and ptr["zone"][0](pos):
+        elif ptr and not ptr["held"] and not ptr.get("moved") and ptr["zone"][1] and ptr["zone"][0](pos):
             ptr["zone"][1]()
             self.dirty = True
+
+    def slop(self):
+        """How far a finger may wander and still count as a tap or a hold (6% of the short side)."""
+        return max(18, min(self.W, self.H) * 0.06)
 
     def tick_holds(self):
         now = time.time()
         for ptr in list(self.pointers.values()):
             rect, _, hold, repeat, drag = ptr["zone"]
             if drag is not None:
-                if not ptr["held"] and now - ptr["t"] >= HOLD_DELAY:
+                if not ptr["held"] and not ptr.get("moved") and now - ptr["t"] >= HOLD_DELAY:
                     ptr["held"], ptr["drag"] = True, drag    # long-press on a name: start drag
                     self.dirty = True
                 continue
-            if not hold:
+            if not hold or ptr.get("moved"):
                 continue
             if not ptr["held"] and now - ptr["t"] >= HOLD_DELAY:
                 ptr["held"], ptr["next"] = True, now
@@ -2858,19 +2869,26 @@ class App:
                 ptr["next"] = now + repeat
                 self.dirty = True
 
+    def board_guard(self):
+        """True just after the last sheet closed: a quick second tap (a double tap on Start or
+        Done) would otherwise land on whatever seat is underneath and change a life total."""
+        return not self.modals and time.time() - getattr(self, "modal_seen", 0) < BOARD_GUARD
+
     def handle(self, e):
         sw, sh = self.screen.get_size()
         if e.type == pygame.QUIT:
             self.running = False
         elif e.type == pygame.FINGERDOWN:
             pygame.mouse.set_visible(False)
-            self.pointer_down(("f", e.finger_id), self.to_canvas(e.x * sw, e.y * sh))
+            if not self.board_guard():
+                self.pointer_down(("f", e.finger_id), self.to_canvas(e.x * sw, e.y * sh))
         elif e.type == pygame.FINGERMOTION:
             self.pointer_move(("f", e.finger_id), self.to_canvas(e.x * sw, e.y * sh))
         elif e.type == pygame.FINGERUP:
             self.pointer_up(("f", e.finger_id), self.to_canvas(e.x * sw, e.y * sh))
         elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and not getattr(e, "touch", False):
-            self.pointer_down("mouse", self.to_canvas(*e.pos))
+            if not self.board_guard():
+                self.pointer_down("mouse", self.to_canvas(*e.pos))
         elif e.type == pygame.MOUSEBUTTONUP and e.button == 1 and not getattr(e, "touch", False):
             self.pointer_up("mouse", self.to_canvas(*e.pos))
         elif e.type == pygame.MOUSEMOTION and not getattr(e, "touch", False):

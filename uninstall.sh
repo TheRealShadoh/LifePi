@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# LifePi uninstaller - undoes install.sh.
+#   ./uninstall.sh          remove the app, menu entry and autostart; keep saved games, profiles, art
+#   ./uninstall.sh --purge  also delete saved games, profiles, cached card art and your images
+# The apt packages (python3-pygame etc.) are left alone - other programs may use them.
+set -euo pipefail
+purge=0
+[[ "${1:-}" == "--purge" ]] && purge=1
+
+pkill -TERM -f "[p]ython3 .*$HOME/.local/bin/lifepi" 2>/dev/null && sleep 1 || true   # it saves on SIGTERM
+
+removed=()
+for f in "$HOME/.local/bin/lifepi" "$HOME/.local/bin/lifepi.previous" "$HOME/.local/bin/lifepi.new" \
+         "$HOME/.local/share/applications/lifepi.desktop" "$HOME/.config/autostart/lifepi.desktop"; do
+  [[ -e "$f" ]] && rm -f "$f" && removed+=("$f")
+done
+if (( purge )); then
+  for d in "${XDG_CONFIG_HOME:-$HOME/.config}/lifepi" "${XDG_CACHE_HOME:-$HOME/.cache}/lifepi" \
+           "${XDG_DATA_HOME:-$HOME/.local/share}/lifepi"; do
+    [[ -e "$d" ]] && rm -rf "$d" && removed+=("$d")
+  done
+fi
+command -v update-desktop-database >/dev/null && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+
+if (( ${#removed[@]} )); then printf 'removed %s\n' "${removed[@]}"; else echo "LifePi was not installed."; fi
+if (( ! purge )); then
+  echo "Kept saved games, profiles and art in ~/.config/lifepi ~/.cache/lifepi ~/.local/share/lifepi"
+  echo "(./uninstall.sh --purge removes them too)."
+fi
+echo "This folder (the git clone) is yours to delete."

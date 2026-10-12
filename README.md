@@ -50,6 +50,13 @@ git clone https://github.com/TheRealShadoh/LifePi.git && cd LifePi
 
 Or without installing: `sudo apt install python3-pygame && python3 lifepi.py`.
 
+**Uninstall:** `./uninstall.sh` removes the app, its menu entry and autostart, and keeps your saved
+game, profiles and cached art; `./uninstall.sh --purge` removes those too. Delete the clone yourself.
+
+**Starting it over SSH** (the Pi is running its normal desktop): the desktop owns the screen, so point
+LifePi at it - `WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/$(id -u) ~/.local/bin/lifepi &`.
+Without that SDL reports `kmsdrm not available` / `wayland not available`.
+
 **Updates:** LifePi checks GitHub for a new release when it starts (at most every 6 hours; skipped when
 offline). If there is one, a bar at the bottom says *Update available* - **Update** downloads that release,
 checks it (it must compile and carry the release's version), swaps it in (the old file stays as

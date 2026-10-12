@@ -21,6 +21,10 @@ print("rotation mapping ok")
 # install.sh runs lifepi.py directly: its first bytes must be the "#!" line (no BOM, no CRLF)
 head = open(lifepi.__file__, "rb").read(64)
 assert head.startswith(b"#!/usr/bin/env python3\n"), head[:24]
+# the README says ./install.sh - a lost executable bit breaks that on every fresh clone
+root = os.path.dirname(os.path.abspath(lifepi.__file__))
+for f in ("install.sh", "uninstall.sh"):
+    assert os.access(os.path.join(root, f), os.X_OK), f + " is not executable (git update-index --chmod=+x)"
 
 app = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
 app.render()
@@ -38,6 +42,36 @@ tap((300, 120)); tap((300, 120)); assert app.players[0]["life"] == 39
 tap((700, 360)); assert app.players[2]["life"] == 41
 tap((450, 360), hold=1.1); assert app.players[2]["life"] == 41 - 20, app.players[2]["life"]
 print("tap / hold ok")
+
+# a finger that slides is not a press: no tap on release, and a running +/-10 repeat stops
+life = app.players[2]["life"]
+app.pointer_down("s", (450, 360))                                   # seat 2 "-"
+end = time.time() + lifepi.HOLD_DELAY + 0.05
+while time.time() < end: app.tick_holds(); time.sleep(0.01)
+assert app.players[2]["life"] == life - 10, app.players[2]["life"]  # the hold fired once
+app.pointer_move("s", (450, 470))                                   # slides off towards the edge
+end = time.time() + 1.2
+while time.time() < end: app.tick_holds(); time.sleep(0.01)
+app.pointer_up("s", (450, 470)); app.render()
+assert app.players[2]["life"] == life - 10, app.players[2]["life"]  # ...and stopped there
+life = app.players[2]["life"]
+app.pointer_down("s", (650, 360)); app.pointer_move("s", (650 + int(app.slop()) + 10, 360))
+app.pointer_up("s", (650 + int(app.slop()) + 10, 360)); app.render()
+assert app.players[2]["life"] == life                               # slid, still inside "+": no tap
+app.pointer_down("s", (650, 360)); app.pointer_move("s", (655, 364)); app.pointer_up("s", (655, 364))
+app.render(); assert app.players[2]["life"] == life + 1             # a wobble is still a tap
+# a quick second tap right after a sheet closes must not reach the seat underneath
+life = app.players[2]["life"]
+app.push("dice", result="", sub=""); app.render(); app.pop(); app.render()
+sw, sh = app.screen.get_size()
+def finger(kind, x, y):
+    app.handle(pygame.event.Event(kind, finger_id=7, x=x / sw, y=y / sh, dx=0, dy=0, pressure=1))
+finger(pygame.FINGERDOWN, 700, 360); finger(pygame.FINGERUP, 700, 360); app.render()
+assert app.players[2]["life"] == life, "tap leaked through a closing sheet"
+time.sleep(lifepi.BOARD_GUARD + 0.05)
+finger(pygame.FINGERDOWN, 700, 360); finger(pygame.FINGERUP, 700, 360); app.render()
+assert app.players[2]["life"] == life + 1
+print("slides / closing-sheet taps ok")
 
 # rotate the screen 90: canvas becomes 480x800, a screen touch must land on the right panel
 app.rotate_screen(); app.render()
