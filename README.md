@@ -23,6 +23,7 @@ life counter — released under the MIT licence so anyone can use, fork and impr
   - **Upright** – everything upright, for a monitor on a stand
 - Tap **−/+** for 1, **hold** for 10; running delta ("−7") while you tap; true multi-touch, so two players can tap at once
 - Poison, commander tax, energy, experience; **commander damage per commander, your own included, partners tracked separately** - each source shows on your panel as a mini tile of that player's art (or colour) with the amount (optionally also subtracts life); automatic KO dimming at 0 life / 10 poison / 21 commander damage
+- **Commander damage, Lifetap style:** tap a life total and a tile for every commander pops up (their art, the damage they've dealt); left half of a tile −1, right half +1
 - **Images:** search any card on Scryfall with the on-screen keyboard - card names are suggested as you type - and use its art as your background, or drop your own PNG/JPGs in `~/.local/share/lifepi/images`. Searches, suggestions and art are cached on disk, so repeat searches cost no API calls and work offline
 - **Random card art:** players without art - at start-up, and new seats whenever a game grows - get a random commander's art from Scryfall (all different, credited). Art you pick is never replaced, a saved profile's art wins, and choosing **Colour** for a player keeps them on a colour. Offline it uses art already on the device, and tries again a minute later if there is none
 - **Player profiles** – name + art/colour are remembered and reloadable
@@ -30,6 +31,7 @@ life counter — released under the MIT licence so anyone can use, fork and impr
 - Dice (d4–d20), coin flip, random player
 - **Phones as controllers:** everyone on the same Wi-Fi scans a QR code and runs their own life, counters and commander damage from their phone - changes show up instantly on the Pi and on every other phone
 - **TV view:** a live scoreboard for a big screen - cast it to a Chromecast / Google TV / Nvidia Shield from the menu, open it in a smart-TV browser, or mirror a phone to a Roku
+- **Keeps itself up to date** (installed with `install.sh`): an *Update available* bar when there's a new release - one tap updates and restarts, or close it
 - **Manual screen rotation: 0 / 90 / 180 / 270°**, from the menu, the `R` key, or `--rotate`. It is done inside the app (render + touch remap), so it behaves identically on X11, Wayland (labwc/wayfire) and bare KMS/DRM, and doesn't touch the rest of the OS
 - Survives restarts: life, counters, commander damage, seats, names, art, profiles and settings autosave to `~/.config/lifepi/state.json` within half a second, are flushed to disk (safe against pulling the Pi's plug), saved on shutdown / `docker stop` / Ctrl+C / crashes, and the previous save is kept as `state.json.bak` in case the latest is damaged
 
@@ -74,7 +76,7 @@ Open the menu (round button) > **Phones & TV**. It shows a QR code, the address 
 - **Phones / tablets:** scan the QR code (or type the address and PIN). The phone shows the whole
   table, laid out exactly like the Pi (same seats, seating style and player count), on one screen
   with no scrolling: tap a panel's left / right side for −1 / +1, hold for ±10, tap a life total (or the
-  strip under it) for commander damage, tap a name for that player's counters and settings. **↻** turns
+  strip under it) for commander damage, tap a name for that player's counters and settings (rename, colour, partner commanders). **↻** turns
   the page sideways (landscape) while the phone stays upright - handy with the rotation lock on. **Pick your seat** gives your panel
   a yellow outline; **Game** starts a new game (1–8 players, starting life, seating style) and holds
   the rules (random first player, commander damage reduces life). Changes show up instantly on the Pi
@@ -123,7 +125,8 @@ Any HTTPS host works; installing and offline mode need HTTPS (or localhost).
 
 No Pi handy? The container runs the real desktop app on a virtual display and streams it to any
 browser with noVNC - including Phones & TV, which the phone app can't do. Images are multi-arch
-(amd64 + arm64): `:latest` follows `main`, `:1.1.0` / `:1.1` are releases.
+(amd64 + arm64): `:latest` follows `main`; each release is also tagged, e.g. `:1.5.0` and `:1.5`.
+To update: `docker compose pull && docker compose up -d` (or `--build` from a clone).
 
 ```bash
 docker run -d --name lifepi -p 8080:8080 -p 8765:8765 -v lifepi-data:/data \
@@ -157,9 +160,10 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 - **Tap a life total** (or the damage / counters strip under it): commander damage, Lifetap style - a tile for every commander with their art; like a life panel, the tile's left half is −1 and its right half +1 (hold to repeat); *Counters & more* opens the full sheet
 - **Partner commanders:** switch *Partner* on in a player's sheet and their second commander gets its own tile (gold "2" badge) - damage from each partner is tracked separately, and 21 from either one is a KO
 - **Hold a player's name and drag it** onto another panel to swap seats (commander damage follows the players)
-- Name strip or counter strip of a panel: opens that player's sheet (rename, card art, local image, colour, profiles, counters, commander damage) — oriented toward that player
+- **Name strip** of a panel: opens that player's sheet, turned toward them - rename, card art, local image, colour,
+  profiles, partner on / off, counters, and every commander's damage as a list
 - Round button: main menu - new game, reset, dice / coin, rotate, seating, commander damage rule,
-  Phones & TV, Cast to TV, quit
+  Phones & TV, Cast to TV, *Update to ...* (when there is one), quit; in the phone app also *Auto-rotate*
 - **New game:** 1–8 players, starting life (20 / 30 / 40 / custom), seating style, and random first player on / off
 - With a keyboard on the card-art search: Tab picks the first suggestion, Enter searches
 
@@ -168,17 +172,18 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 Cut a release by pushing a version tag (bump `VERSION` in `lifepi.py` first):
 
 ```bash
-git tag v1.2.0 && git push origin v1.2.0
+git tag v1.6.0 && git push origin v1.6.0
 ```
 
 [`release.yml`](.github/workflows/release.yml) first runs **every** test - the whole CI suite below
 plus the container tests - and publishes only if all of them pass:
 
-- the container image `ghcr.io/therealshadoh/lifepi-web:1.2.0` and `:1.2` (amd64 + arm64)
+- the container image `ghcr.io/therealshadoh/lifepi-web:1.6.0` and `:1.6` (amd64 + arm64)
 - a [GitHub Release](https://github.com/TheRealShadoh/LifePi/releases) with release notes and the
   tested phone app attached (`lifepi-web.zip`)
 - the phone app at https://therealshadoh.github.io/LifePi/ (GitHub Pages; controlled by the
-  repository variable `DEPLOY_PAGES`)
+  repository variable `DEPLOY_PAGES`) - installed phone apps pick it up the next time they're opened
+- and from then on, installed Pis show *Update available*
 
 Use tags rather than "Draft a new release" on GitHub - a release made on the website skips the
 tests. `:latest` is published from `main` only after CI has passed there. Running the Release
@@ -190,10 +195,10 @@ All headless; CI runs them on every push and before every release.
 
 | Test | Covers |
 |---|---|
-| `SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` | the app itself: rotation and touch mapping, tap / hold, every seating style for 1–8 players (each screen point belongs to one seat, clockwise order, taps on rotated seats), modals and rotated sheets, drag-to-swap, random first player (incl. fairness), search cache and suggestions (mocked Scryfall), saving / restart / crash / corrupt-save recovery |
+| `SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` | the app itself: rotation and touch mapping, tap / hold, every seating style for 1–8 players (each screen point belongs to one seat, clockwise order, taps on rotated seats), modals and rotated sheets, drag-to-swap, the commander damage pane (halves, hold, rotated), partner commanders (separate tracking, KO rules, swaps, saves), random first player (incl. fairness), random card art, search cache and suggestions (mocked Scryfall), the update check (banner, close, bad downloads rejected, update + restart), saving / restart / crash / corrupt-save recovery |
 | `SDL_VIDEODRIVER=dummy python3 tests/companion_test.py` | the Phones & TV server: PIN and lock-out, every phone action, bad input, live updates, seat positions matching the Pi, art serving |
-| `python tests/phone_test.py` | the phone page (QR code) in headless Chrome on a busy table (another phone tapping every 150 ms): starting games and changing seating from the phone, scrolling sheets, commander damage, force landscape (needs Chrome) |
-| `python web/build.py && python tests/web_test.py` | the phone app end to end in headless Chrome at phone size: boot, real touch input, holds, Scryfall in the browser, reload, rotation, starting offline (needs Chrome and internet) |
+| `python tests/phone_test.py` | the phone page (QR code) in headless Chrome on a busy table (another phone tapping every 150 ms): starting games and changing seating from the phone, scrolling sheets, the commander damage sheet (halves, hold, partner tile), force landscape (needs Chrome) |
+| `python web/build.py && python tests/web_test.py` | the phone app end to end in headless Chrome at phone size: boot, real touch input, holds, Scryfall in the browser, reload, the layout staying put when the phone turns, starting offline (needs Chrome and internet) |
 | `python3 tests/live_scryfall.py` | the real Scryfall API (non-blocking in CI) |
 
 CI runs the first two on x86_64 and arm64 (the Pi's architecture) with Python 3.11 and 3.13, and
@@ -209,4 +214,4 @@ LifePi is not affiliated with Scryfall or with any other life-counter app.
 
 ## Roadmap / good first issues
 
-Turn timer · Planechase/Archenemy decks (Scryfall `t:plane` / `t:scheme`) · partner commanders (two damage tracks) · life history log · monarch/initiative markers.
+Turn timer · Planechase/Archenemy decks (Scryfall `t:plane` / `t:scheme`) · art for a partner commander · life history log · monarch/initiative markers.

@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
