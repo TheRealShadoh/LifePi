@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -1764,6 +1764,8 @@ class App:
         if self.update_available():
             items.insert(len(items) - (0 if WEB else 1),
                          (f"Update to {self.settings['update_latest'].lstrip('v')}", self.start_update, BTN_OK))
+        elif self.update_mode():                  # installed copies: check now, install if newer
+            items.insert(len(items) - (0 if WEB else 1), ("Check for updates", self.update_now, BTN))
         rh = (v.h - u - u // 2) // ((len(items) + 1) // 2)
         for k, (label, fn, bg) in enumerate(items):
             r = (k % 2 * W // 2, u + k // 2 * rh, W // 2, rh)
@@ -2701,8 +2703,9 @@ class App:
         return bool(self.update_mode()) and newer_version(latest, VERSION)
 
     def check_for_update(self, force=False):
-        """Ask GitHub for the latest release - at most every UPDATE_EVERY, in the background."""
-        if not self.update_check or not self.update_mode():
+        """Ask GitHub for the latest release - at most every UPDATE_EVERY, in the background.
+        force (the menu's Check for updates): ask now, even with --no-update-check."""
+        if not self.update_mode() or not (self.update_check or force):
             return
         if not force and time.time() - self.settings["update_checked"] < UPDATE_EVERY:
             return
@@ -2713,20 +2716,48 @@ class App:
                 tag = rel.get("tag_name", "")
                 if parse_version(tag):
                     self.update_found = tag
+                else:
+                    self.update_check_failed = "no release found"
             except Exception as e:                    # offline: try again next start
                 print("update check failed:", e, file=sys.stderr)
-        self.update_found = None
+                self.update_check_failed = "can't reach GitHub"
+            self.dirty = True
+        self.update_found, self.update_check_failed = None, None
         spawn(work)
+
+    def update_now(self):
+        """Menu > Check for updates: ask GitHub right away and, if there's a newer release,
+        install it straight away (same checks as Update; the game is kept)."""
+        if self.update_state == "working" or getattr(self, "update_asked", False):
+            return
+        self.modals.clear()
+        self.update_asked = True
+        self.say("Checking for updates...")
+        self.check_for_update(force=True)
 
     def tick_update(self):
         """Main thread: record what the check found; finish an update (restart into it)."""
         found = getattr(self, "update_found", None)
+        asked = getattr(self, "update_asked", False)
         if found:
             self.update_found = None
             self.settings["update_latest"], self.settings["update_checked"] = found, time.time()
             self.changed()
-            if self.update_badge():
+            if asked:                                 # Check for updates: act on the answer now
+                self.update_asked = False
+                if self.update_available():
+                    self.dismiss_update()
+                    self.start_update()
+                else:
+                    self.say(f"LifePi {VERSION} is the latest version")
+            elif self.update_badge():
                 self.say(f"LifePi {found.lstrip('v')} is available - open the menu to update")
+        failed = getattr(self, "update_check_failed", None)
+        if failed:
+            self.update_check_failed = None
+            if asked:
+                self.update_asked = False
+                self.say(f"Couldn't check for updates: {failed}")
         if self.update_state == "done":
             self.update_state = ""
             self.say(f"Updated to {self.settings['update_latest'].lstrip('v')} - restarting")

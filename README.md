@@ -61,7 +61,8 @@ Without that SDL reports `kmsdrm not available` / `wayland not available`.
 offline). If there is one, a short message says so and the menu button gets a gold dot (nothing covers
 the seats mid-game); the menu then offers **Update to ...**, which downloads that release, checks it (it must
 compile and carry the release's version), swaps it in (the old file stays as `lifepi.previous`) and restarts,
-keeping your game. Opening the menu clears the dot until the next version. Running from a git clone, Update
+keeping your game. Opening the menu clears the dot until the next version. **Check for updates** in the
+menu asks GitHub right away (no 6-hour wait) and, if there's a newer release, installs it on the spot. Running from a git clone, Update
 does `git pull`. Only published releases are
 offered. `--no-update-check` turns it off. (Versions before 1.5.0 don't have this: update those once with
 `git pull && ./install.sh`.) The phone app and Docker update their own way.
@@ -188,13 +189,13 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 Cut a release by pushing a version tag (bump `VERSION` in `lifepi.py` first):
 
 ```bash
-git tag v1.7.0 && git push origin v1.7.0
+git tag v1.7.1 && git push origin v1.7.1
 ```
 
 [`release.yml`](.github/workflows/release.yml) first runs **every** test - the whole CI suite below
 plus the container tests - and publishes only if all of them pass:
 
-- the container image `ghcr.io/therealshadoh/lifepi-web:1.7.0` and `:1.7` (amd64 + arm64)
+- the container image `ghcr.io/therealshadoh/lifepi-web:1.7.1` and `:1.7` (amd64 + arm64)
 - a [GitHub Release](https://github.com/TheRealShadoh/LifePi/releases) with release notes and the
   tested phone app attached (`lifepi-web.zip`)
 - the phone app at https://therealshadoh.github.io/LifePi/ (GitHub Pages; controlled by the

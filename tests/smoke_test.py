@@ -668,8 +668,32 @@ assert json.loads(lifepi.STATE_FILE.read_text())["players"][0]["life"] == 33
 clone = lifepi.Path(tempfile.mkdtemp()); (clone / ".git").mkdir(); (clone / "lifepi.py").write_bytes(original)
 gc = lifepi.App(NS(windowed="800x480", rotate=None, fps=30, install_path=str(clone / "lifepi.py")))
 assert gc.update_mode() == "git"
+# Menu > Check for updates: asks GitHub now (no 6 h wait, even with --no-update-check) and
+# installs a newer release straight away; says so when already up to date or offline
+inst2 = lifepi.Path(tempfile.mkdtemp()) / "lifepi"; inst2.write_bytes(original)
+release["tag"], release["src"] = f"v{lifepi.VERSION}", None
+def checker():
+    return lifepi.App(NS(windowed="800x480", rotate=None, fps=30, update_check=False, install_path=str(inst2)))
+def settle_check(a):
+    end = time.time() + 5
+    while time.time() < end and getattr(a, "update_asked", False):
+        a.tick_update(); time.sleep(0.02)
+    settle_update(a)
+cu = checker(); cu.settings.update(update_checked=time.time(), update_latest="")   # just checked: auto-check would wait
+cu.push("menu"); cu.render()
+chk = [z for z in cu.zones if z[1] == cu.update_now]
+assert len(chk) == 1, "menu should offer Check for updates"
+calls = release["calls"]; chk[0][1](); settle_check(cu)
+assert release["calls"] > calls and "is the latest version" in cu.toast[0], cu.toast
+assert inst2.read_bytes() == original and cu.running and not cu.restart_after
+release["tag"] = "v9.9.2"; cu.update_now(); settle_check(cu)
+assert cu.restart_after and b'VERSION = "9.9.2"' in inst2.read_bytes(), cu.toast
+def no_net(url, timeout=10): raise lifepi.urllib.error.URLError("no network")
+lifepi.http_get = no_net
+off = checker(); off.settings["update_latest"] = ""; off.update_now(); settle_check(off)
+assert "Couldn't check for updates" in off.toast[0] and off.running, off.toast
 lifepi.http_get = scry_random
-print("update check ok (toast + dot, menu, interval, bad downloads rejected, update + restart, git mode)")
+print("update check ok (toast + dot, menu, check now, interval, bad downloads rejected, update + restart, git mode)")
 for n in range(1, 7):
     app.start_game(n, 40); app.render()
 app.save_state(); app2 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
