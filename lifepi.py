@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -74,8 +74,11 @@ BTN = (58, 60, 74)
 BTN_ON = (70, 120, 200)
 BTN_BAD = (150, 50, 50)
 BTN_OK = (50, 130, 80)
-PALETTE = [(46, 78, 140), (150, 42, 42), (38, 108, 62), (176, 150, 84),
-           (62, 52, 76), (118, 58, 140), (196, 106, 38), (36, 116, 126)]
+# player colours, picked to stay tellable apart with red/green colour blindness too
+PALETTE = [(36, 84, 176), (196, 72, 20), (200, 80, 140), (78, 82, 96),
+           (176, 150, 84), (38, 108, 62), (16, 128, 190), (96, 100, 30)]
+AMBER = (255, 190, 60)                              # "getting close": low life, poison, commander damage
+LETHAL = (255, 90, 90)
 COUNTERS = [("poison", "Poison", "Poison"), ("tax", "Cmdr tax", "Tax"),
             ("energy", "Energy", "Energy"), ("exp", "Experience", "Exp")]
 CHIP_COLORS = {"poison": (40, 130, 70), "tax": (150, 110, 40), "energy": (175, 135, 20),
@@ -84,6 +87,14 @@ MAX_PLAYERS = 8
 ROWS = {1: [1], 2: [1, 1], 3: [2, 1], 4: [2, 2], 5: [3, 2], 6: [3, 3], 7: [4, 3], 8: [4, 4]}
 SEATINGS = {"table": "Table  ===", "ends": "Ends  -=-", "round": "Round", "upright": "Upright"}
 HOLD_DELAY = 0.45
+NAME_MAX = 24
+ARM_TIME = 4.0                                      # "Tap again to ..." stays armed this long
+MERGE_TIME = 2.0                                    # taps this close together are one undo step
+UNDO_MAX = 60
+HISTORY_MAX = 300
+# formats: label, starting life, poison that knocks a player out, commander damage in play
+FORMATS = {"commander": ("Commander", 40, 10, True), "duel": ("1 v 1", 20, 10, False),
+           "2hg": ("Two-Headed Giant", 30, 15, False)}
 
 
 # --------------------------------------------------------------------------- helpers
@@ -213,6 +224,16 @@ def new_player(i, life):
             "counters": {k: 0 for k, _, _ in COUNTERS}, "cmd": [0] * MAX_PLAYERS,
             # partner commanders: damage from each seat's second commander, tracked on its own
             "partner": False, "cmd2": [0] * MAX_PLAYERS}
+
+
+def initials(name):
+    """Up to two letters for a name: "Ana Bell" -> "AB", "Player 3" -> "P3", "Kai" -> "KA"."""
+    words = [w for w in name.replace("-", " ").split() if w]
+    if not words:
+        return "?"
+    if len(words) == 1:
+        return words[0][:2].upper()
+    return (words[0][0] + words[-1][0]).upper()
 
 
 def point_in_poly(pt, poly):
@@ -650,7 +671,7 @@ class App:
         for d in (CONFIG_DIR, CACHE_DIR, SEARCH_DIR, IMAGE_DIR):
             d.mkdir(parents=True, exist_ok=True)
         self.settings = {"rotation": 0, "seating": "table", "cmd_hits_life": True,
-                         "start_life": 40, "companion": True, "companion_pin": "", "random_first": True,
+                         "start_life": 40, "format": "commander", "companion": True, "companion_pin": "", "random_first": True,
                          "auto_rotate": False,    # phone app: follow the phone turning (off = stay put)
                          # installed copies: newest release seen, when we last asked, and the
                          # version whose "update available" banner was closed
@@ -658,6 +679,9 @@ class App:
         self.players = [new_player(i, 40) for i in range(4)]
         self.profiles = {}
         self.first, self.first_anim, self.game_id = -1, None, 0    # who goes first (-1: not picked)
+        # what happened this game (saved), and the steps Undo can take back (this session)
+        self.history, self.undo = [], []
+        self.armed = None                         # (key, time): a button waiting for its second tap
         self.load_state()
         self.state_dirty = self.snap_dirty = False
         if not self.settings["companion_pin"]:
@@ -742,6 +766,9 @@ class App:
                 self.players = players
             first = as_int(data.get("first"), -1)
             self.first = first if 0 <= first < len(self.players) else -1
+            self.history = [e for e in (data.get("history") or [])[-HISTORY_MAX:]
+                            if isinstance(e, dict) and isinstance(e.get("text"), str)
+                            and isinstance(e.get("t"), (int, float))]
             return
 
     def parse_state(self, data):
@@ -752,6 +779,8 @@ class App:
             settings["rotation"] = as_int(s["rotation"])
         if s.get("seating") in SEATINGS:
             settings["seating"] = s["seating"]
+        if s.get("format") in FORMATS:
+            settings["format"] = s["format"]
         if isinstance(s.get("cmd_hits_life"), bool):
             settings["cmd_hits_life"] = s["cmd_hits_life"]
         if as_int(s.get("start_life"), 0) > 0:
@@ -778,7 +807,7 @@ class App:
             for i, p in enumerate(raw):
                 b = new_player(i, start)
                 if isinstance(p.get("name"), str) and p["name"].strip():
-                    b["name"] = p["name"][:18]
+                    b["name"] = p["name"][:NAME_MAX]
                 b["life"] = as_int(p.get("life"), start)
                 b["color"] = as_int(p.get("color"), b["color"]) % len(PALETTE)
                 if isinstance(p.get("art"), str):
@@ -810,7 +839,7 @@ class App:
     def save_state(self):
         """Durably save the game. The previous save is kept as state.json.bak."""
         data = {"settings": self.settings, "players": self.players, "profiles": self.profiles,
-                "first": self.first}
+                "first": self.first, "history": [self.history_entry(e) for e in self.history]}
         if WEB:
             try:
                 prev = web_store("state")
@@ -901,13 +930,18 @@ class App:
             art = None
             if p["art"] and os.path.isfile(p["art"]):
                 art = f"/art/{i}?v={hashlib.sha1(p['art'].encode()).hexdigest()[:10]}"
-            out.append({"seat": i, "name": p["name"], "life": p["life"],
+            out.append({"seat": i, "name": p["name"], "life": p["life"], "initials": initials(p["name"]),
                         "color": "#%02x%02x%02x" % PALETTE[p["color"] % len(PALETTE)],
                         "art": art, "credit": p["credit"] if art else "",
                         "counters": dict(p["counters"]), "cmd": p["cmd"][:n], "ko": self.ko_reason(p),
                         "cmd2": p["cmd2"][:n], "partner": bool(p.get("partner")),
                         "pos": rects[i], "poly": polys[i]})
+        fmt = self.settings["format"]
         return {"players": out, "start_life": self.settings["start_life"],
+                "format": fmt, "formats": [[k, f[0], f[1]] for k, f in FORMATS.items()],
+                "poison_ko": FORMATS[fmt][2], "commander": FORMATS[fmt][3],
+                "undo": self.undo_label(),
+                "history": [[round(e["t"]), self.history_text(e)] for e in self.history[-40:]][::-1],
                 # who goes first - hidden while the device is still spinning, so no spoilers
                 "first": -1 if self.first_spinning() else self.first, "game": self.game_id,
                 "random_first": self.settings["random_first"],
@@ -947,12 +981,16 @@ class App:
             return max(lo, min(hi, v))
 
         n, op = len(self.players), a.get("op")
-        if op in ("life", "counter", "cmd", "name", "color"):
+        if op in ("life", "counter", "cmd", "name", "color", "drain"):
             seat = num("seat", -1, 99)
             if not 0 <= seat < n:
                 return
         if op == "life":
             self.change_life(seat, num("d", -999, 999))
+        elif op == "drain":
+            self.change_opponents(seat, num("d", -99, 99))
+        elif op == "undo":
+            self.undo_last()
         elif op == "counter" and a.get("key") in self.players[0]["counters"]:
             self.change_counter(seat, a["key"], num("d", -99, 99))
         elif op == "cmd":
@@ -971,9 +1009,10 @@ class App:
         elif op == "newgame":
             if a.get("seating") in SEATINGS:
                 self.settings["seating"] = a["seating"]
-            self.start_game(num("n", 1, MAX_PLAYERS), num("life", 1, 9999))
+            fmt = a.get("format") if a.get("format") in FORMATS else None
+            self.start_game(num("n", 1, MAX_PLAYERS), num("life", 1, 9999), fresh=a.get("fresh") is True, fmt=fmt)
         elif op == "reset":
-            self.start_game(n, self.settings["start_life"])
+            self.start_game(n, self.settings["start_life"], reset=True)
         elif op == "seating":
             self.set_seating(a.get("value"))
         elif op == "random_first" and isinstance(a.get("on"), bool):
@@ -1145,11 +1184,15 @@ class App:
                              border_radius=rad)
             self.img_cache[key] = t
         t = self.img_cache[key].copy()
-        if dmg >= 21:
-            pygame.draw.rect(t, (255, 70, 70), t.get_rect(), max(2, side // 10), border_radius=max(3, side // 5))
-        if number:
-            self.text(t, str(dmg), side * 0.62, (255, 120, 120) if dmg >= 21 else WHITE,
-                      maxw=side * 0.9, center=(side // 2, side // 2 + 1))
+        if dmg >= 15:                               # amber from 15, red (and thicker) at 21
+            pygame.draw.rect(t, LETHAL if dmg >= 21 else AMBER, t.get_rect(), max(2, side // (8 if dmg >= 21 else 12)),
+                             border_radius=max(3, side // 5))
+        if number and side >= 26:                   # whose commander it is, under the damage
+            self.text(t, str(dmg), side * 0.52, WHITE, maxw=side * 0.86, center=(side // 2, int(side * 0.4)))
+            self.text(t, initials(src["name"]), side * 0.3, (230, 230, 236), maxw=side * 0.86,
+                      center=(side // 2, int(side * 0.79)))
+        elif number:
+            self.text(t, str(dmg), side * 0.62, WHITE, maxw=side * 0.9, center=(side // 2, side // 2 + 1))
         if partner:
             self.partner_badge(t, (side - 1, 0), max(9, side // 3))
         return t
@@ -1171,7 +1214,7 @@ class App:
             return [self.cmd_tile(j, d, side, partner=w == 2) for j, d, w in cmds]
 
         def pills(rh):
-            return [self.make_pill(label, rh * 0.5, bg=c, alpha=225) for label, c in chips]
+            return [self.make_pill(label, rh * 0.5, bg=c, alpha=225, outline=o) for label, c, o in chips]
 
         def width(items, gap):
             return sum(it.get_width() for it in items) + gap * (len(items) - 1)
@@ -1214,7 +1257,118 @@ class App:
             y += rh + 3
 
     # ------------------------------------------------------------------ game actions
-    def change_life(self, i, d):
+    # ---- history + undo: every change first records itself. Taps on the same thing within
+    # MERGE_TIME are one entry ("Ana life -5") and one undo step.
+    def record(self, key, seat, kind, d, new, src=None, which=1, merge=True):
+        now = time.time()
+        u = self.undo[-1] if self.undo else None
+        if merge and u and u["key"] == key and now - u["t"] < MERGE_TIME and len(self.history) > u["hist"]:
+            u["t"] = now
+            e = self.history[-1]
+            e["d"], e["new"], e["t"] = e["d"] + d, new, now
+            return
+        self.undo.append({"key": key, "t": now, "hist": len(self.history), "game": self.game_copy()})
+        del self.undo[:-UNDO_MAX]
+        p = self.players[seat] if 0 <= seat < len(self.players) else None
+        e = {"t": now, "kind": kind, "d": d, "new": new, "name": p["name"] if p else "",
+             "src": self.players[src]["name"] if src is not None and src < len(self.players) else "", "which": which}
+        self.history.append(e)
+        e["text"] = self.history_text(e)
+        if len(self.history) > HISTORY_MAX:
+            cut = len(self.history) - HISTORY_MAX
+            del self.history[:cut]
+            for u in self.undo:
+                u["hist"] = max(0, u["hist"] - cut)
+
+    def history_text(self, e):
+        k, d, new, name = e.get("kind"), e.get("d", 0), e.get("new"), e.get("name", "")
+        if k == "life":
+            return f"{name}: life {d:+d}  (now {new})"
+        if k == "cmd":
+            src = e.get("src", "") + ("'s partner" if e.get("which") == 2 else "")
+            return f"{name}: commander damage from {src} {d:+d}  (now {new})"
+        if k in dict((c, 1) for c, _, _ in COUNTERS):
+            label = next(lab for c, lab, _ in COUNTERS if c == k)
+            return f"{name}: {label.lower()} {d:+d}  (now {new})"
+        if k == "drain":
+            return f"{name}: each opponent {d:+d} life"
+        if k == "partner":
+            return f"{name}: partner commanders {'on' if new else 'off'}"
+        if k == "swap":
+            return f"{name} and {e.get('src', '')} swapped seats"
+        if k in ("game", "reset"):
+            return e.get("text") or "New game"
+        return e.get("text", "")
+
+    def history_entry(self, e):
+        out = dict(e)
+        out["text"] = self.history_text(e)
+        return out
+
+    def game_copy(self):
+        return {"players": json.loads(json.dumps(self.players)), "first": self.first,
+                "settings": {k: self.settings[k] for k in ("start_life", "format", "seating")},
+                "game_id": self.game_id}
+
+    def undo_label(self):
+        if not self.undo:
+            return ""
+        u = self.undo[-1]
+        return self.history_text(self.history[u["hist"]]) if u["hist"] < len(self.history) else "last change"
+
+    def undo_last(self):
+        """Take back the last change (a run of quick taps on one thing counts as one)."""
+        if not self.undo:
+            return self.say("Nothing to undo")
+        label = self.undo_label()
+        u = self.undo.pop()
+        g = u["game"]
+        players = g["players"]
+        if len(players) == len(self.players) and u["key"][0] not in ("swap", "game"):
+            for old, cur in zip(players, self.players):   # keep names / art changed since then
+                for k in ("name", "color", "art", "credit", "art_url", "art_auto", "color_chosen"):
+                    old[k] = cur.get(k)
+        self.players = players
+        self.first, self.game_id = g["first"], g["game_id"]
+        seating_changed = self.settings["seating"] != g["settings"]["seating"]
+        self.settings.update(g["settings"])
+        del self.history[u["hist"]:]
+        self.fx.clear()
+        self.first_anim = None
+        self.modals = [m for m in self.modals if m.get("idx", 0) < len(self.players)]
+        if seating_changed:
+            self.make_canvas()
+        self.say(f"Undone: {label}")
+        self.changed()
+
+    # ---- two-tap buttons: the first tap arms ("Tap again to ..."), the second acts
+    def confirm(self, key, fn):
+        def tap():
+            if self.is_armed(key):
+                self.armed = None
+                fn()
+            else:
+                self.armed = (key, time.time())
+            self.dirty = True
+        return tap
+
+    def is_armed(self, key):
+        return bool(self.armed) and self.armed[0] == key and time.time() - self.armed[1] < ARM_TIME
+
+    def game_in_progress(self):
+        life = self.settings["start_life"]
+        return any(p["life"] != life or any(p["counters"].values()) or any(p["cmd"]) or any(p["cmd2"])
+                   for p in self.players)
+
+    def format(self):
+        return FORMATS[self.settings["format"]]
+
+    def uses_cmd(self):
+        return self.format()[3]
+
+    def change_life(self, i, d, record=True):
+        if record:
+            self.record(("life", i), i, "life", d, self.players[i]["life"] + d)
         self.players[i]["life"] += d
         now = time.time()
         fx = self.fx.setdefault(i, {"d": 0, "t": 0})
@@ -1226,7 +1380,18 @@ class App:
 
     def change_counter(self, i, key, d):
         c = self.players[i]["counters"]
-        c[key] = max(0, c[key] + d)
+        new = max(0, c[key] + d)
+        if new != c[key]:
+            self.record(("counter", i, key), i, key, new - c[key], new)
+        c[key] = new
+        self.changed()
+
+    def change_opponents(self, i, d):
+        """Each opponent of seat i gains / loses d life (drain effects, "each opponent loses 1")."""
+        self.record(("drain", i), i, "drain", d, None)
+        for j in range(len(self.players)):
+            if j != i:
+                self.change_life(j, d, record=False)
         self.changed()
 
     def commanders(self):
@@ -1236,6 +1401,8 @@ class App:
     def set_partner(self, i, on):
         """Seat i plays two partner commanders (or not). Turning it off forgets the damage the
         second one dealt (life already lost stays lost)."""
+        if bool(self.players[i].get("partner")) != bool(on):
+            self.record(("partner", i), i, "partner", 0, bool(on), merge=False)
         self.players[i]["partner"] = bool(on)
         if not on:
             for q in self.players:
@@ -1250,15 +1417,18 @@ class App:
         track = p["cmd2"] if which == 2 else p["cmd"]
         new = max(0, track[src] + d)
         applied = new - track[src]
+        if applied:
+            self.record(("cmd", i, src, which), i, "cmd", applied, new, src=src, which=which)
         track[src] = new
         if applied and self.settings["cmd_hits_life"]:
-            self.change_life(i, -applied)
+            self.change_life(i, -applied, record=False)
         self.changed()
 
     def ko_reason(self, p):
-        if p["counters"]["poison"] >= 10:
+        _, _, poison_ko, cmd = self.format()
+        if p["counters"]["poison"] >= poison_ko:
             return "poison"
-        if max(max(p["cmd"]), max(p["cmd2"])) >= 21:     # 21 from any one commander
+        if cmd and max(max(p["cmd"]), max(p["cmd2"])) >= 21:     # 21 from any one commander
             return "commander"
         if p["life"] <= 0:
             return "life"
@@ -1267,13 +1437,19 @@ class App:
     def is_dead(self, p):
         return bool(self.ko_reason(p))
 
-    def start_game(self, n, life):
-        self.settings["start_life"] = life
+    def start_game(self, n, life, fresh=False, fmt=None, reset=False):
+        """New game for n players at life. fresh: new players (names / art not kept)."""
+        fmt = fmt or self.settings["format"]
+        label = (f"Game reset - {n} players at {life}" if reset else
+                 f"New game - {FORMATS[fmt][0]}, {n} player{'s' if n != 1 else ''} at {life}")
+        self.record(("game",), -1, "game", 0, None, merge=False)
+        self.history[-1]["text"] = label
+        self.settings["start_life"], self.settings["format"] = life, fmt
         old = self.players
         self.players = []
         for i in range(n):
             p = new_player(i, life)
-            if i < len(old):
+            if i < len(old) and not fresh:
                 p.update({k: old[i].get(k) for k in ("name", "color", "art", "credit", "art_url", "art_auto",
                                                        "color_chosen", "partner")})
             self.players.append(p)
@@ -1329,7 +1505,7 @@ class App:
     def rename_player(self, i, t):
         p = self.players[i]
         if t.strip():
-            p["name"] = t.strip()[:18]
+            p["name"] = t.strip()[:NAME_MAX]
             prof = self.profiles.get(p["name"])
             if prof and (not p["art"] or p.get("art_auto")):     # their saved look beats random art
                 p.update(prof)
@@ -1347,6 +1523,7 @@ class App:
     def swap_seats(self, a, b):
         """Swap two players' seats; commander damage is indexed by seat, so it follows."""
         P = self.players
+        self.record(("swap",), a, "swap", 0, None, src=b, merge=False)
         P[a], P[b] = P[b], P[a]
         for p in P:
             p["cmd"][a], p["cmd"][b] = p["cmd"][b], p["cmd"][a]
@@ -1451,14 +1628,24 @@ class App:
             s.fill(PALETTE[p["color"] % len(PALETTE)])
             s.blit(self.shade(w, h, 0, 25, 95), (0, 0))
         top, bot = int(h * 0.2), int(h * 0.22)
-        first = i == self.first and not self.first_spinning()
-        nr = self.text(s, p["name"], top * 0.6, maxw=w * (0.68 if first else 0.85), center=(w // 2, top // 2))
+        first = i == self.first and not self.first_spinning() and not why
+        fade = 120 if why else 255                  # knocked out: text fades back (wedges too)
+        nr = self.text(s, p["name"], max(20, top * 0.6), maxw=w * (0.68 if first else 0.85), alpha=fade,
+                       center=(w // 2, top // 2))
         if first:                                   # who went first, for the rest of the game
-            badge = self.make_pill("1st", top * 0.36, fg=(30, 24, 0), bg=(255, 220, 90), alpha=240)
+            badge = self.make_pill("1st", max(16, top * 0.36), fg=(30, 24, 0), bg=(255, 220, 90), alpha=240)
             s.blit(badge, badge.get_rect(midleft=(nr.right + max(4, top // 8), top // 2)))
 
         size = int(min(h * 0.56, w * 0.5))
-        life_rect = self.text(s, str(p["life"]), size, maxw=w * 0.62, center=(w // 2, h // 2))
+        low = p["life"] <= 5 and not why
+        life_rect = self.text(s, str(p["life"]), size, AMBER if low else WHITE, maxw=w * 0.62, alpha=fade,
+                              center=(w // 2, h // 2))
+        # a short bar under the number: which way is up, so 6 / 9 / 66 read right from across the table
+        bar = pygame.Rect(0, 0, max(8, int(life_rect.w * 0.42)), max(2, size // 28))
+        bar.midtop = (w // 2, life_rect.bottom - int(size * 0.1))
+        ul = pygame.Surface(bar.size, pygame.SRCALPHA)
+        ul.fill((*(AMBER if low else WHITE), 90 if why else 150))
+        s.blit(ul, bar)
         for plus, x in ((False, w * 0.08), (True, w * 0.92)):
             g = self.sign(plus, min(size * 0.2, w * 0.07, 44))
             s.blit(g, g.get_rect(center=(int(x), h // 2)))
@@ -1472,17 +1659,20 @@ class App:
                     pl.set_alpha(int(255 * (1.8 - age) / 0.6))
                 s.blit(pl, pl.get_rect(center=(w // 2, h // 2 - int(size * 0.5))))
 
-        chips = [(f"{short} {p['counters'][k]}", CHIP_COLORS[k]) for k, _, short in COUNTERS if p["counters"][k]]
+        poison_ko = self.format()[2]
+        chips = [(f"{short} {p['counters'][k]}", CHIP_COLORS[k],
+                  AMBER if k == "poison" and p["counters"][k] >= poison_ko - 3 else None)
+                 for k, _, short in COUNTERS if p["counters"][k]]
         cmds = [(j, d, w) for j, w in self.commanders()                         # includes self
-                for d in [(p["cmd"] if w == 1 else p["cmd2"])[j]] if d]
+                for d in [(p["cmd"] if w == 1 else p["cmd2"])[j]] if d] if self.uses_cmd() else []
         cy = h - bot // 2 - bot // 8
         if chips or cmds:
             credit_h = int(max(11, h * 0.05)) + 3 if bg and p["credit"] else 0
             area = pygame.Rect(int(w * 0.04), h - bot, int(w * 0.92), bot - credit_h - 3)
             self.draw_strip(s, area, int(bot * 0.3), cmds, chips)
         else:
-            pl = self.make_pill("counters", bot * 0.34, fg=(200, 200, 210), alpha=70,
-                                outline=(255, 255, 255, 50))
+            pl = self.make_pill("+ Cmdr dmg" if self.uses_cmd() else "+ Counters", max(15, bot * 0.34),
+                                fg=(215, 215, 225), alpha=90, outline=(255, 255, 255, 80))
             s.blit(pl, pl.get_rect(center=(w // 2, cy)))
         if (bg or (wedge and p["art"])) and p["credit"]:
             self.text(s, p["credit"], max(11, h * 0.05), GREY, maxw=w * 0.9,
@@ -1493,7 +1683,9 @@ class App:
                 shade.fill((25, 0, 0))
                 shade.set_alpha(170)
                 s.blit(shade, (0, 0))
-            pl = self.make_pill("KO" if why == "life" else f"KO - {why}", size * 0.2, bg=BAD, alpha=240)
+            # said in words with a white outline - not by colour alone
+            pl = self.make_pill("KO" if why == "life" else f"KO - {why}", max(20, size * 0.2), bg=(0, 0, 0),
+                                alpha=225, outline=WHITE)
             s.blit(pl, pl.get_rect(center=(w // 2, h // 2 + int(size * 0.47))))
         if not wedge:
             s.blit(self.corners(w, h, max(6, min(w, h) // 14)), (0, 0))
@@ -1508,12 +1700,9 @@ class App:
         sheet_angle = round(seat.angle / 90) * 90 % 360   # sheets open facing that player
         opener = lambda: self.push("player", idx=i, angle=sheet_angle)
         cmd_pane = lambda: self.push("cmd", idx=i, angle=sheet_angle)
-        # the life total itself opens commander damage (the -/+ halves stay either side of it)
-        lw = int(min(life_rect.w + size * 0.15, w * 0.34))
-        lh = int(min(life_rect.h, mid * 0.75))
-        v.zone((w // 2 - lw // 2, h // 2 - lh // 2, lw, lh), cmd_pane)
         v.zone((0, 0, w, top), opener, drag=i)       # hold + drag the name to swap seats
-        v.zone((0, h - bot, w, bot), cmd_pane)       # damage tiles / counters strip
+        # damage tiles / counters strip: the commander damage pane (no commanders: the sheet)
+        v.zone((0, h - bot, w, bot), cmd_pane if self.uses_cmd() else opener)
         v.finish()
 
     # ------------------------------------------------------------------ modals
@@ -1535,7 +1724,9 @@ class App:
         items = [
             ("New game", lambda: self.push("newgame", n=len(self.players), life=st["start_life"],
                                            seating=st["seating"]), BTN_OK),
-            ("Reset this game", lambda: self.start_game(len(self.players), st["start_life"]), BTN),
+            ("Reset this game", self.confirm("reset", lambda: self.start_game(len(self.players), st["start_life"],
+                                                                         reset=True)), BTN),
+            ("History / undo", lambda: self.push("history"), BTN),
             ("Dice / coin", lambda: self.push("dice", result="", sub=""), BTN),
             (f"Rotate screen ({st['rotation']} deg)", self.rotate_screen, BTN_ON),
             (f"Seating: {SEATINGS[st['seating']]}", self.toggle_seating, BTN),
@@ -1543,8 +1734,9 @@ class App:
             ("Phones & TV", self.open_remote, BTN_ON),
             ("Cast to TV", self.open_cast, BTN),
             ("Back to game", self.pop, BTN),
-            ("Quit", self.quit, BTN_BAD),
+            ("Quit", self.confirm("quit", self.quit), BTN_BAD),
         ]
+        armed = {"Reset this game": "reset", "Quit": "quit"}
         if WEB:                                   # no server, casting or quitting in a browser tab
             items = [it for it in items if it[0] not in ("Phones & TV", "Cast to TV", "Quit")]
             items.insert(5, (f"Auto-rotate: {'on' if st['auto_rotate'] else 'off'}", self.toggle_auto_rotate, BTN))
@@ -1554,6 +1746,8 @@ class App:
         rh = (v.h - u - u // 2) // ((len(items) + 1) // 2)
         for k, (label, fn, bg) in enumerate(items):
             r = (k % 2 * W // 2, u + k // 2 * rh, W // 2, rh)
+            if label in armed and self.is_armed(armed[label]):
+                label, bg = f"Tap again to {label.split()[0].lower()}", BTN_BAD
             self.button(v, r, label, fn, bg=bg, size=min(rh * 0.42, W * 0.035))
         self.text(v.surf, "Unofficial fan content - not affiliated with Wizards of the Coast. "
                   "Card art via Scryfall.", u * 0.3, GREY, maxw=W - 20, shadow=False,
@@ -1711,19 +1905,34 @@ class App:
     def draw_newgame(self, m):
         v = self.modal_view(m, "New game")
         u, W = v.u, v.w
-        rh = (v.h - u) // 4
+        rh = (v.h - u) // 5
         m.setdefault("seating", self.settings["seating"])
+        m.setdefault("format", self.settings["format"])
+        m.setdefault("keep", True)
 
         def setv(k, val):
             m[k] = val
             self.dirty = True
 
-        self.text(v.surf, "Players", rh * 0.3, GREY, shadow=False, midleft=(16, u + 10))
+        def set_format(key):
+            m["format"], m["life"] = key, FORMATS[key][1]
+            if key != "commander":                  # 1 v 1, or two teams
+                m["n"] = 2
+            self.dirty = True
+
+        y = u
+        self.text(v.surf, "Format", rh * 0.3, GREY, shadow=False, midleft=(16, y + 10))
+        for k, key in enumerate(FORMATS):
+            self.button(v, (k * W // 3, y + rh // 5, W // 3, rh - rh // 5), FORMATS[key][0],
+                        lambda key=key: set_format(key), bg=BTN_ON if m["format"] == key else BTN,
+                        size=min((rh - rh // 5) * 0.42, W * 0.04))
+        y += rh
+        self.text(v.surf, "Players", rh * 0.3, GREY, shadow=False, midleft=(16, y + 10))
         for n in range(1, MAX_PLAYERS + 1):
             x0, x1 = (n - 1) * W // MAX_PLAYERS, n * W // MAX_PLAYERS
-            self.button(v, (x0, u + rh // 5, x1 - x0, rh - rh // 5), str(n),
+            self.button(v, (x0, y + rh // 5, x1 - x0, rh - rh // 5), str(n),
                         lambda n=n: setv("n", n), bg=BTN_ON if m["n"] == n else BTN)
-        y = u + rh
+        y += rh
         self.text(v.surf, "Starting life", rh * 0.3, GREY, shadow=False, midleft=(16, y + 10))
         for k, life in enumerate((20, 30, 40)):
             self.button(v, (k * W // 4, y + rh // 5, W // 4, rh - rh // 5), str(life),
@@ -1747,12 +1956,19 @@ class App:
 
         def start():
             self.settings["seating"] = m["seating"]
-            self.start_game(m["n"], m["life"])
-        rf = self.settings["random_first"]
-        self.button(v, (0, y, W // 3, rh), "Cancel", self.pop)
-        self.button(v, (W // 3, y, W // 3, rh), f"Random first: {'on' if rf else 'off'}", self.toggle_random_first,
-                    bg=BTN_ON if rf else BTN, size=min(rh * 0.36, W * 0.035))
-        self.button(v, (2 * W // 3, y, W - 2 * W // 3, rh), "Start", start, bg=BTN_OK)
+            self.start_game(m["n"], m["life"], fresh=not m["keep"], fmt=m["format"])
+        rf, small = self.settings["random_first"], min(rh * 0.36, W * 0.032)
+        self.button(v, (0, y, W // 4, rh), "Cancel", self.pop)
+        self.button(v, (W // 4, y, W // 4, rh), f"Random first: {'on' if rf else 'off'}", self.toggle_random_first,
+                    bg=BTN_ON if rf else BTN, size=small)
+        self.button(v, (W // 2, y, W // 4, rh), "Same players" if m["keep"] else "New players",
+                    lambda: setv("keep", not m["keep"]), bg=BTN_ON if m["keep"] else BTN, size=small)
+        # a game in progress: Start needs a second tap (and Undo can still bring it back)
+        busy = self.game_in_progress()
+        armed = busy and self.is_armed("start")
+        self.button(v, (3 * W // 4, y, W - 3 * W // 4, rh), "Tap again to start" if armed else "Start",
+                    self.confirm("start", start) if busy else start, bg=BTN_BAD if armed else BTN_OK,
+                    size=small if armed else None)
         v.finish()
 
     def draw_dice(self, m):
@@ -1775,9 +1991,14 @@ class App:
         dice = (4, 6, 8, 10, 12, 20)
         for k, d in enumerate(dice):
             self.button(v, (k * W // 6, u, W // 6, rh), f"d{d}", lambda d=d: roll(d))
-        self.button(v, (0, H - rh, W // 3, rh), "Coin", coin)
-        self.button(v, (W // 3, H - rh, W // 3, rh), "Random player", who)
-        self.button(v, (2 * W // 3, H - rh, W // 3, rh), "Close", self.pop, bg=BTN_ON)
+        def planar():                               # Planechase: 1 planeswalk, 1 chaos, 4 blank
+            m["result"] = random.choice(("Planeswalk", "Chaos", "Blank", "Blank", "Blank", "Blank"))
+            m["sub"] = "planar die"
+            self.dirty = True
+
+        for k, (label, fn) in enumerate((("Coin", coin), ("Planar die", planar), ("Random player", who))):
+            self.button(v, (k * W // 4, H - rh, W // 4, rh), label, fn, size=min(rh * 0.42, W * 0.035))
+        self.button(v, (3 * W // 4, H - rh, W - 3 * W // 4, rh), "Close", self.pop, bg=BTN_ON)
         mid = (u + rh + H - rh) // 2
         if m["result"]:
             self.text(v.surf, m["result"], (H - u - 2 * rh) * 0.7, (255, 230, 120), maxw=W * 0.9,
@@ -1820,24 +2041,31 @@ class App:
                     pick=lambda name: self.open_art_search(i, f'!"{name}"', ang, label=name))),
                 ("Local image", lambda: self.open_local_images(i, ang)),
                 ("Colour", recolor),
-                ("Profiles", lambda: self.open_profiles(i, ang)),
-                (f"Partner: {'on' if p.get('partner') else 'off'}", lambda: self.set_partner(i, not p.get("partner")))]
+                ("Profiles", lambda: self.open_profiles(i, ang))]
+        if self.uses_cmd():                       # turning partners off forgets that damage: two taps
+            if p.get("partner"):
+                acts.append(("Tap again: partner off" if self.is_armed(("partner", i)) else "Partner: on",
+                             self.confirm(("partner", i), lambda: self.set_partner(i, False))))
+            else:
+                acts.append(("Partner: off", lambda: self.set_partner(i, True)))
         if WEB:                                   # no image folder in a browser
             acts = [a for a in acts if a[0] != "Local image"]
         for k, (label, fn) in enumerate(acts):
             self.button(v, (k * W // len(acts), u, W // len(acts), u), label, fn, size=u * 0.38)
 
-        sources = self.commanders()                 # commander damage, own commander(s) included
-        portrait = W < H                            # opened at a table end: one column
+        # commander damage, own commander(s) included - not in formats without commanders
+        sources = self.commanders() if self.uses_cmd() else []
+        nc = len(COUNTERS) + 1                      # the counters, then "each opponent"
+        portrait = W < H or not sources             # opened at a table end: one column
         if portrait:
-            nrows = len(COUNTERS) + len(sources) + 1
+            nrows = nc + (len(sources) + 1 if sources else 0)
             cw = W
         else:
-            nrows = max(len(COUNTERS), len(sources))
+            nrows = max(nc, len(sources))
             cw = W // 2
-        rh = (H - 2 * u - u // 3) // (nrows + 1)
+        rh = min(int(u * 1.1), (H - 2 * u - u // 3) // (nrows + 1))
         y0 = 2 * u + u // 6
-        cx, cy0 = (0, y0 + (len(COUNTERS) + 1) * rh) if portrait else (cw, y0)   # damage column
+        cx, cy0 = (0, y0 + (nc + 1) * rh) if portrait else (cw, y0)   # damage column
 
         def row(x, y, label, value, minus, plus, warn=False, tile=None, partner=False):
             b = min(rh, cw // 5)
@@ -1849,24 +2077,66 @@ class App:
             self.text(v.surf, label, rh * 0.42, maxw=x + cw - 3 * b - 10 - lx, shadow=False,
                       midleft=(lx, y + rh // 2))
             self.button(v, (x + cw - 3 * b - 8, y, b, rh), "-", minus, hold=minus, size=rh * 0.7)
-            self.text(v.surf, str(value), rh * 0.6, (255, 110, 110) if warn else WHITE, shadow=False,
+            self.text(v.surf, str(value), rh * 0.6, warn or WHITE, shadow=False,
                       center=(x + cw - 2 * b - 8 + b // 2, y + rh // 2))
             self.button(v, (x + cw - b - 8, y, b, rh), "+", plus, hold=plus, size=rh * 0.7)
 
         self.text(v.surf, "Counters", rh * 0.4, GREY, shadow=False, midleft=(14, y0 + rh // 2))
+        poison_ko = self.format()[2]
         for k, (key, label, _) in enumerate(COUNTERS):
-            row(0, y0 + (k + 1) * rh, label, p["counters"][key],
+            val = p["counters"][key]
+            row(0, y0 + (k + 1) * rh, label, val,
                 lambda key=key: self.change_counter(i, key, -1),
                 lambda key=key: self.change_counter(i, key, 1),
-                warn=key == "poison" and p["counters"][key] >= 10)
-        self.text(v.surf, "Commander damage from", rh * 0.4, GREY, shadow=False,
-                  midleft=(cx + 14, cy0 + rh // 2))
+                warn=key == "poison" and (LETHAL if val >= poison_ko else AMBER if val >= poison_ko - 3 else None))
+        row(0, y0 + nc * rh, "Each opponent", "", lambda: self.change_opponents(i, -1),
+            lambda: self.change_opponents(i, 1))
+        if sources:
+            self.text(v.surf, "Commander damage from", rh * 0.4, GREY, shadow=False,
+                      midleft=(cx + 14, cy0 + rh // 2))
         for k, (j, w) in enumerate(sources):
             name = self.players[j]["name"] + (" partner" if w == 2 else "") + (" (you)" if j == i else "")
             dmg = (p["cmd"] if w == 1 else p["cmd2"])[j]
             row(cx, cy0 + (k + 1) * rh, name, dmg,
                 lambda j=j, w=w: self.change_cmd(i, j, -1, w), lambda j=j, w=w: self.change_cmd(i, j, 1, w),
-                warn=dmg >= 21, tile=j, partner=w == 2)
+                warn=LETHAL if dmg >= 21 else AMBER if dmg >= 15 else None, tile=j, partner=w == 2)
+        v.finish()
+
+    def draw_history(self, m):
+        """What happened this game, newest first, with Undo for the latest change."""
+        v = self.modal_view(m, "History")
+        u, W, H = v.u, v.w, v.h
+        self.button(v, (W - 2 * u, 0, 2 * u, u), "Done", self.pop, bg=BTN_ON)
+        rh = max(26, u * 2 // 3)
+        rows = (H - 2 * u - 8) // rh
+        page = m.setdefault("page", 0)
+        items = self.history[::-1]
+        pages = max(1, -(-len(items) // rows))
+        page = m["page"] = min(page, pages - 1)
+        now = time.time()
+        for k, e in enumerate(items[page * rows:(page + 1) * rows]):
+            y = u + 4 + k * rh
+            if k % 2:
+                pygame.draw.rect(v.surf, (26, 27, 36), (0, y, W, rh))
+            ago = now - e["t"]
+            when = "now" if ago < 60 else f"{int(ago // 60)} min" if ago < 3600 else time.strftime("%H:%M", time.localtime(e["t"]))
+            self.text(v.surf, when, rh * 0.5, GREY, shadow=False, midleft=(14, y + rh // 2))
+            new_game = e.get("kind") in ("game", "reset")
+            self.text(v.surf, self.history_text(e), rh * 0.56, (255, 220, 90) if new_game else WHITE,
+                      maxw=W - u * 2 - 24, shadow=False, midleft=(u * 2, y + rh // 2))
+        if not items:
+            self.text(v.surf, "Nothing yet - life, counters and damage changes show up here.", u * 0.4, GREY,
+                      maxw=W - 40, shadow=False, center=(W // 2, H // 2))
+        y = H - u
+        label = self.undo_label()
+
+        def turn(d):
+            m["page"] = max(0, min(pages - 1, m["page"] + d))
+            self.dirty = True
+        self.button(v, (0, y, W // 4, u), "Newer", lambda: turn(-1), bg=BTN if page else HEADER)
+        self.button(v, (W // 4, y, W // 4, u), "Older", lambda: turn(1), bg=BTN if page < pages - 1 else HEADER)
+        self.button(v, (W // 2, y, W - W // 2, u), f"Undo: {label}" if label else "Nothing to undo",
+                    self.undo_last, bg=BTN_ON if label else HEADER, size=u * 0.36)
         v.finish()
 
     def cmd_layout(self, n, W, H):
@@ -1899,17 +2169,21 @@ class App:
         r = self.text(v.surf, info, u * 0.5, (255, 120, 120) if why else WHITE, shadow=False, midleft=(16, iy))
         self.text(v.surf, hint, u * 0.3, GREY, maxw=W - r.right - 40, shadow=False, midleft=(r.right + 24, iy))
 
-        sources = self.commanders()
+        sources = self.commanders() + [("poison", 0)]      # and a poison tile, like Lifetap
         n = len(sources)
+        poison_ko = self.format()[2]
         area = pygame.Rect(0, int(u * 1.75), W, H - int(u * 1.75) - u)
         cols = self.cmd_layout(n, area.w, area.h)
         rows = -(-n // cols)
         tw, th = area.w // cols, area.h // rows
         for k, (j, w) in enumerate(sources):
-            src = self.players[j]
-            dmg = (p["cmd"] if w == 1 else p["cmd2"])[j]
             r = pygame.Rect(area.x + k % cols * tw, area.y + k // cols * th, tw, th).inflate(-10, -10)
-            col = PALETTE[src["color"] % len(PALETTE)]
+            if j == "poison":
+                src = {"name": "Poison", "color": 0, "art": None}
+                dmg, col, limit = p["counters"]["poison"], CHIP_COLORS["poison"], poison_ko
+            else:
+                src = self.players[j]
+                dmg, col, limit = (p["cmd"] if w == 1 else p["cmd2"])[j], PALETTE[src["color"] % len(PALETTE)], 21
             art = self.cover(src["art"], r.w, r.h) if src["art"] else None
             tile = pygame.Surface(r.size)
             if art:
@@ -1921,22 +2195,29 @@ class App:
             rad = max(6, min(r.w, r.h) // 10)
             v.surf.blit(tile, r)
             v.surf.blit(self.corners(r.w, r.h, rad), r)      # round the tile's corners
-            lethal = dmg >= 21
-            pygame.draw.rect(v.surf, (255, 70, 70) if lethal else tuple(min(255, c + 70) for c in col), r,
-                             max(2, min(r.w, r.h) // 40) + (2 if lethal else 0), border_radius=rad)
+            lethal, close = dmg >= limit, dmg >= limit - (3 if j == "poison" else 6)
+            edge = LETHAL if lethal else AMBER if close else tuple(min(255, c + 70) for c in col)
+            pygame.draw.rect(v.surf, edge, r, max(2, min(r.w, r.h) // 40) + (2 if close else 0), border_radius=rad)
             name = src["name"] + (" partner" if w == 2 else "") + (" (own)" if j == i else "")
-            self.text(v.surf, name, max(14, min(r.h * 0.13, r.w * 0.1)), maxw=r.w * 0.9,
+            self.text(v.surf, name, max(16, min(r.h * 0.13, r.w * 0.1)), maxw=r.w * 0.9,
                       midtop=(r.centerx, r.y + r.h * 0.06))
-            self.text(v.surf, str(dmg), max(20, min(r.h * 0.45, r.w * 0.36)), (255, 120, 120) if lethal else WHITE,
+            self.text(v.surf, str(dmg), max(20, min(r.h * 0.45, r.w * 0.36)), WHITE,
                       center=(r.centerx, r.centery + r.h * 0.04))
+            if close:                               # say it in words, not just with a colour
+                note = "LETHAL" if lethal else f"{limit - dmg} more is lethal"
+                self.text(v.surf, note, max(14, min(r.h * 0.11, r.w * 0.085)), LETHAL if lethal else AMBER,
+                          maxw=r.w * 0.9, midbottom=(r.centerx, r.bottom - r.h * 0.05))
             if w == 2:
                 self.partner_badge(v.surf, (r.right - 6, r.y + 6), max(14, int(min(r.w, r.h) * 0.16)))
             gs = min(r.h * 0.22, r.w * 0.12, 44)              # - / + hints on the two halves
             for plus, gx in ((False, r.x + r.w * 0.12), (True, r.right - r.w * 0.12)):
                 g = self.sign(plus, gs)
                 v.surf.blit(g, g.get_rect(center=(int(gx), r.centery)))
-            sub = lambda j=j, w=w: self.change_cmd(i, j, -1, w)
-            add = lambda j=j, w=w: self.change_cmd(i, j, 1, w)
+            if j == "poison":
+                sub, add = (lambda: self.change_counter(i, "poison", -1)), (lambda: self.change_counter(i, "poison", 1))
+            else:
+                sub = lambda j=j, w=w: self.change_cmd(i, j, -1, w)
+                add = lambda j=j, w=w: self.change_cmd(i, j, 1, w)
             v.zone((r.x, r.y, r.w // 2, r.h), sub, sub, 0.25)            # left half: -1
             v.zone((r.x + r.w // 2, r.y, r.w - r.w // 2, r.h), add, add, 0.25)   # right half: +1
 
@@ -2297,6 +2578,7 @@ class App:
         hit = pygame.Rect(0, 0, int(r * 2.6), int(r * 2.6))
         hit.center = c
         self.zones.append((hit.collidepoint, lambda: self.push("menu"), None, 0, None))
+        self.draw_undo_button(r)
         self.draw_update_banner()
 
         if self.modals:
@@ -2317,6 +2599,32 @@ class App:
         self.screen.blit(out, (0, 0))
         pygame.display.flip()
         self.dirty = False
+
+    def undo_pos(self, r):
+        """The Undo button sits just beside the menu button (towards the screen's middle)."""
+        x, y = self.menu_pos(r)
+        return (x - int(r * 2.3), y) if x > self.W // 2 or len(self.players) == 1 else (x + int(r * 2.3), y)
+
+    def draw_undo_button(self, r):
+        """Round Undo button: a curved arrow; dim when there's nothing to take back.
+        Tap: undo the last change. Hold: the history list."""
+        c = self.undo_pos(r)
+        rr = int(r * 0.8)
+        on = bool(self.undo)
+        col = (210, 210, 220) if on else (90, 90, 100)
+        pygame.draw.circle(self.canvas, (0, 0, 0), (c[0], c[1] + 2), rr + 2)
+        pygame.draw.circle(self.canvas, (24, 24, 32), c, rr)
+        pygame.draw.circle(self.canvas, col, c, rr, 2)
+        a = rr // 2                                  # arrow: a 3/4 arc with a head at its top-left
+        box = pygame.Rect(c[0] - a, c[1] - a, 2 * a, 2 * a)
+        pygame.draw.arc(self.canvas, col, box, math.radians(-120), math.radians(150), max(2, rr // 8))
+        tip = (c[0] - int(a * math.cos(math.radians(30))), c[1] - int(a * math.sin(math.radians(30))))
+        k = max(4, rr // 3)
+        pygame.draw.polygon(self.canvas, col, [(tip[0] - k, tip[1] - k // 3), (tip[0] + k // 2, tip[1] - k),
+                                               (tip[0] + k // 3, tip[1] + k // 2)])
+        hit = pygame.Rect(0, 0, int(rr * 2.4), int(rr * 2.4))
+        hit.center = c
+        self.zones.append((hit.collidepoint, self.undo_last, lambda: self.push("history"), 10 ** 6, None))
 
     def menu_pos(self, r):
         """Menu button spot on the row divider, as clear of the (centred) names as possible."""
@@ -2650,6 +2958,9 @@ class App:
                 self.make_canvas()
         if self.toast[0] and now - self.toast[1] < 3.2:
             self.dirty = True
+        if self.armed and now - self.armed[1] >= ARM_TIME:   # "Tap again" went back to normal
+            self.armed = None
+            self.dirty = True
         if any(now - fx["t"] < 1.9 for fx in self.fx.values()):
             self.dirty = True
         self.tick_first()
@@ -2827,7 +3138,8 @@ PHONE_HTML = r"""<!doctype html>
 <title>LifePi</title>
 <style>
   :root { --bg:#121218; --card:#1d1e29; --line:#2c2e3d; --text:#f2f2f6; --dim:#9a9cae;
-          --accent:#4678c8; --good:#32a050; --bad:#c23b3b; --warn:#ffe678; --gap:5px; }
+          --accent:#4678c8; --good:#32a050; --bad:#c23b3b; --warn:#ffe678; --amber:#ffbe3c; --me:#4ad8ff;
+          --gap:5px; }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   /* one fixed screen, like the device: nothing outside the sheets scrolls or zooms */
   html, body { position:fixed; inset:0; margin:0; overflow:hidden; overscroll-behavior:none; touch-action:none;
@@ -2836,11 +3148,20 @@ PHONE_HTML = r"""<!doctype html>
   body { display:flex; flex-direction:column; padding:env(safe-area-inset-top) env(safe-area-inset-right)
          env(safe-area-inset-bottom) env(safe-area-inset-left); }
   button { font:inherit; color:inherit; cursor:pointer; touch-action:manipulation; }
-  header { flex:none; display:flex; align-items:center; gap:8px; height:48px; padding:0 10px; }
+  header { flex:none; display:flex; align-items:center; gap:6px; height:54px; padding:0 8px; }
   header b { font-size:17px; }
   #dot { width:9px; height:9px; border-radius:50%; background:var(--bad); flex:none; }
   #dot.on { background:var(--good); }
-  .hbtn.rot { margin-left:0; width:40px; padding:0; font-size:20px; flex:none; }
+  .hbtn.rot { margin-left:0; width:44px; padding:0; font-size:20px; flex:none; }
+  .hbtn[hidden] { display:none; }
+  #offline { flex:none; margin:0 var(--gap) var(--gap); padding:8px 12px; border-radius:12px; background:#5a1f1f;
+             color:#fff; font-weight:700; font-size:15px; text-align:center; }
+  #offline[hidden] { display:none; }
+  body.offline #table { opacity:.45; filter:grayscale(.7); }
+  #toast { position:fixed; left:50%; bottom:calc(16px + env(safe-area-inset-bottom)); transform:translateX(-50%); z-index:30;
+           max-width:92vw; padding:10px 16px; border-radius:999px; background:#1e1f2a; border:1px solid #4a4c5e;
+           font-weight:600; font-size:15px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; pointer-events:none; }
+  #toast[hidden] { display:none; }
   .hbtn.rot.on { background:var(--accent); border-color:var(--accent); }
   /* force landscape: on a portrait screen, turn the whole page a quarter turn (works with the
      phone's rotation lock on, and on iPhones, where pages can't lock orientation themselves) */
@@ -2850,9 +3171,6 @@ PHONE_HTML = r"""<!doctype html>
     html.land90 body { transform:rotate(90deg) translateY(-100%); }
     html.land270 body { transform:rotate(-90deg) translateX(-100%); }
   }
-  .lifebtn { position:absolute; left:33%; right:33%; top:30%; bottom:30%; z-index:1; border:0; padding:0;
-             background:none; border-radius:14px; touch-action:none; }
-  .lifebtn:active { background:rgba(255,255,255,.1); }
   .cmdto { display:flex; align-items:center; gap:10px; margin:2px 2px 6px; }
   .cmdto b { font-size:17px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .cmdto .life2 { margin-left:auto; font-size:34px; font-weight:800; font-variant-numeric:tabular-nums; }
@@ -2861,6 +3179,9 @@ PHONE_HTML = r"""<!doctype html>
   .ctile { position:relative; aspect-ratio:1.25; border-radius:16px; overflow:hidden; background-size:cover;
            background-position:center; border:3px solid rgba(255,255,255,.35); }
   .ctile.lethal { border-color:#ff4a4a; }
+  .ctile.close:not(.lethal) { border-color:var(--amber); }
+  .ctile .cnote { font-size:13px; font-weight:800; color:var(--amber); text-shadow:0 1px 3px #000; }
+  .ctile.lethal .cnote { color:#ff8a8a; }
   .ctile .face { position:absolute; inset:0; padding:8px 8px 10px; pointer-events:none; color:#fff;
                  display:flex; flex-direction:column; align-items:center; justify-content:space-between; }
   .ctile .half2 { position:absolute; top:0; bottom:0; width:50%; border:0; background:none; color:#fff; padding:0 10px;
@@ -2882,6 +3203,9 @@ PHONE_HTML = r"""<!doctype html>
   .hbtn { margin-left:auto; height:36px; padding:0 14px; border-radius:999px; border:1px solid var(--line);
           background:#22232f; font-size:14px; font-weight:600; max-width:46vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .hbtn + .hbtn { margin-left:0; }
+  .hbtn { flex:none; height:44px; }
+  #seatbtn { flex:0 1 auto; min-width:0; }       /* the one that gives way on a narrow phone */
+  @media (max-width: 420px) { header b { display:none; } .hbtn { padding:0 11px; } }
   #table { position:relative; flex:1; min-height:0; margin:0 var(--gap) var(--gap); }
 
   .cell { position:absolute; padding:var(--gap); container-type:size; }
@@ -2889,17 +3213,17 @@ PHONE_HTML = r"""<!doctype html>
   .wedge.dead { filter:saturate(.35) brightness(.55); }
   .gaps { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
   .gaps polygon { fill:none; stroke:var(--bg); stroke-width:6px; vector-effect:non-scaling-stroke; stroke-linejoin:round; }
-  .gaps polygon.me { stroke:var(--warn); stroke-width:3px; }
+  .gaps polygon.me { stroke:var(--me); stroke-width:3px; }
   .cell.inwedge .panel { background:none !important; box-shadow:none; }
   .cell.inwedge .panel.me { box-shadow:none; }
   .panel { position:relative; width:100%; height:100%; border-radius:16px; overflow:hidden; background-size:cover;
            background-position:center; box-shadow:0 3px 12px rgba(0,0,0,.35); }
-  .panel.me { box-shadow:0 0 0 3px var(--warn), 0 3px 12px rgba(0,0,0,.35); }
+  .panel.me { box-shadow:0 0 0 3px var(--me), 0 3px 12px rgba(0,0,0,.35); }
   .strip { position:absolute; left:0; right:0; border:0; background:none; padding:0 6%; display:flex;
            align-items:center; justify-content:center; text-align:center; }
-  .strip.top { top:0; height:20%; font-weight:700; font-size:min(10cqh, 8cqw); text-shadow:0 1px 3px rgba(0,0,0,.7); }
+  .strip.top { top:0; height:20%; font-weight:700; font-size:max(13px, min(10cqh, 8cqw)); text-shadow:0 1px 3px rgba(0,0,0,.7); }
   .strip.top span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .strip.top small { color:var(--warn); font-weight:600; margin-left:.35em; flex:none; }
+  .strip.top small { color:var(--me); font-weight:700; margin-left:.35em; flex:none; }
   .first1 { flex:none; margin-left:.4em; padding:0 .45em; border-radius:999px; background:#ffdc5a; color:#1e1800;
             font-size:.72em; font-weight:800; line-height:1.5; text-shadow:none; }
   .goes { position:absolute; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2; pointer-events:none;
@@ -2917,20 +3241,28 @@ PHONE_HTML = r"""<!doctype html>
   .half:active { background:rgba(255,255,255,.07); }
   .life { position:absolute; left:15%; right:15%; top:50%; transform:translateY(-50%); text-align:center; pointer-events:none;
           font-weight:800; line-height:1; font-variant-numeric:tabular-nums;
-          font-size:min(46cqh, 34cqw); text-shadow:0 2px 8px rgba(0,0,0,.6); }
+          font-size:min(46cqh, 34cqw); text-shadow:0 2px 8px rgba(0,0,0,.6);
+          /* a line under the number shows which way is up: 6 / 9 / 66 read right upside down */
+          text-decoration:underline; text-decoration-color:rgba(255,255,255,.5); text-decoration-thickness:.035em;
+          text-underline-offset:.06em; }
+  .life.low { color:var(--amber); text-decoration-color:rgba(255,190,60,.6); }
   .delta { position:absolute; left:50%; top:21%; transform:translateX(-50%); pointer-events:none; padding:.1em .6em;
            border-radius:999px; font-weight:800; font-size:min(9cqh, 7cqw); background:var(--good); }
   .delta.neg { background:var(--bad); }
   .ko { position:absolute; left:50%; bottom:24%; transform:translateX(-50%); pointer-events:none; padding:.1em .7em;
-        border-radius:999px; background:var(--bad); font-weight:800; font-size:min(8cqh, 6cqw); white-space:nowrap; }
+        border-radius:999px; background:rgba(0,0,0,.82); border:2px solid #fff; font-weight:800;
+        font-size:max(13px, min(8cqh, 6cqw)); white-space:nowrap; }
   .panel.dead > :not(.ko):not(.strip) { opacity:.45; }
   .panel.dead { filter:saturate(.4); }
-  .pill { padding:.15em .55em; border-radius:999px; font-weight:700; font-size:min(7cqh, 5.2cqw); white-space:nowrap; }
+  .pill { padding:.15em .55em; border-radius:999px; font-weight:700; font-size:max(12px, min(7cqh, 5.2cqw)); white-space:nowrap; }
+  .pill.warn { box-shadow:0 0 0 2px var(--amber); }
   .pill.empty { color:#cfd0dc; background:rgba(0,0,0,.28); border:1px solid rgba(255,255,255,.2); font-weight:600; }
-  .tile { width:min(14cqh, 11cqw); aspect-ratio:1; border-radius:22%; background-size:cover; background-position:center;
-          border:2px solid rgba(255,255,255,.45); display:flex; align-items:center; justify-content:center;
-          font-weight:800; font-size:min(8cqh, 6cqw); text-shadow:0 1px 4px #000; }
-  .tile.lethal { border-color:#ff4a4a; color:#ff8a8a; }
+  .tile { width:max(26px, min(14cqh, 11cqw)); aspect-ratio:1; border-radius:22%; background-size:cover; background-position:center;
+          border:2px solid rgba(255,255,255,.45); display:flex; flex-direction:column; align-items:center; justify-content:center;
+          font-weight:800; font-size:max(12px, min(8cqh, 6cqw)); line-height:1; text-shadow:0 1px 4px #000; }
+  .tile i { font-style:normal; font-size:.55em; font-weight:700; opacity:.9; margin-top:.1em; }
+  .tile.close { border-color:var(--amber) !important; }
+  .tile.lethal { border-color:#ff4a4a !important; border-width:3px; }
 
   /* sheets: the only places that scroll */
   .sheet { position:fixed; inset:0; z-index:10; display:flex; align-items:flex-end; justify-content:center;
@@ -2961,6 +3293,12 @@ PHONE_HTML = r"""<!doctype html>
   .stepper button { width:50px; height:46px; }
   .stepper .v { min-width:40px; text-align:center; font-size:21px; font-weight:800; font-variant-numeric:tabular-nums; }
   .stepper .v.warn { color:#ff7a7a; }
+  .stepper .v.close { color:var(--amber); }
+  .hist { font-size:14px; }
+  .hist .row { min-height:40px; padding:6px 10px; }
+  .hist .row .label { white-space:normal; font-weight:500; }
+  .hist .row.game .label { color:var(--warn); font-weight:700; }
+  .hist .row small { color:var(--dim); flex:none; }
   .chips { display:flex; flex-wrap:wrap; gap:8px; }
   .chips.six { display:grid; grid-template-columns:repeat(4, 1fr); }
   .chips.seat4 { display:grid; grid-template-columns:repeat(2, 1fr); }
@@ -2980,7 +3318,7 @@ PHONE_HTML = r"""<!doctype html>
   .seatpick { display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:8px; }
   .seatpick button { height:54px; border-radius:12px; border:2px solid transparent; font-weight:700; font-size:16px;
                      background-size:cover; background-position:center; text-shadow:0 1px 3px rgba(0,0,0,.7); }
-  .seatpick button.on { border-color:var(--warn); }
+  .seatpick button.on { border-color:var(--me); }
   .muted { color:var(--dim); font-size:14px; margin:8px 2px; }
   a { color:#8fb4ff; }
   .overlay { position:fixed; inset:0; z-index:20; background:rgba(8,8,12,.88); display:flex; align-items:center;
@@ -2995,11 +3333,14 @@ PHONE_HTML = r"""<!doctype html>
 </head><body>
 <header>
   <span id="dot"></span><b>LifePi</b>
+  <button class="hbtn" id="undobtn" type="button" hidden>Undo</button>
   <button class="hbtn" id="seatbtn" type="button">Pick your seat</button>
   <button class="hbtn" id="gamebtn" type="button">Game</button>
   <button class="hbtn rot" id="rotbtn" type="button" aria-label="Turn the screen sideways">↻</button>
 </header>
+<div id="offline" hidden>Not connected to LifePi - reconnecting...</div>
 <main id="table"></main>
+<div id="toast" hidden></div>
 <div class="sheet" id="sheet" hidden><div class="box" id="box"></div></div>
 <div class="overlay" id="pin" hidden><form class="panel2">
   <h3>Join the game</h3>
@@ -3009,7 +3350,7 @@ PHONE_HTML = r"""<!doctype html>
 </form></div>
 <div class="overlay" id="ask" hidden><form class="panel2">
   <h3 id="asktitle">Rename</h3>
-  <input id="askin" maxlength="18" autocomplete="off">
+  <input id="askin" maxlength="24" autocomplete="off">
   <div class="acts"><button type="button" class="big" id="askno">Cancel</button><button class="big go">Save</button></div>
 </form></div>
 <script>
@@ -3020,7 +3361,25 @@ const store = { get(k, d) { try { const v = localStorage.getItem(k); return v ==
 let me = +store.get("lifepi-seat", "-1"), myName = store.get("lifepi-name", "");
 let sheet = null;                      // {kind: "player", seat} | {kind: "game"} | {kind: "seat"}
 let confirmAt = "";
-const ng = { n: null, life: null };
+const ng = { n: null, life: null, format: null, fresh: false };
+let toastTimer = null;
+function toast(text) {
+  const t = document.getElementById("toast");
+  t.textContent = text; t.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 2500);
+}
+function undo() {
+  if (!state || !state.undo) return;
+  toast("Undone: " + state.undo); act({ op: "undo" });
+}
+// keep the screen on while the page is open (where the browser allows it)
+let wake = null;
+async function keepAwake() {
+  try { if (!wake && navigator.wakeLock && document.visibilityState === "visible") {
+    wake = await navigator.wakeLock.request("screen"); wake.addEventListener("release", () => { wake = null; }); } } catch (e) {}
+}
+addEventListener("pointerdown", keepAwake);
+document.addEventListener("visibilitychange", keepAwake);
 const CHIP = { poison: "#2f8a4a", tax: "#97702a", energy: "#ae8716", exp: "#5459ad" };
 const SHORT = { poison: "Poison", tax: "Tax", energy: "Energy", exp: "Exp" };
 
@@ -3069,9 +3428,9 @@ function pressable(tag, attrs, tap, hold, every, ...kids) {
 }
 const stepBtn = (label, fn) => pressable("button", {}, fn, fn, 150, label);   // sheets: hold repeats the step
 const tapBtn = (attrs, fn, ...kids) => pressable("button", attrs, fn, null, 0, ...kids);
-function stepper(value, minus, plus, warn) {
+function stepper(value, minus, plus, warn, close) {
   return el("div", { class: "stepper" }, stepBtn("−", minus),
-            el("span", { class: "v" + (warn ? " warn" : "") }, value), stepBtn("+", plus));
+            el("span", { class: "v" + (warn ? " warn" : close ? " close" : "") }, value), stepBtn("+", plus));
 }
 function ask(title, value, cb) {
   const box = document.getElementById("ask"), input = document.getElementById("askin");
@@ -3083,32 +3442,33 @@ function ask(title, value, cb) {
 
 // ------------------------------------------------------------------ the table (mirrors the device)
 function panel(p) {
-  const seat = p.seat, d = deltaOf(seat), bottom = [];
-  commanders(state).forEach(([src, which]) => {
+  const seat = p.seat, d = deltaOf(seat), bottom = [], cmdr = state.commander !== false;
+  if (cmdr) commanders(state).forEach(([src, which]) => {
     const v = dmgFrom(p, src, which);
-    if (v) bottom.push(el("span", { class: "tile" + (v >= 21 ? " lethal" : ""),
-      style: Object.assign(cardBg(src, "rgba(0,0,0,.2), rgba(0,0,0,.45)"), { borderColor: v >= 21 ? null : src.color }) },
-      v, which === 2 ? el("span", { class: "p2" }, "2") : null));
+    if (v) bottom.push(el("span", { class: "tile" + (v >= 21 ? " lethal" : v >= 15 ? " close" : ""),
+      style: Object.assign(cardBg(src, "rgba(0,0,0,.3), rgba(0,0,0,.55)"), { borderColor: src.color }) },
+      v, el("i", {}, src.initials || ""), which === 2 ? el("span", { class: "p2" }, "2") : null));
   });
+  const poisonKo = state.poison_ko || 10;
   for (const [key] of state.counters)
-    if (p.counters[key]) bottom.push(el("span", { class: "pill", style: { background: CHIP[key] || "#444" } },
+    if (p.counters[key]) bottom.push(el("span", { class: "pill" + (key === "poison" && p.counters[key] >= poisonKo - 3 ? " warn" : ""),
+                                                  style: { background: CHIP[key] || "#444" } },
                                         `${SHORT[key] || key} ${p.counters[key]}`));
-  if (!bottom.length) bottom.push(el("span", { class: "pill empty" }, "counters"));
+  if (!bottom.length) bottom.push(el("span", { class: "pill empty" }, cmdr ? "+ Cmdr dmg" : "+ Counters"));
   const open = () => openSheet({ kind: "player", seat });
-  const openCmd = () => openSheet({ kind: "cmd", seat });
+  const openCmd = cmdr ? () => openSheet({ kind: "cmd", seat }) : open;
   return el("div", { class: "cell" + (p.poly ? " inwedge" : ""), style: placeAt(boxOf(p, document.getElementById("table"))) },
     el("div", { class: "panel" + (seat === me ? " me" : "") + (p.ko ? " dead" : "") + (firstFlash(seat) ? " goesfirst" : ""),
                 style: p.poly ? {} : cardBg(p, "rgba(0,0,0,.6), rgba(0,0,0,.32) 45%, rgba(0,0,0,.66)") },
       tapBtn({ class: "strip top" }, open,
          el("span", {}, p.name), seat === me ? el("small", {}, "you") : null,
-         seat === state.first ? el("span", { class: "first1" }, "1st") : null),
+         seat === state.first && !p.ko ? el("span", { class: "first1" }, "1st") : null),
       firstFlash(seat) ? el("div", { class: "goes" }, "Goes first!") : null,
       pressable("button", { class: "half minus", "aria-label": "minus" }, () => act({ op: "life", seat, d: -1 }),
                 () => act({ op: "life", seat, d: -10 }), 500, el("i", {}, "−")),
       pressable("button", { class: "half plus", "aria-label": "plus" }, () => act({ op: "life", seat, d: 1 }),
                 () => act({ op: "life", seat, d: 10 }), 500, el("i", {}, "+")),
-      tapBtn({ class: "lifebtn", "aria-label": "commander damage to " + p.name }, openCmd),
-      el("div", { class: "life" }, p.life),
+      el("div", { class: "life" + (p.life <= 5 && !p.ko ? " low" : "") }, p.life),
       d ? el("div", { class: "delta" + (d < 0 ? " neg" : "") }, fmt(d)) : null,
       p.ko ? el("div", { class: "ko" }, p.ko === "life" ? "KO" : "KO · " + p.ko) : null,
       tapBtn({ class: "strip bot" }, openCmd, bottom)));
@@ -3142,7 +3502,16 @@ function playerSheet(seat) {
     el("div", { class: "rows" }, s.counters.map(([key, label]) =>
       el("div", { class: "row" }, el("span", { class: "label" }, label),
          stepper(p.counters[key], () => act({ op: "counter", seat, key, d: -1 }), () => act({ op: "counter", seat, key, d: 1 }),
-                 key === "poison" && p.counters[key] >= 10)))),
+                 key === "poison" && p.counters[key] >= (s.poison_ko || 10),
+                 key === "poison" && p.counters[key] >= (s.poison_ko || 10) - 3))),
+      el("div", { class: "row" }, el("span", { class: "label" }, "Each opponent"),
+         stepper("", () => act({ op: "drain", seat, d: -1 }), () => act({ op: "drain", seat, d: 1 })))),
+    ...(s.commander === false ? [] : cmdSections(s, p, seat)),
+  ];
+}
+
+function cmdSections(s, p, seat) {
+  return [
     el("h4", {}, "Commander damage taken"),
     el("div", { class: "rows" }, commanders(s).map(([src, which]) =>
       el("div", { class: "row" },
@@ -3150,11 +3519,17 @@ function playerSheet(seat) {
          el("span", { class: "label" }, src.name, which === 2 ? el("span", { class: "p2" }, "2") : null,
             src.seat === seat ? el("small", {}, " (own)") : null),
          stepper(dmgFrom(p, src, which), () => act({ op: "cmd", seat, src: src.seat, which, d: -1 }),
-                 () => act({ op: "cmd", seat, src: src.seat, which, d: 1 }), dmgFrom(p, src, which) >= 21)))),
+                 () => act({ op: "cmd", seat, src: src.seat, which, d: 1 }), dmgFrom(p, src, which) >= 21,
+                 dmgFrom(p, src, which) >= 15)))),
     el("h4", {}, "Commander"),
     el("div", { class: "rows" },
-      tapBtn({ class: "row switch" + (p.partner ? " on" : "") }, () => act({ op: "partner", seat, on: !p.partner }),
-        el("span", { class: "label" }, "Partner commanders (two commanders, damage tracked separately)"), el("i"))),
+      tapBtn({ class: "row switch" + (p.partner ? " on" : "") }, () => {
+          if (p.partner && confirmAt !== "partner") return arm("partner");
+          confirmAt = ""; act({ op: "partner", seat, on: !p.partner });
+        },
+        el("span", { class: "label" }, p.partner && confirmAt === "partner"
+          ? "Tap again to turn partners off (forgets the partner's damage)"
+          : "Partner commanders (two commanders, damage tracked separately)"), el("i"))),
   ];
 }
 
@@ -3172,16 +3547,27 @@ function cmdSheet(seat) {
       const v = dmgFrom(p, src, which);
       const add = () => act({ op: "cmd", seat, src: src.seat, which, d: 1 });
       const sub = () => act({ op: "cmd", seat, src: src.seat, which, d: -1 });
-      return el("div", { class: "ctile" + (v >= 21 ? " lethal" : ""),
-                         style: Object.assign(cardBg(src, "rgba(0,0,0,.25), rgba(0,0,0,.6)"), v >= 21 ? {} : { borderColor: src.color }) },
-        el("div", { class: "face" },
-          el("span", { class: "cname" }, src.name, which === 2 ? el("span", { class: "p2" }, "2") : null,
-             src.seat === seat ? el("small", {}, " (own)") : null),
-          el("span", { class: "cval" }, v), el("span", { class: "cplus" }, which === 2 ? "partner" : "")),
-        pressable("button", { class: "half2 minus", "aria-label": "less damage from " + src.name }, sub, sub, 220, "−"),
-        pressable("button", { class: "half2 plus", "aria-label": "damage from " + src.name }, add, add, 220, "+"));
-    })),
+      return dmgTile(src.name, cardBg(src, "rgba(0,0,0,.25), rgba(0,0,0,.6)"), src.color, v, 21, 15,
+                     [which === 2 ? el("span", { class: "p2" }, "2") : null, src.seat === seat ? el("small", {}, " (own)") : null],
+                     which === 2 ? "partner" : "", sub, add);
+    }), (() => {                                   // poison, like Lifetap
+      const ko = s.poison_ko || 10, v = p.counters.poison;
+      return dmgTile("Poison", { backgroundColor: CHIP.poison }, CHIP.poison, v, ko, ko - 3, [], "",
+                     () => act({ op: "counter", seat, key: "poison", d: -1 }), () => act({ op: "counter", seat, key: "poison", d: 1 }));
+    })()),
   ];
+}
+
+function dmgTile(name, bg, color, v, lethalAt, closeAt, extra, sub2, sub, add) {
+  const lethal = v >= lethalAt, close = v >= closeAt;
+  const note = lethal ? "LETHAL" : close ? `${lethalAt - v} more is lethal` : sub2;
+  return el("div", { class: "ctile" + (lethal ? " lethal" : close ? " close" : ""),
+                     style: Object.assign({}, bg, lethal || close ? {} : { borderColor: color }) },
+    el("div", { class: "face" },
+      el("span", { class: "cname" }, name, ...extra),
+      el("span", { class: "cval" }, v), el("span", { class: close ? "cnote" : "cplus" }, note)),
+    pressable("button", { class: "half2 minus", "aria-label": "less from " + name }, sub, sub, 220, "−"),
+    pressable("button", { class: "half2 plus", "aria-label": "more from " + name }, add, add, 220, "+"));
 }
 
 function seatSheet() {
@@ -3191,24 +3577,50 @@ function seatSheet() {
       tapBtn({ class: p.seat === me ? "on" : "", style: cardBg(p, "rgba(0,0,0,.3), rgba(0,0,0,.5)") },
              () => { setMe(p.seat); closeSheet(); }, p.name)),
       tapBtn({ class: me < 0 ? "on" : "" }, () => { setMe(-1); closeSheet(); }, "Just watching")),
-    el("p", { class: "muted" }, "Your seat gets a yellow outline. Everyone can still adjust any player."),
+    el("p", { class: "muted" }, "Your seat gets a blue outline. Everyone can still adjust any player."),
   ];
 }
 
+function arm(id) {
+  confirmAt = id; setTimeout(() => { if (confirmAt === id) { confirmAt = ""; redrawSheet(); } }, 4000); redrawSheet();
+}
 function confirmBtn(id, label, cls, fn) {
   const armed = confirmAt === id;
   return tapBtn({ class: "big " + cls + (armed ? " armed" : "") }, () => {
     if (armed) { confirmAt = ""; fn(); closeSheet(); return; }
-    confirmAt = id; setTimeout(() => { if (confirmAt === id) { confirmAt = ""; redrawSheet(); } }, 4000); redrawSheet();
+    arm(id);
   }, armed ? "Tap again to confirm" : label);
+}
+function historySheet() {
+  const s = state;
+  return [
+    el("div", { class: "shead" }, el("h3", {}, "History"), tapBtn({ class: "chipbtn go" }, closeSheet, "Done")),
+    s.undo ? tapBtn({ class: "big" }, undo, "Undo: " + s.undo) : el("p", { class: "muted" }, "Nothing to undo."),
+    el("h4", {}, "Newest first"),
+    historyRows(s),
+  ];
+}
+function historyRows(s) {
+  const now = Date.now() / 1000, ago = (t) => now - t < 60 ? "now" : now - t < 3600 ? Math.floor((now - t) / 60) + " min" : "";
+  const items = (s.history || []).slice(0, 25);
+  return el("div", { class: "rows hist" }, items.length ? items.map(([t, text]) =>
+      el("div", { class: "row" + (/^(New game|Game reset)/.test(text) ? " game" : "") },
+         el("span", { class: "label" }, text), el("small", {}, ago(t))))
+    : el("div", { class: "row" }, el("span", { class: "label" }, "Nothing yet")));
 }
 
 function gameSheet() {
   const s = state;
-  if (ng.n === null) { ng.n = s.players.length; ng.life = s.start_life; }
+  if (ng.n === null) { ng.n = s.players.length; ng.life = s.start_life; ng.format = s.format || "commander"; ng.fresh = false; }
   const lifeOpts = [20, 30, 40];
+  const fmtName = ((s.formats || []).find(([k]) => k === ng.format) || [0, ""])[1];
   return [
     el("div", { class: "shead" }, el("h3", {}, "Game"), tapBtn({ class: "chipbtn go" }, closeSheet, "Done")),
+    s.formats ? el("h4", {}, "Format") : null,
+    s.formats ? el("div", { class: "chips" }, s.formats.map(([key, label, life]) =>
+      tapBtn({ class: ng.format === key ? "on" : "" }, () => {
+        ng.format = key; ng.life = life; if (key !== "commander") ng.n = 2; redrawSheet();
+      }, label))) : null,
     el("h4", {}, "Players"),
     el("div", { class: "chips six" }, Array.from({ length: s.max_players || 6 }, (_, i) => i + 1).map((n) =>
       tapBtn({ class: ng.n === n ? "on" : "" }, () => { ng.n = n; redrawSheet(); }, n))),
@@ -3218,8 +3630,14 @@ function gameSheet() {
       el("input", { type: "number", inputmode: "numeric", min: "1", max: "9999", placeholder: "Other",
                     value: lifeOpts.includes(ng.life) ? null : String(ng.life),
                     onchange: (e) => { const v = parseInt(e.target.value, 10); if (v > 0) ng.life = Math.min(9999, v); redrawSheet(); } })),
-    confirmBtn("new", `Start ${ng.n}-player game at ${ng.life}`, "go", () => act({ op: "newgame", n: ng.n, life: ng.life })),
+    el("div", { class: "rows", style: { marginTop: "10px" } },
+      tapBtn({ class: "row switch" + (ng.fresh ? "" : " on") }, () => { ng.fresh = !ng.fresh; redrawSheet(); },
+        el("span", { class: "label" }, "Same players (keep names and art)"), el("i"))),
+    confirmBtn("new", `Start ${fmtName ? fmtName + ", " : ""}${ng.n} player${ng.n === 1 ? "" : "s"} at ${ng.life}`, "go",
+               () => act({ op: "newgame", n: ng.n, life: ng.life, format: ng.format, fresh: ng.fresh })),
     confirmBtn("reset", "Reset this game", "danger", () => act({ op: "reset" })),
+    el("p", { class: "muted" }, "Pressed by mistake? Undo (at the top) brings the game back."),
+    tapBtn({ class: "big" }, () => openSheet({ kind: "history" }), "History"),
     el("h4", {}, "Seating"),
     el("div", { class: "chips seat4" }, (s.seatings || []).map(([key, label]) =>
       tapBtn({ class: s.seating === key ? "on" : "" }, () => act({ op: "seating", value: key }), label))),
@@ -3241,6 +3659,10 @@ function render() {
   if (!state) return;
   followMe(state);
   document.getElementById("seatbtn").textContent = me >= 0 && state.players[me] ? "You: " + state.players[me].name : "Pick your seat";
+  const ub = document.getElementById("undobtn");
+  ub.hidden = !state.undo; ub.title = state.undo ? "Undo: " + state.undo : "";
+  // the first time this phone joins: ask which seat is theirs
+  if (me < 0 && !sheet && store.get("lifepi-asked", "") !== "1") { store.set("lifepi-asked", "1"); sheet = { kind: "seat" }; }
   document.getElementById("table").replaceChildren(
     ...wedgeLayers(state.players, "rgba(0,0,0,.5), rgba(0,0,0,.5)", me), ...state.players.map(panel));
   const sh = document.getElementById("sheet"), box = document.getElementById("box");
@@ -3255,19 +3677,22 @@ function render() {
   const top = box.scrollTop;
   box.replaceChildren(el("div", { class: "grab" }),
     ...(sheet.kind === "player" ? playerSheet(sheet.seat) : sheet.kind === "cmd" ? cmdSheet(sheet.seat)
-        : sheet.kind === "seat" ? seatSheet() : gameSheet()));
+        : sheet.kind === "seat" ? seatSheet() : sheet.kind === "history" ? historySheet() : gameSheet()));
   box.scrollTop = top;                   // live updates must not jump the sheet back to the top
 }
 function sheetKey() {
   const s = state, base = [sheet, confirmAt, ng.n, ng.life, me];
   if (sheet.kind === "game")
-    return JSON.stringify([base, s.players.length, s.start_life, s.seating, s.random_first, s.cmd_hits_life, s.max_players]);
+    return JSON.stringify([base, ng.format, ng.fresh, s.players.length, s.start_life, s.seating, s.random_first,
+                           s.cmd_hits_life, s.max_players, s.format]);
+  if (sheet.kind === "history") return JSON.stringify([base, s.undo, s.history]);
   const looks = s.players.map((p) => [p.name, p.color, p.art, p.partner]);
   if (sheet.kind === "seat") return JSON.stringify([base, looks]);
   const p = s.players[sheet.seat];
-  return JSON.stringify([base, looks, s.cmd_hits_life, p.life, p.ko, p.counters, p.cmd, p.cmd2]);
+  return JSON.stringify([base, looks, s.cmd_hits_life, s.format, p.life, p.ko, p.counters, p.cmd, p.cmd2]);
 }
 document.getElementById("seatbtn").onclick = () => openSheet({ kind: "seat" });
+document.getElementById("undobtn").addEventListener("pointerdown", (e) => press(e, undo, null, 0));
 addEventListener("resize", () => render());          // wedge boxes depend on the screen shape
 document.getElementById("gamebtn").onclick = () => { ng.n = null; openSheet({ kind: "game" }); };
 // force landscape: off -> turned one way -> the other way -> off (remembered on this phone)
@@ -3287,6 +3712,10 @@ applyTurn();
 onState = render;
 onStatus = (what, code) => {
   document.getElementById("dot").classList.toggle("on", what === "online");
+  if (what === "online" || what === "offline") {
+    document.getElementById("offline").hidden = what === "online";
+    document.body.classList.toggle("offline", what === "offline");
+  }
   const pin = document.getElementById("pin");
   if (what === "auth") {
     pin.hidden = false;
@@ -3340,7 +3769,7 @@ TV_HTML = r"""<!doctype html>
   .delta { position:absolute; top:20%; padding:.2em .7em; border-radius:999px; font-weight:800; background:#32a050;
            font-size:3vmin; font-size:min(8cqh, 6cqw); }
   .delta.neg { background:#c23b3b; }
-  .ko { margin-top:2%; padding:.15em .8em; border-radius:999px; background:#c23b3b; font-weight:800;
+  .ko { margin-top:2%; padding:.15em .8em; border-radius:999px; background:rgba(0,0,0,.82); border:.3vmin solid #fff; font-weight:800;
         font-size:2.6vmin; font-size:min(7cqh, 5cqw); }
   .bottom { position:absolute; bottom:5%; left:4%; right:4%; display:flex; flex-wrap:wrap; justify-content:center;
             align-items:center; gap:1vmin; gap:min(2.5cqh, 1.2vmin); }
@@ -3349,7 +3778,11 @@ TV_HTML = r"""<!doctype html>
           background-size:cover; background-position:center; border:.35vmin solid rgba(255,255,255,.45);
           display:flex; align-items:center; justify-content:center; font-weight:800;
           font-size:2.6vmin; font-size:min(7.5cqh, 6cqw); text-shadow:0 .2vmin .8vmin #000; }
-  .tile.lethal { border-color:#ff4a4a; color:#ff8a8a; }
+  .tile { flex-direction:column; line-height:1; }
+  .tile i { font-style:normal; font-size:.55em; font-weight:700; margin-top:.1em; }
+  .tile.close { border-color:#ffbe3c !important; }
+  .tile.lethal { border-color:#ff4a4a !important; }
+  .life.low { color:#ffbe3c; }
   .p2 { position:absolute; top:-.3em; right:-.3em; width:1.2em; height:1.2em; border-radius:50%; background:#ffdc5a;
         color:#1e1800; font-size:.5em; display:flex; align-items:center; justify-content:center; text-shadow:none; }
   .credit { position:absolute; bottom:1.2%; left:0; right:0; font-size:max(9px, 1.2vmin); font-size:max(9px, 2.6cqh); color:rgba(255,255,255,.55); }
@@ -3375,12 +3808,12 @@ function render() {
                                                    ...s.players.map((p) => {
     const d = deltaOf(p.seat);
     const bottom = [];
-    commanders(s).forEach(([src, which]) => {
+    if (s.commander !== false) commanders(s).forEach(([src, which]) => {
       const v = dmgFrom(p, src, which);
-      if (v) bottom.push(el("div", { class: "tile" + (v >= 21 ? " lethal" : ""),
-                                     style: Object.assign(cardBg(src, "rgba(0,0,0,.25), rgba(0,0,0,.45)"),
-                                                          { borderColor: v >= 21 ? null : src.color }) },
-                            v, which === 2 ? el("span", { class: "p2" }, "2") : null));
+      if (v) bottom.push(el("div", { class: "tile" + (v >= 21 ? " lethal" : v >= 15 ? " close" : ""),
+                                     style: Object.assign(cardBg(src, "rgba(0,0,0,.3), rgba(0,0,0,.55)"),
+                                                          { borderColor: src.color }) },
+                            v, el("i", {}, src.initials || ""), which === 2 ? el("span", { class: "p2" }, "2") : null));
     });
     for (const [key] of s.counters)
       if (p.counters[key]) bottom.push(el("span", { class: "pill", style: { background: CHIP[key] || "#444" } },
@@ -3389,10 +3822,10 @@ function render() {
     return el("div", { class: "cell" + (p.poly ? " inwedge" : ""), style: placeAt(boxOf(p, document.getElementById("grid"))) },
       el("div", { class: "card" + (p.ko ? " dead" : "") + (firstFlash(p.seat) ? " goesfirst" : ""),
                   style: p.poly ? {} : cardBg(p, "rgba(0,0,0,.62), rgba(0,0,0,.38) 45%, rgba(0,0,0,.72)") },
-      el("div", { class: "name" }, p.name, p.seat === s.first ? el("span", { class: "first1" }, "1st") : null),
+      el("div", { class: "name" }, p.name, p.seat === s.first && !p.ko ? el("span", { class: "first1" }, "1st") : null),
       firstFlash(p.seat) ? el("div", { class: "goes" }, "Goes first!") : null,
       d ? el("div", { class: "delta" + (d < 0 ? " neg" : "") }, fmt(d)) : null,
-      el("div", { class: "life" }, p.life),
+      el("div", { class: "life" + (p.life <= 5 && !p.ko ? " low" : "") }, p.life),
       p.ko ? el("div", { class: "ko" }, p.ko === "life" ? "KO" : "KO · " + p.ko) : null,
       el("div", { class: "bottom" }, bottom),
       p.credit ? el("div", { class: "credit" }, p.credit) : null));
@@ -3439,6 +3872,12 @@ def web_screen_size():
     so drawing stays fast)."""
     import platform
     w, h = int(platform.window.innerWidth), int(platform.window.innerHeight)
+    try:                                          # the canvas box: the page minus an iPhone's notch / home bar
+        r = platform.document.getElementById("canvas").getBoundingClientRect()
+        if int(r.width) >= 100 and int(r.height) >= 100:
+            w, h = int(r.width), int(r.height)
+    except Exception:
+        pass
     scale = min(2.0, float(platform.window.devicePixelRatio or 1), 1600 / max(w, h, 1))
     return max(320, round(w * scale)), max(240, round(h * scale))
 

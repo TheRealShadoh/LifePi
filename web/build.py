@@ -114,9 +114,13 @@ HEAD_TAGS = """
 <style>
   html, body { background: %(theme)s !important; overscroll-behavior: none; touch-action: none; }
   /* LifePi always draws at the page's own shape, so the canvas simply covers the viewport -
-     also after the phone is turned (pygbag only sizes it once, at start) */
-  #canvas { position: fixed !important; left: 0 !important; top: 0 !important; margin: 0 !important;
-            width: 100vw !important; height: 100vh !important; height: 100dvh !important; }
+     also after the phone is turned (pygbag only sizes it once, at start) - minus the notch /
+     rounded corners / home bar of an iPhone (safe-area insets; 0 everywhere else) */
+  #canvas { position: fixed !important; margin: 0 !important;
+            left: env(safe-area-inset-left, 0px) !important; top: env(safe-area-inset-top, 0px) !important;
+            width: calc(100vw - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)) !important;
+            height: calc(100vh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)) !important;
+            height: calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)) !important; }
 </style>
 <script>
   if ("serviceWorker" in navigator) addEventListener("load", () => navigator.serviceWorker.register("sw.js"));

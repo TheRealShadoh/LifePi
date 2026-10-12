@@ -108,6 +108,26 @@ def main():
             b.call("Input.dispatchTouchEvent", type="touchEnd", touchPoints=[])
             time.sleep(0.6)
 
+        # --- first join: the phone asks which seat is yours; your seat gets a blue outline
+        for _ in range(20):
+            if b.js("!!document.querySelector('#box .seatpick')"):
+                break
+            time.sleep(0.2)
+        assert b.js("!document.getElementById('sheet').hidden && !!document.querySelector('#box .seatpick')"),             "the seat picker should open on first join"
+        tap("#box .seatpick button", 1)
+        assert b.js("document.getElementById('sheet').hidden"), "picking a seat closes the picker"
+        me = b.js("(() => { const e = document.querySelectorAll('.cell .panel')[1]; return [e.className, getComputedStyle(e).boxShadow]; })()")
+        assert "me" in me[0] and "74, 216, 255" in me[1], me
+        b.js("location.reload()"); time.sleep(1)
+        for _ in range(40):
+            if b.js("document.querySelectorAll('.cell').length === 4"):
+                break
+            time.sleep(0.25)
+        time.sleep(0.5)
+        assert b.js("document.getElementById('sheet').hidden"), "the seat picker opens only the first time"
+        assert b.js("!document.querySelector('.lifebtn')"), "the life number is part of the -/+ halves now"
+        print("first join asks for a seat once; your seat is outlined")
+
         # --- a drag that starts in a sheet and ends on the dimmed backdrop must not close it
         # (the browser sends that "click" to the backdrop; a sheet too short to scroll shows it)
         tap("#seatbtn")
@@ -156,9 +176,16 @@ def main():
         # --- Lifetap-style commander damage: tap a life total -------------------------
         target = 2
         l0 = state()["players"][target]["life"]
-        tap(".cell .lifebtn", target)
-        assert b.js("!!document.querySelector('#box .cmdgrid')"), "life total did not open commander damage"
-        assert b.js("document.querySelectorAll('#box .ctile').length") == 6
+        # the life number changes life like the rest of the panel: left of centre -1, right +1
+        lr = b.js(f"(() => {{ const r = document.querySelectorAll('.cell .life')[{target}].getBoundingClientRect();"
+                  f" return [r.left, r.top, r.width, r.height]; }})()")
+        b.touch(lr[0] + lr[2] * 0.3, lr[1] + lr[3] / 2, 120); time.sleep(0.5)
+        assert state()["players"][target]["life"] == l0 - 1 and b.js("document.getElementById('sheet').hidden")
+        b.touch(lr[0] + lr[2] * 0.7, lr[1] + lr[3] / 2, 120); time.sleep(0.5)
+        assert state()["players"][target]["life"] == l0
+        tap(".cell .strip.bot", target)              # "+ Cmdr dmg" opens commander damage
+        assert b.js("!!document.querySelector('#box .cmdgrid')"), "the strip did not open commander damage"
+        assert b.js("document.querySelectorAll('#box .ctile').length") == 6 + 1      # 6 commanders + poison
         b.shot("phone_cmd.png")
         tap("#box .ctile .half2.plus", 3)          # right half of seat 3's tile: +1
         p = state()["players"][target]
@@ -183,16 +210,16 @@ def main():
         tap("#box .row.switch", 0, settle=0.8)     # "Partner commanders"
         assert state()["players"][1]["partner"], "partner switch from the phone"
         tap("#box .chipbtn.go")
-        tap(".cell .lifebtn", target)
-        assert b.js("document.querySelectorAll('#box .ctile').length") == 7     # 6 commanders + 1 partner
+        tap(".cell .strip.bot", target)
+        assert b.js("document.querySelectorAll('#box .ctile').length") == 7 + 1  # 6 commanders + 1 partner + poison
         main_before = state()["players"][target]["cmd"][1]
         tap("#box .ctile .half2.plus", 2)          # seat 1's partner tile is right after seat 1's
         p = state()["players"][target]
         assert p["cmd2"][1] == 1 and p["cmd"][1] == main_before, (p["cmd"], p["cmd2"], main_before)
         b.shot("phone_cmd_partner.png")
-        tap("#box .chipbtn.go")
-        tap(".cell .strip.bot", target)            # the damage strip opens it too
-        assert b.js("!!document.querySelector('#box .cmdgrid')")
+        poison0 = state()["players"][target]["counters"]["poison"]
+        tap("#box .ctile .half2.plus", 7)          # the poison tile
+        assert state()["players"][target]["counters"]["poison"] == poison0 + 1
         tap("#box .chipbtn.go")
         print(f"commander damage sheet ok (left half -1, right half +1, hold +{held}, partner tile, strip)")
 
@@ -200,6 +227,28 @@ def main():
         l1 = state()["players"][4]["life"]
         tap(".cell .half.plus", 4, ms=90)
         assert state()["players"][4]["life"] == l1 + 1
+
+        # --- undo from the phone (the other phone stops first: undo takes back the latest change)
+        stop.set(); time.sleep(0.6)
+        l3 = state()["players"][4]["life"]
+        tap(".cell .half.plus", 4, ms=90)
+        assert state()["players"][4]["life"] == l3 + 1
+        for _ in range(20):
+            if b.js("!document.getElementById('undobtn').hidden"):
+                break
+            time.sleep(0.1)
+        tap("#undobtn")
+        assert state()["players"][4]["life"] == l3, "Undo on the phone"
+        assert "Undone" in b.js("document.getElementById('toast').textContent")
+        tap("#gamebtn"); tap("#box .big", 2)          # Game > History
+        assert b.js("document.querySelectorAll('#box .hist .row').length") >= 3
+        b.shot("phone_history.png")
+        tap("#box .chipbtn.go")
+        b.js("onStatus('offline')")                   # lost the connection: a banner, a dimmed table
+        assert b.js("!document.getElementById('offline').hidden && document.body.classList.contains('offline')")
+        b.js("onStatus('online')")
+        assert b.js("document.getElementById('offline').hidden")
+        print("undo, history and the offline banner ok")
 
         # --- force landscape ------------------------------------------------------------
         tap("#rotbtn")
@@ -215,6 +264,21 @@ def main():
         tap("#rotbtn"); tap("#rotbtn")
         assert not b.js("document.documentElement.className.includes('land')")
         print("force landscape ok", cell)
+
+        # --- formats: 1 v 1 from the phone - no commander damage on the panels
+        tap("#gamebtn")
+        fmts = b.js("[...document.querySelectorAll('#box .chips')[0].querySelectorAll('button')].map(e => e.textContent)")
+        assert fmts == ["Commander", "1 v 1", "Two-Headed Giant"], fmts
+        tap("#box .chips button", 1)
+        tap("#box .big", 0); tap("#box .big", 0, settle=1.0)       # a game in progress: two taps
+        st = state()
+        assert st["format"] == "duel" and len(st["players"]) == 2 and st["players"][0]["life"] == 20, st["format"]
+        assert b.js("document.querySelector('.cell .pill.empty').textContent") == "+ Counters"
+        tap(".cell .strip.bot", 0)
+        assert b.js("!document.querySelector('#box .cmdgrid') && !!document.querySelector('#box .lifebig')")
+        b.shot("phone_duel.png")
+        tap("#box .chipbtn.go")
+        print("formats from the phone ok")
     finally:
         stop.set()
         if b:

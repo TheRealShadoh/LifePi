@@ -124,6 +124,16 @@ assert req("/api/act", data=[1, 2])[0] == 400
 act(op="life", seat=0, d=10 ** 9); assert app.players[0]["life"] == 37 + 999            # clamped
 act(op="newgame", n=3, life=20); assert [p["life"] for p in app.players] == [20, 20, 20]
 act(op="reset"); assert len(app.players) == 3
+# each opponent, undo, formats, new players - and the history phones see
+act(op="drain", seat=0, d=-2); assert [p["life"] for p in app.players] == [20, 18, 18]
+assert state()["undo"].endswith("each opponent -2 life") and "each opponent -2" in state()["history"][0][1]
+act(op="undo"); assert [p["life"] for p in app.players] == [20, 20, 20]
+act(op="name", seat=1, name="Bo"); act(op="newgame", n=2, life=20, format="duel", fresh=True)
+s = state(); assert s["format"] == "duel" and not s["commander"] and [p["name"] for p in s["players"]] == ["Player 1", "Player 2"]
+act(op="undo"); assert app.players[1]["name"] == "Bo" and len(app.players) == 3 and app.settings["format"] == "commander"
+act(op="newgame", n=3, life=20, format="nope"); assert app.settings["format"] == "commander"   # unknown: unchanged
+act(op="name", seat=0, name="X" * 50); assert len(app.players[0]["name"]) == 24
+assert state()["players"][0]["initials"] == "XX"
 print("actions ok")
 
 # live updates: the event stream pushes the state whenever it changes

@@ -21,14 +21,19 @@ life counter — released under the MIT licence so anyone can use, fork and impr
   - **Ends `-=-`** – one player at each short end of the table (panels turned 90° to face them), the rest along the sides
   - **Round** – a slice per player from the centre, each turned to face its player, for a round table
   - **Upright** – everything upright, for a monitor on a stand
-- Tap **−/+** for 1, **hold** for 10; running delta ("−7") while you tap; true multi-touch, so two players can tap at once
-- Poison, commander tax, energy, experience; **commander damage per commander, your own included, partners tracked separately** - each source shows on your panel as a mini tile of that player's art (or colour) with the amount (optionally also subtracts life); automatic KO dimming at 0 life / 10 poison / 21 commander damage
-- **Commander damage, Lifetap style:** tap a life total and a tile for every commander pops up (their art, the damage they've dealt); left half of a tile −1, right half +1
+- Tap **−/+** for 1, **hold** for 10 - anywhere on the left / right half of a panel, the life number included; running delta ("−7") while you tap; true multi-touch, so two players can tap at once
+- **Undo + history:** the round ↶ button next to the menu takes back the last change (a run of quick taps counts as one step - even a reset or a new game); hold it, or menu > *History / undo*, for a list of everything that happened this game (saved with the game)
+- **No accidents:** *Reset*, *Quit*, *Start* over a game in progress and turning *Partner* off need a second tap ("Tap again to ...")
+- **Formats:** Commander (40), 1 v 1 (20, no commander damage) and Two-Headed Giant (30, 15 poison) - picked in New game
+- Poison, commander tax, energy, experience; **commander damage per commander, your own included, partners tracked separately** - each source shows on your panel as a mini tile of that player's art (or colour) with the amount and their initials (optionally also subtracts life); warnings in amber before it's too late (life 5 or less, poison 3 from lethal, 15+ commander damage from one commander); automatic KO at 0 life / 10 poison / 21 commander damage, said in words and not just with colour
+- **Each opponent ±1** in a player's sheet, for drain effects
+- **Commander damage, Lifetap style:** tap the *Cmdr dmg* strip at the bottom of a panel and a tile for every commander pops up (their art, the damage they've dealt) plus a poison tile; left half of a tile −1, right half +1; "3 more is lethal" / "LETHAL" on the tile
 - **Images:** search any card on Scryfall with the on-screen keyboard - card names are suggested as you type - and use its art as your background, or drop your own PNG/JPGs in `~/.local/share/lifepi/images`. Searches, suggestions and art are cached on disk, so repeat searches cost no API calls and work offline
 - **Random card art:** players without art - at start-up, and new seats whenever a game grows - get a random commander's art from Scryfall (all different, credited). Art you pick is never replaced, a saved profile's art wins, and choosing **Colour** for a player keeps them on a colour. Offline it uses art already on the device, and tries again a minute later if there is none
 - **Player profiles** – name + art/colour are remembered and reloadable
 - **Random first player** on every new game (on by default; switch it in New game or on a phone): a highlight spins round the table and lands on who goes first, and a "1st" badge stays by their name all game
-- Dice (d4–d20), coin flip, random player
+- Dice (d4–d20), coin flip, planar die, random player
+- Player colours chosen to stay distinguishable with colour blindness; a short line under every life total shows which way is up (6 vs 9 from across the table)
 - **Phones as controllers:** everyone on the same Wi-Fi scans a QR code and runs their own life, counters and commander damage from their phone - changes show up instantly on the Pi and on every other phone
 - **TV view:** a live scoreboard for a big screen - cast it to a Chromecast / Google TV / Nvidia Shield from the menu, open it in a smart-TV browser, or mirror a phone to a Roku
 - **Keeps itself up to date** (installed with `install.sh`): an *Update available* bar when there's a new release - one tap updates and restarts, or close it
@@ -75,11 +80,12 @@ Open the menu (round button) > **Phones & TV**. It shows a QR code, the address 
 
 - **Phones / tablets:** scan the QR code (or type the address and PIN). The phone shows the whole
   table, laid out exactly like the Pi (same seats, seating style and player count), on one screen
-  with no scrolling: tap a panel's left / right side for −1 / +1, hold for ±10, tap a life total (or the
-  strip under it) for commander damage, tap a name for that player's counters and settings (rename, colour, partner commanders). **↻** turns
-  the page sideways (landscape) while the phone stays upright - handy with the rotation lock on. **Pick your seat** gives your panel
-  a yellow outline; **Game** starts a new game (1–8 players, starting life, seating style) and holds
-  the rules (random first player, commander damage reduces life). Changes show up instantly on the Pi
+  with no scrolling: tap a panel's left / right side for −1 / +1, hold for ±10 (the life number too), tap the
+  *Cmdr dmg* strip at the bottom for commander damage, tap a name for that player's counters and settings (rename, colour, partner commanders). **↻** turns
+  the page sideways (landscape) while the phone stays upright - handy with the rotation lock on. **Pick your seat** (asked the first time a phone joins) gives your panel
+  a blue outline; **Undo** takes back the last change; **Game** starts a new game (format, 1–8 players, starting life, same or new players) and holds
+  the seating style, the rules (random first player, commander damage reduces life) and the game's history. The screen stays on while the page is open,
+  and a banner says so if the phone loses its connection to LifePi. Changes show up instantly on the Pi
   and every other phone. Phones must be on the same network as LifePi; nothing is installed.
 - **TV:** the **TV view** address shown there is a live, read-only scoreboard sized for a big screen.
   - *Chromecast, Google TV, Nvidia Shield:* menu > **Cast to TV**, pick the device (needs `python3-pychromecast`,
@@ -157,14 +163,16 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 ## Controls
 
 - Middle of a panel: left side −, right side + (hold for ±10)
-- **Tap a life total** (or the damage / counters strip under it): commander damage, Lifetap style - a tile for every commander with their art; like a life panel, the tile's left half is −1 and its right half +1 (hold to repeat); *Counters & more* opens the full sheet
+- **Cmdr dmg strip** at the bottom of a panel (or its damage tiles): commander damage, Lifetap style - a tile for every commander with their art, and one for poison; like a life panel, the tile's left half is −1 and its right half +1 (hold to repeat); *Counters & more* opens the full sheet. In formats without commanders the strip opens the player's sheet
+- **↶ (next to the menu button):** undo the last change; hold it for the history
 - **Partner commanders:** switch *Partner* on in a player's sheet and their second commander gets its own tile (gold "2" badge) - damage from each partner is tracked separately, and 21 from either one is a KO
 - **Hold a player's name and drag it** onto another panel to swap seats (commander damage follows the players)
 - **Name strip** of a panel: opens that player's sheet, turned toward them - rename, card art, local image, colour,
-  profiles, partner on / off, counters, and every commander's damage as a list
-- Round button: main menu - new game, reset, dice / coin, rotate, seating, commander damage rule,
+  profiles, partner on / off, counters, *Each opponent* ±1, and every commander's damage as a list
+- Round button: main menu - new game, reset, history / undo, dice / coin, rotate, seating, commander damage rule,
   Phones & TV, Cast to TV, *Update to ...* (when there is one), quit; in the phone app also *Auto-rotate*
-- **New game:** 1–8 players, starting life (20 / 30 / 40 / custom), seating style, and random first player on / off
+- **New game:** format (Commander / 1 v 1 / Two-Headed Giant), 1–8 players, starting life (20 / 30 / 40 / custom), seating style,
+  random first player on / off, and *Same players* (keep names and art) or *New players*
 - With a keyboard on the card-art search: Tab picks the first suggestion, Enter searches
 
 ## Releases
@@ -195,9 +203,9 @@ All headless; CI runs them on every push and before every release.
 
 | Test | Covers |
 |---|---|
-| `SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` | the app itself: rotation and touch mapping, tap / hold, every seating style for 1–8 players (each screen point belongs to one seat, clockwise order, taps on rotated seats), modals and rotated sheets, drag-to-swap, the commander damage pane (halves, hold, rotated), partner commanders (separate tracking, KO rules, swaps, saves), random first player (incl. fairness), random card art, search cache and suggestions (mocked Scryfall), the update check (banner, close, bad downloads rejected, update + restart), saving / restart / crash / corrupt-save recovery |
-| `SDL_VIDEODRIVER=dummy python3 tests/companion_test.py` | the Phones & TV server: PIN and lock-out, every phone action, bad input, live updates, seat positions matching the Pi, art serving |
-| `python tests/phone_test.py` | the phone page (QR code) in headless Chrome on a busy table (another phone tapping every 150 ms): starting games and changing seating from the phone, scrolling sheets, the commander damage sheet (halves, hold, partner tile), force landscape (needs Chrome) |
+| `SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` | the app itself: rotation and touch mapping, tap / hold, every seating style for 1–8 players (each screen point belongs to one seat, clockwise order, taps on rotated seats), modals and rotated sheets, drag-to-swap, the commander damage pane (halves, hold, rotated, poison tile), partner commanders (separate tracking, KO rules, swaps, saves), undo + history (merged taps, resets, swaps, the button, saved), two-tap confirms (and their time-out), formats, each opponent, the planar die, warnings, random first player (incl. fairness), random card art, search cache and suggestions (mocked Scryfall), the update check (banner, close, bad downloads rejected, update + restart), saving / restart / crash / corrupt-save recovery |
+| `SDL_VIDEODRIVER=dummy python3 tests/companion_test.py` | the Phones & TV server: PIN and lock-out, every phone action (undo, each opponent, formats included), bad input, live updates, seat positions matching the Pi, art serving |
+| `python tests/phone_test.py` | the phone page (QR code) in headless Chrome on a busy table (another phone tapping every 150 ms): the seat picker on first join, the life number as -/+, starting games (two taps, formats) and changing seating from the phone, scrolling sheets, the commander damage sheet (halves, hold, partner and poison tiles), undo, history, the offline banner, force landscape (needs Chrome) |
 | `python web/build.py && python tests/web_test.py` | the phone app end to end in headless Chrome at phone size: boot, real touch input, holds, Scryfall in the browser, reload, the layout staying put when the phone turns, starting offline (needs Chrome and internet) |
 | `python3 tests/live_scryfall.py` | the real Scryfall API (non-blocking in CI) |
 
@@ -214,4 +222,4 @@ LifePi is not affiliated with Scryfall or with any other life-counter app.
 
 ## Roadmap / good first issues
 
-Turn timer · Planechase/Archenemy decks (Scryfall `t:plane` / `t:scheme`) · art for a partner commander · life history log · monarch/initiative markers.
+Turn timer · Planechase/Archenemy decks (Scryfall `t:plane` / `t:scheme`) · art for a partner commander · monarch/initiative markers · turn tracker · round timer · commander tax per cast · a big "my seat" view on phones.

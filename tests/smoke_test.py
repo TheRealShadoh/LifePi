@@ -56,7 +56,7 @@ app.push("player", idx=0, angle=180); app.render()
 plus = [z for z in app.zones if z[2]]           # zones with hold = -/+ buttons
 life0 = app.players[0]["life"]
 app.change_cmd(0, 1, 3); assert app.players[0]["life"] == life0 - 3 and app.players[0]["cmd"][1] == 3
-assert len(plus) == 2 * (4 + 4)                 # 4 counters + commander damage from all 4 seats
+assert len(plus) == 2 * (4 + 1 + 4)             # 4 counters, each opponent, damage from all 4 seats
 app.pop()
 # a player's own commander counts too (e.g. after an opponent steals it)
 life0 = app.players[0]["life"]
@@ -177,6 +177,10 @@ def seat_point(seat, fx, fy):
     return (round(cx + lx * rx + ly * dx), round(cy + lx * ry + ly * dy))
 
 W, H = app.W, app.H
+def near_buttons(pos):
+    """On (or right by) the round menu / undo buttons, which sit on top of the panels."""
+    r = max(22, min(W, H) // 22)
+    return any(math.dist(pos, c) < 2 * r for c in (app.menu_pos(r), app.undo_pos(r)))
 for seating in lifepi.SEATINGS:
     for n in range(1, lifepi.MAX_PLAYERS + 1):
         app.modals.clear(); app.settings["seating"] = seating; app.start_game(n, 40); app.render()
@@ -196,15 +200,17 @@ for seating in lifepi.SEATINGS:
         for k, s in enumerate(seats):
             for fx, d in ((0.25, -1), (0.75, 1)):
                 pos = seat_point(s, fx, 0.5)
-                if app.menu_pos(max(22, min(W, H) // 22)) and math.dist(pos, app.menu_pos(max(22, min(W, H) // 22))) < 60:
-                    pos = seat_point(s, 0.15 if d < 0 else 0.85, 0.42)   # step around the menu button
+                if near_buttons(pos):
+                    pos = seat_point(s, 0.15 if d < 0 else 0.85, 0.42)   # step around the menu / undo buttons
                 before = [p["life"] for p in app.players]
                 tap(pos)
                 after = [p["life"] for p in app.players]
                 assert after[k] == before[k] + d and sum(after) == sum(before) + d, (seating, n, k, d, pos)
         # the name strip opens the sheet facing that player (end seats: 90 / 270)
         for k, s in enumerate(seats):
-            tap(seat_point(s, 0.5, 0.06))
+            pos = next(pt for fx in (0.5, 0.25, 0.75, 0.1, 0.9) for pt in [seat_point(s, fx, 0.06)]
+                       if not near_buttons(pt))
+            tap(pos)
             m = app.modals[-1] if app.modals else None
             assert m and m["kind"] == "player" and m["idx"] == k, (seating, n, k)
             assert m["angle"] == round(s.angle / 90) * 90 % 360
@@ -218,7 +224,7 @@ app.push("player", idx=end, angle=270); app.render()
 pygame.image.save(app.canvas, os.path.join(shots, "sheet_end_seat.png"))
 v = lifepi.View(app, (0, 0, W, H), 270); assert (v.w, v.h) == (H, W)
 plus = [z for z in app.zones if z[2]]
-assert len(plus) == 2 * (4 + 6)                  # 4 counters + damage from 6 seats
+assert len(plus) == 2 * (4 + 1 + 6)              # 4 counters, each opponent, damage from 6 seats
 poison0 = app.players[end]["counters"]["poison"]
 # press the first "+" on the rotated sheet: find its canvas point by scanning the zone
 hit = next((x, y) for x in range(0, W, 4) for y in range(0, H, 4) if plus[1][0]((x, y)))
@@ -234,7 +240,7 @@ assert len(r8.players) == 8 and r8.players[0]["cmd"][7] == 4 and r8.settings["se
 app.settings["seating"] = "table"; app.start_game(4, 40); app.render()
 print("8 players / rotated sheets ok")
 
-# --- commander damage pane (Lifetap style): tap a life total ---------------------------
+# --- commander damage pane (Lifetap style): the "Cmdr dmg" strip opens it ---------------
 def find_point(zone, avoid=()):
     """A canvas point inside zone (a hit function) and outside the zones in avoid."""
     for x in range(2, W, 6):
@@ -246,25 +252,26 @@ for seating in ("table", "ends", "round"):
     app.modals.clear(); app.settings["seating"] = seating; app.start_game(6, 40); app.first_anim = None; app.render()
     for k, s in enumerate(app.seats):
         app.modals.clear(); app.render()
-        tap(seat_point(s, 0.5, 0.5))                         # on the life total
+        pos = next(pt for fx in (0.5, 0.3, 0.7) for pt in [seat_point(s, fx, 0.93)] if not near_buttons(pt))
+        tap(pos)                                             # on the bottom strip
         m = app.modals[-1] if app.modals else None
         assert m and m["kind"] == "cmd" and m["idx"] == k, (seating, k, m)
         assert m["angle"] == round(s.angle / 90) * 90 % 360
         app.render()                                         # draws facing that player
     app.modals.clear(); app.render()
-    life = app.players[1]["life"]
-    tap(seat_point(app.seats[1], 0.12, 0.5)); tap(seat_point(app.seats[1], 0.88, 0.5))
-    assert app.players[1]["life"] == life and not app.modals  # the halves either side still -1 / +1
-    tap(seat_point(app.seats[1], 0.5, 0.95))                 # the damage strip opens it too
-    assert app.modals[-1]["kind"] == "cmd" and app.modals[-1]["idx"] == 1
-print("life total / damage strip open commander damage; halves still -/+")
+    # the life number itself is part of the -/+ halves: left of centre -1, right of centre +1
+    for fx, d in ((0.45, -1), (0.55, 1)):
+        life = app.players[1]["life"]
+        tap(seat_point(app.seats[1], fx, 0.5))
+        assert app.players[1]["life"] == life + d and not app.modals, (seating, fx)
+print("damage strip opens commander damage; the life number is -/+ like the rest")
 
 app.modals.clear(); app.settings["seating"] = "ends"; app.start_game(6, 40); app.first_anim = None; app.render()
 end = next(k for k, s in enumerate(app.seats) if s.angle == 270)    # sideways pane at a table end
-tap(seat_point(app.seats[end], 0.5, 0.5)); app.render()
+tap(seat_point(app.seats[end], 0.5, 0.93)); app.render()                # its "Cmdr dmg" strip
 pygame.image.save(app.canvas, os.path.join(shots, "cmd_pane_end.png"))
-z = app.zones                                  # [tile0 left -, tile0 right +, tile1 -, tile1 +, ..., more, done]
-assert len(z) == 2 * 6 + 2
+z = app.zones                                  # [tile0 left -, tile0 right +, ..., poison -, poison +, more, done]
+assert len(z) == 2 * (6 + 1) + 2
 target, src = app.players[end], 2
 life0 = target["life"]
 plus_pt, minus_pt = find_point(z[2 * src + 1][0]), find_point(z[2 * src][0])
@@ -278,7 +285,6 @@ tap(minus_pt); assert target["cmd"][src] == 0                # never below 0
 # the halves are each half of the tile, facing that player: the left of the tile is -, right is +
 tile = [pt for pt in ((x, y) for x in range(0, W, 3) for y in range(0, H, 3)) if z[2 * src][0](pt) or z[2 * src + 1][0](pt)]
 assert abs(sum(1 for pt in tile if z[2 * src][0](pt)) - len(tile) / 2) < len(tile) * 0.06
-tap(seat_point(app.seats[end], 0.5, 0.5)) if not app.modals else None
 z[-2][1]()                                                   # "Counters & more"
 assert app.modals[-1]["kind"] == "player" and app.modals[-1]["idx"] == end
 app.modals.clear(); app.settings["seating"] = "table"; app.start_game(4, 40); app.first_anim = None; app.render()
@@ -299,13 +305,13 @@ app.change_cmd(0, 2, 5, which=2); assert victim["cmd2"][2] == 0, "seat 2 has no 
 # the pane gets a tile per commander; the partner tile's halves work on the partner's damage
 app.render(); app.push("cmd", idx=0, angle=0); app.render()
 pygame.image.save(app.canvas, os.path.join(shots, "cmd_pane_partner.png"))
-z = app.zones; assert len(z) == 2 * 5 + 2
+z = app.zones; assert len(z) == 2 * (5 + 1) + 2
 d2 = victim["cmd2"][1]; tap(find_point(z[2 * 2 + 1][0])); assert victim["cmd2"][1] == d2 + 1 and victim["cmd"][1] == 11
 tap(find_point(z[2 * 2][0])); assert victim["cmd2"][1] == d2
 app.modals.clear()
 # the player sheet has a row per commander and a Partner switch
 app.push("player", idx=0, angle=0); app.render()
-assert len([zz for zz in app.zones if zz[2]]) == 2 * (4 + 5)          # -/+ for 4 counters + 5 commanders
+assert len([zz for zz in app.zones if zz[2]]) == 2 * (4 + 1 + 5)      # -/+ for 4 counters, each opponent, 5 commanders
 app.modals.clear()
 # seats swap with partner damage; saved; turning partner off forgets the second commander's damage
 app.swap_seats(1, 3)
@@ -315,6 +321,124 @@ assert rp.players[3]["partner"] and rp.players[0]["cmd2"][3] == d2
 app.set_partner(3, False); assert app.players[0]["cmd2"][3] == 0 and app.commanders() == [(j, 1) for j in range(4)]
 app.render()
 print("partner commanders ok (separate tracking, 21 from one partner, pane, sheet, swap, save)")
+
+# --- undo + history ---------------------------------------------------------------------
+app.settings["cmd_hits_life"] = True; app.modals.clear(); app.start_game(4, 40); app.first_anim = None
+app.undo.clear(); n_hist = len(app.history)
+for _ in range(5): app.change_life(1, -1)                    # quick taps: one entry, one undo step
+assert app.players[1]["life"] == 35 and len(app.history) == n_hist + 1 and len(app.undo) == 1
+assert app.history[-1]["d"] == -5 and "life -5" in app.undo_label() and "now 35" in app.undo_label(), app.undo_label()
+app.change_cmd(2, 0, 3)                                     # commander damage: one step (life follows it)
+assert app.players[2]["cmd"][0] == 3 and app.players[2]["life"] == 37 and len(app.undo) == 2
+assert f"{app.players[2]['name']}: commander damage from {app.players[0]['name']} +3" in app.history[-1]["text"], app.history[-1]
+app.change_counter(3, "poison", 2); app.change_opponents(0, -1)
+assert [p["life"] for p in app.players] == [40, 34, 36, 39] and app.players[3]["counters"]["poison"] == 2
+app.undo_last(); assert [p["life"] for p in app.players] == [40, 35, 37, 40]          # each opponent back
+app.undo_last(); assert app.players[3]["counters"]["poison"] == 0
+app.undo_last(); assert app.players[2]["cmd"][0] == 0 and app.players[2]["life"] == 40
+app.rename_player(1, "Ana Bell")                            # renamed since: Undo keeps the new name
+app.undo_last(); assert app.players[1]["life"] == 40 and app.players[1]["name"] == "Ana Bell"
+assert len(app.history) == n_hist and not app.undo
+app.undo_last(); assert app.toast[0] == "Nothing to undo"
+app.change_life(0, -3); app.undo[-1]["t"] -= lifepi.MERGE_TIME + 1    # a later tap is its own step
+app.change_life(0, -2); assert len(app.undo) == 2 and app.history[-1]["d"] == -2
+# a reset / new game is undoable too - the whole game comes back
+app.change_cmd(1, 3, 7); before = json.dumps(app.players)
+app.start_game(4, 40, reset=True); assert app.players[1]["cmd"][3] == 0
+assert app.history[-1]["kind"] == "game" and "reset" in app.history[-1]["text"]
+app.undo_last(); assert json.dumps(app.players) == before
+app.swap_seats(0, 1); assert app.players[0]["name"] == "Ana Bell"
+app.undo_last(); assert app.players[1]["name"] == "Ana Bell"
+# the undo button by the menu: tap undoes, hold opens the history
+app.render(); app.change_life(2, 4); app.render()
+r = max(22, min(W, H) // 22)
+tap(app.undo_pos(r)); assert app.players[2]["life"] == 40
+tap(app.undo_pos(r), hold=0.7); assert app.modals[-1]["kind"] == "history"
+app.render(); pygame.image.save(app.canvas, os.path.join(shots, "history.png"))
+assert any("Ana Bell" in e["text"] or "Player" in e["text"] for e in app.history)
+app.modals.clear()
+# history is saved; the snapshot carries it to phones
+app.change_life(0, -1); app.save_state()
+rh = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
+assert rh.history[-1]["text"] == app.history_text(app.history[-1]) and "life -1" in rh.history[-1]["text"]
+assert app.snapshot()["history"][0][1] == app.history_text(app.history[-1]) and app.snapshot()["undo"]
+print("undo + history ok (merged taps, cmd, counters, each opponent, reset, swap, button, saved)")
+
+# --- two taps for Reset / Quit / Start over a game / partner off -------------------------
+app.modals.clear(); app.start_game(4, 40); app.first_anim = None; app.change_life(0, -6)
+app.push("menu"); app.render()
+reset = app.zones[1]                                        # 2nd menu button: Reset this game
+tap(find_point(reset[0])); assert app.players[0]["life"] == 34 and app.is_armed("reset")
+app.render(); pygame.image.save(app.canvas, os.path.join(shots, "menu_armed.png"))
+tap(find_point(reset[0])); assert app.players[0]["life"] == 40 and not app.modals    # second tap: reset
+app.undo_last(); assert app.players[0]["life"] == 34
+app.push("menu"); app.render(); tap(find_point(app.zones[1][0])); app.armed = ("reset", time.time() - 5)
+app.step(); app.render(); tap(find_point(app.zones[1][0])); assert app.players[0]["life"] == 34   # timed out: arms again
+app.modals.clear(); app.armed = None
+app.push("menu"); app.render()
+quit_zone = app.zones[len(app.zones) - 1]                    # Quit: the last button
+tap(find_point(quit_zone[0])); assert app.running and app.is_armed("quit")
+app.armed = None; app.modals.clear()
+# New game over a game in progress: Start needs two taps; a fresh table starts at once
+app.push("newgame", n=4, life=40); app.render(); start = app.zones[-1]
+tap(find_point(start[0])); assert app.players[0]["life"] == 34 and app.is_armed("start")
+tap(find_point(app.zones[-1][0])); assert app.players[0]["life"] == 40 and not app.modals
+app.push("newgame", n=3, life=40); app.render(); tap(find_point(app.zones[-1][0]))
+assert len(app.players) == 3 and not app.modals                 # nothing to lose: one tap
+# partner off takes two taps (it forgets that commander's damage)
+app.start_game(4, 40); app.first_anim = None; app.set_partner(2, True); app.change_cmd(0, 2, 4, which=2)
+app.push("player", idx=2, angle=0); app.render()
+acts = [z for z in app.zones if not z[2]]                   # the top row of buttons (Done first)
+partner_btn = acts[-1]
+tap(find_point(partner_btn[0])); assert app.players[2]["partner"]
+tap(find_point(partner_btn[0])); assert not app.players[2]["partner"] and app.players[0]["cmd2"][2] == 0
+app.undo_last(); assert app.players[2]["partner"] and app.players[0]["cmd2"][2] == 4
+app.modals.clear()
+print("two-tap confirm ok (reset, quit, start over a game, partner off; times out)")
+
+# --- formats, each opponent, planar die, initials, warnings ------------------------------
+app.start_game(2, 20, fmt="duel"); app.first_anim = None
+assert app.settings["format"] == "duel" and not app.uses_cmd()
+app.players[0]["cmd"][1] = 25; assert app.ko_reason(app.players[0]) == ""      # no commanders in 1 v 1
+app.players[0]["cmd"][1] = 0
+app.render(); tap(seat_point(app.seats[0], 0.5, 0.93)); assert app.modals[-1]["kind"] == "player"   # strip: the sheet
+app.render(); assert len([z for z in app.zones if z[2]]) == 2 * (4 + 1)       # no commander rows
+app.modals.clear()
+app.start_game(2, 30, fmt="2hg"); app.players[0]["counters"]["poison"] = 10
+assert app.ko_reason(app.players[0]) == ""; app.players[0]["counters"]["poison"] = 15
+assert app.ko_reason(app.players[0]) == "poison"
+app.save_state(); assert lifepi.App(NS(windowed="800x480", rotate=None, fps=30)).settings["format"] == "2hg"
+snap = app.snapshot(); assert snap["format"] == "2hg" and snap["poison_ko"] == 15 and not snap["commander"]
+# the New game sheet: picking a format sets its life; "New players" doesn't keep names
+app.start_game(4, 40, fmt="commander"); app.rename_player(0, "Kai"); app.first_anim = None
+app.push("newgame", n=4, life=40); app.render()
+m = app.modals[-1]; fmt_btns = app.zones[:3]
+tap(find_point(fmt_btns[1][0])); assert m["format"] == "duel" and m["life"] == 20 and m["n"] == 2
+tap(find_point(app.zones[0][0])); assert m["format"] == "commander" and m["life"] == 40
+m["n"] = 4; app.render(); pygame.image.save(app.canvas, os.path.join(shots, "newgame.png"))
+keep = app.zones[-2]; tap(find_point(keep[0])); assert m["keep"] is False
+tap(find_point(app.zones[-1][0]))
+assert app.players[0]["name"] == "Player 1" and app.settings["format"] == "commander"
+app.undo_last(); assert app.players[0]["name"] == "Kai"
+# planar die: planeswalk / chaos / blank
+app.push("dice", result="", sub=""); app.render()
+planar = app.zones[7]                                       # d4..d20, coin, then the planar die
+faces = set()
+for _ in range(60):
+    tap(find_point(planar[0])); faces.add(app.modals[-1]["result"])
+assert faces == {"Planeswalk", "Chaos", "Blank"} and app.modals[-1]["sub"] == "planar die", faces
+app.modals.clear()
+# initials on damage tiles; names up to 24 characters
+assert lifepi.initials("Ana Bell") == "AB" and lifepi.initials("Player 3") == "P3" and lifepi.initials("kai") == "KA"
+app.rename_player(1, "A" * 40); assert len(app.players[1]["name"]) == lifepi.NAME_MAX == 24
+app.players[0]["life"] = 4; app.players[0]["cmd"][1] = 16; app.players[0]["counters"]["poison"] = 8
+app.players[1]["life"] = -2; app.render()
+pygame.image.save(app.canvas, os.path.join(shots, "warnings.png"))
+app.push("cmd", idx=0, angle=0); app.render(); pygame.image.save(app.canvas, os.path.join(shots, "cmd_pane_warn.png"))
+poison = app.zones[2 * 4 + 1]                               # the poison tile's + half (after 4 commanders)
+tap(find_point(poison[0])); assert app.players[0]["counters"]["poison"] == 9
+app.modals.clear(); app.start_game(4, 40); app.first_anim = None
+print("formats, each opponent, planar die, initials, warnings ok")
 
 # --- random first player on new game ------------------------------------------------
 def land(a):                                     # fast-forward the spin
