@@ -5,14 +5,17 @@
 #   ./install.sh --spotify    also make this Pi a Spotify Connect speaker called "LifePi"
 #                             (go-librespot; needs Spotify Premium) - menu > Music shows and
 #                             controls what's playing
-# Options combine: ./install.sh --autostart --spotify
+#   ./install.sh --tv         when a TV is plugged into HDMI: show the touchscreen on it and play
+#                             the sound through it (labwc desktop; needs wl-mirror)
+# Options combine: ./install.sh --autostart --spotify --tv
 set -euo pipefail
 cd "$(dirname "$0")"
-autostart=0 spotify=0
+autostart=0 spotify=0 tv=0
 for arg in "$@"; do
   case "$arg" in
     --autostart) autostart=1 ;;
     --spotify) spotify=1 ;;
+    --tv) tv=1 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -88,5 +91,29 @@ UNIT
   systemctl --user daemon-reload
   systemctl --user enable --now lifepi-spotify.service
   echo "Spotify: in the Spotify app (Premium), tap the speaker icon and choose \"LifePi\"."
+fi
+if (( tv )); then
+  sudo apt-get install -y wl-mirror wlr-randr
+  install -Dm755 tv-mirror.sh "$HOME/.local/bin/lifepi-mirror"
+  mkdir -p "$HOME/.config/autostart"
+  cat > "$HOME/.config/autostart/lifepi-mirror.desktop" <<DESK
+[Desktop Entry]
+Type=Application
+Name=LifePi TV mirror
+Comment=Show the touchscreen and play the sound on an HDMI TV
+Exec=$HOME/.local/bin/lifepi-mirror
+NoDisplay=true
+DESK
+  # keep LifePi's own window on the touchscreen when a TV is connected (labwc window rule).
+  # Only edits an existing user rc.xml - creating one would hide the system's touch settings.
+  rc="$HOME/.config/labwc/rc.xml"
+  if [[ -f "$rc" ]] && ! grep -q 'identifier="lifepi"' "$rc"; then
+    sed -i 's#</openbox_config>#\t<windowRules>\n\t\t<windowRule identifier="lifepi">\n\t\t\t<action name="MoveToOutput" output="DSI-1"/>\n\t\t</windowRule>\n\t</windowRules>\n</openbox_config>#' "$rc"
+    pkill -HUP -x labwc 2>/dev/null || true
+  fi
+  if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+    setsid "$HOME/.local/bin/lifepi-mirror" >/dev/null 2>&1 < /dev/null &
+  fi
+  echo "TV: plug a TV into HDMI - it shows the touchscreen and plays the sound (starts at every login)."
 fi
 echo "Done. Run: ~/.local/bin/lifepi   (drop your own backgrounds in ~/.local/share/lifepi/images)"

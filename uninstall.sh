@@ -16,6 +16,12 @@ if [[ -f "$HOME/.config/systemd/user/lifepi-spotify.service" ]]; then
   rm -f "$HOME/.config/systemd/user/lifepi-spotify.service" && removed+=("lifepi-spotify.service")
   systemctl --user daemon-reload 2>/dev/null || true
 fi
+# TV mirror (install.sh --tv); the labwc window rule is harmless and stays
+pkill -f "[l]ifepi-mirror" 2>/dev/null || true
+pkill -x wl-mirror 2>/dev/null || true
+for f in "$HOME/.local/bin/lifepi-mirror" "$HOME/.config/autostart/lifepi-mirror.desktop"; do
+  [[ -e "$f" ]] && rm -f "$f" && removed+=("$f")
+done
 [[ -e "$HOME/.local/bin/go-librespot" ]] && rm -f "$HOME/.local/bin/go-librespot" && removed+=("$HOME/.local/bin/go-librespot")
 for f in "$HOME/.local/bin/lifepi" "$HOME/.local/bin/lifepi.previous" "$HOME/.local/bin/lifepi.new" \
          "$HOME/.local/share/applications/lifepi.desktop" "$HOME/.config/autostart/lifepi.desktop" \
