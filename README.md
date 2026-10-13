@@ -192,13 +192,13 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 Cut a release by pushing a version tag (bump `VERSION` in `lifepi.py` first):
 
 ```bash
-git tag v1.8.1 && git push origin v1.8.1
+git tag v1.8.2 && git push origin v1.8.2
 ```
 
 [`release.yml`](.github/workflows/release.yml) first runs **every** test - the whole CI suite below
 plus the container tests - and publishes only if all of them pass:
 
-- the container image `ghcr.io/therealshadoh/lifepi-web:1.8.1` and `:1.8` (amd64 + arm64)
+- the container image `ghcr.io/therealshadoh/lifepi-web:1.8.2` and `:1.8` (amd64 + arm64)
 - a [GitHub Release](https://github.com/TheRealShadoh/LifePi/releases) with release notes and the
   tested phone app attached (`lifepi-web.zip`)
 - the phone app at https://therealshadoh.github.io/LifePi/ (GitHub Pages; controlled by the

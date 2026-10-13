@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -89,7 +89,7 @@ MAX_PLAYERS = 8
 ROWS = {1: [1], 2: [1, 1], 3: [2, 1], 4: [2, 2], 5: [3, 2], 6: [3, 3], 7: [4, 3], 8: [4, 4]}
 SEATINGS = {"table": "Table  ===", "ends": "Ends  -=-", "round": "Round", "upright": "Upright"}
 HOLD_DELAY = 0.45
-IDLE_WAIT_MS = 100                                   # idle loop: longest wait for input / background work
+IDLE_FPS = 10                                        # frame rate while nothing is happening
 BOARD_GUARD = 0.4                  # s after a sheet closes during which board taps are ignored
 NAME_MAX = 24
 CONFIRM_GAP = 0.35                                 # a confirming tap must come at least this late
@@ -3213,7 +3213,7 @@ class App:
                 self.step()
                 # phone app: a frame per screen refresh only while something is happening -
                 # idle, wake ~10x a second instead of 60 (phone batteries)
-                await asyncio.sleep(IDLE_WAIT_MS / 1000 if self.idle else 0)
+                await asyncio.sleep(1 / IDLE_FPS if self.idle else 0)
         finally:
             self.end()
 
@@ -3237,12 +3237,9 @@ class App:
 
     def step(self):
         """One frame: input, timers, phones, drawing, autosave. Idle (nothing moving, no finger
-        down): wait up to IDLE_WAIT for input instead of spinning at full frame rate - a touch
-        still wakes it at once; background work (phones, downloads) is picked up within it."""
-        if self.idle and not WEB:
-            e = pygame.event.wait(IDLE_WAIT_MS)
-            if e.type != pygame.NOEVENT:
-                self.handle(e)
+        down) it runs at IDLE_FPS instead of the full frame rate; the first touch starts full
+        speed again. (pygame.event.wait would be nicer, but SDL polls under Wayland and that
+        cost more CPU than it saved - measured on a Pi 4.)"""
         for e in pygame.event.get():
             self.handle(e)
         self.tick_holds()
@@ -3276,8 +3273,7 @@ class App:
         if self.state_dirty and now - self.last_save > SAVE_INTERVAL:
             self.save_state()
         self.idle = not self.busy()
-        if not self.idle:
-            self.clock.tick(self.args.fps)
+        self.clock.tick(IDLE_FPS if self.idle and not WEB else self.args.fps)
 
     def end(self):
         if self.state_dirty:

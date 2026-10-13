@@ -590,9 +590,7 @@ app.modals.clear(); app.fx.clear(); app.toast = ("", 0); app.armed = None; app.f
 app.pointers.clear(); app.save_state(); app.snap_dirty = False; app.render(); app.step()
 assert app.idle, "an untouched table should idle"
 t0 = time.time(); app.step(); waited = time.time() - t0
-assert 0.07 < waited < 0.5, waited                          # waited for input (up to IDLE_WAIT_MS)...
-pygame.event.post(pygame.event.Event(pygame.USEREVENT)); t0 = time.time(); app.step()
-assert time.time() - t0 < 0.07                              # ...but input wakes it at once
+assert 0.07 < waited < 0.3, waited                          # idle frames: IDLE_FPS, not the full rate
 app.change_life(0, 1); app.step(); assert not app.idle      # something changed: full frame rate
 app.change_life(0, -1)
 # casting: Stop casting ends the session (receiver app closed, connection dropped)
