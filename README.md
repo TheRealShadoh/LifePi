@@ -52,7 +52,7 @@ life counter — released under the MIT licence so anyone can use, fork and impr
 
 **Around the table**
 - **Music:** the Pi can be a Spotify Connect speaker called *LifePi*; menu > **Music** shows what's playing and has play / pause, skip and volume ([details](#music-spotify))
-- **Damage sounds:** a short grunt (or a soft tock) when someone takes damage; menu > **Sounds** picks which, or off ([details](#sounds))
+- **Damage sounds:** a grunt when someone loses life, a metal clang for commander damage, a bubble for poison (or a soft tock for all); menu > **Sounds** picks which, or off ([details](#sounds))
 - **TV on the Pi's HDMI:** plug in a TV and it shows the touchscreen and plays the sound ([details](#tv-on-the-pis-hdmi))
 - **Phones as controllers:** everyone on the same Wi-Fi scans a QR code and runs their own life, counters and commander damage from their phone - changes show up instantly on the Pi and on every other phone
 - **TV view over Wi-Fi:** a live scoreboard for a big screen - cast it to a Chromecast / Google TV / Nvidia Shield from the menu (and **Stop casting** when you're done), open it in a smart-TV browser, or mirror a phone to a Roku
@@ -141,19 +141,26 @@ the user service `lifepi-spotify`, settings in `~/.config/go-librespot/config.ym
 
 ## Sounds
 
-When someone takes damage - losing life, commander damage, poison - LifePi plays a sound. **Menu > Sounds**
-switches between:
+When someone takes damage, LifePi plays a short sound - a different kind for each sort of damage:
 
-- **Sounds: grunts** (default) - one of six short recorded "hurt" grunts, picked at random and never the
-  same one twice in a row
-- **Sounds: tock** - a short synthesised knock with a click that carries over music
-- **Sounds: off**
+| Damage | Sound |
+|---|---|
+| life lost | a "hurt" grunt (six of them) |
+| commander damage | a heavy metal clang (three) |
+| poison | a bubble (three) |
 
-Each choice plays a sample. A run of quick taps or a held −10 makes one sound per hit, not one per point,
-and gaining life is silent. Sounds play on the Pi's default audio output (the TV with
-[`--tv`](#tv-on-the-pis-hdmi)); they aren't played in the phone app or in Docker. The grunts are
-["Hurt Sound Effects" by EZduzziteh](https://opengameart.org/content/hurt-sound-effects) (CC0 - public domain),
-trimmed and levelled, and built into `lifepi.py` so updates bring them along.
+Within each kind it picks at random and never plays the same clip twice in a row. **Menu > Sounds** switches
+between **grunts** (the sounds above, the default), **tock** (one short synthesised knock for every kind of
+damage, with a click that carries over music) and **off**; each choice plays a sample.
+
+A run of quick taps or a held −10 makes one sound per hit, not one per point; commander damage that also
+takes life plays just the clang; gaining life or taking damage back is silent. Sounds play on the Pi's
+default audio output (the TV with [`--tv`](#tv-on-the-pis-hdmi)); they aren't played in the phone app or in
+Docker. All clips are CC0 (public domain), trimmed and levelled, and built into `lifepi.py` so updates bring
+them along:
+["Hurt Sound Effects" by EZduzziteh](https://opengameart.org/content/hurt-sound-effects) (grunts),
+["Impact Sounds" by Kenney](https://kenney.nl/assets/impact-sounds) (clang),
+["Bubble Sound Effects" by Brian MacIntosh](https://opengameart.org/content/bubble-sound-effects) (bubbles).
 
 ## TV on the Pi's HDMI
 
@@ -323,7 +330,7 @@ All headless; CI runs them on every push and before every release.
 
 | Test | Covers |
 |---|---|
-| `SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` | the app itself: rotation and touch mapping, tap / hold, slides and palm brushes not counting as taps, taps after a sheet closes, every seating style for 1–8 players (each screen point belongs to one seat, clockwise order, taps on rotated seats), modals and rotated sheets, the menu facing whoever opened it, drag-to-swap, the commander damage pane (halves, hold, rotated, poison tile), partner commanders (separate tracking, KO rules, swaps, saves), undo + history (merged taps, resets, swaps, the button, saved), two-tap confirms (double taps don't count, time-out), formats, each opponent, the planar die, warnings, random first player (incl. fairness) and in the history, the turn tracker, random card art, search cache and suggestions incl. commanders first and *Search again* (mocked Scryfall), the damage sounds (grunts never repeat back to back, grunts / tock / off), Music against a stand-in speaker, Stop casting, the idle frame rate, the desktop icon, the update check (toast + dot, Check for updates, bad downloads rejected, update + restart), saving / restart / crash / corrupt-save recovery, the installers' executable bits |
+| `SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` | the app itself: rotation and touch mapping, tap / hold, slides and palm brushes not counting as taps, taps after a sheet closes, every seating style for 1–8 players (each screen point belongs to one seat, clockwise order, taps on rotated seats), modals and rotated sheets, the menu facing whoever opened it, drag-to-swap, the commander damage pane (halves, hold, rotated, poison tile), partner commanders (separate tracking, KO rules, swaps, saves), undo + history (merged taps, resets, swaps, the button, saved), two-tap confirms (double taps don't count, time-out), formats, each opponent, the planar die, warnings, random first player (incl. fairness) and in the history, the turn tracker, random card art, search cache and suggestions incl. commanders first and *Search again* (mocked Scryfall), the damage sounds (grunt / clang / bubble per kind of damage, no clip twice in a row, grunts / tock / off), Music against a stand-in speaker, Stop casting, the idle frame rate, the desktop icon, the update check (toast + dot, Check for updates, bad downloads rejected, update + restart), saving / restart / crash / corrupt-save recovery, the installers' executable bits |
 | `SDL_VIDEODRIVER=dummy python3 tests/companion_test.py` | the Phones & TV server: PIN and lock-out, every phone action (undo, each opponent, formats included), bad input, live updates, seat positions matching the Pi, art serving |
 | `python tests/phone_test.py` | the phone page (QR code) in headless Chrome on a busy table (another phone tapping every 150 ms): the seat picker on first join, the life number as -/+, starting games (two taps, formats) and changing seating from the phone, scrolling sheets, the commander damage sheet (halves, hold, partner and poison tiles), undo, history, the offline banner, force landscape (needs Chrome) |
 | `python web/build.py && python tests/web_test.py` | the phone app end to end in headless Chrome at phone size: boot, real touch input, holds, Scryfall in the browser, reload, the layout staying put when the phone turns, starting offline (needs Chrome and internet) |
@@ -340,8 +347,8 @@ and card art are © Wizards of the Coast LLC. Card data and images are fetched f
 [Scryfall API](https://scryfall.com/docs/api) on the user's request, rate-limited, cached
 locally, never bundled in this repository, and shown with the artist credit next to the art.
 LifePi is not affiliated with Scryfall, Spotify or any other life-counter app; Spotify is a trademark of
-Spotify AB, and the Music feature uses the independent open-source go-librespot. The damage grunts are
-["Hurt Sound Effects" by EZduzziteh](https://opengameart.org/content/hurt-sound-effects), released as CC0.
+Spotify AB, and the Music feature uses the independent open-source go-librespot. The damage sounds are
+CC0 clips by EZduzziteh, Kenney and Brian MacIntosh (see [Sounds](#sounds)).
 
 ## Roadmap / good first issues
 
