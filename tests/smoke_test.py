@@ -651,7 +651,7 @@ app.push("menu"); app.render(); tog = [z for z in app.zones if z[1] == app.toggl
 tog[0][1](); app.modals.clear(); assert not app.settings["sounds"]
 time.sleep(lifepi.SFX_GAP + 0.02); app.change_life(0, -1); assert snd.n == 3           # off: silent
 app.toggle_sounds(); assert snd.n == 4                    # on again: plays a sample
-pcm = lifepi.damage_sound(44100, 2); assert len(pcm) == int(44100 * 0.11) * 2 * 2 and max(pcm) > 0
+pcm = lifepi.damage_sound(44100, 2); assert len(pcm) == int(44100 * 0.12) * 2 * 2 and max(pcm) > 0
 real = lifepi.App.load_sounds(app); assert real is False or real.get_length() > 0.05     # dummy audio or none
 app.change_cmd(0, 1, -2); app.change_life(0, 1)
 

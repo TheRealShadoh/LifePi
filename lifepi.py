@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -137,19 +137,22 @@ async def fetch_bytes(url):
 
 
 def damage_sound(rate, channels):
-    """A short, soft low "thock" for damage, synthesised (no sound files): a 150 Hz tone with
-    a little second harmonic, a quick pitch drop and a fast decay, quiet. 16-bit PCM."""
+    """A short "tock" for damage, synthesised (no sound files), 16-bit PCM. Two parts: a body
+    (a 190 Hz tone dropping to ~140 Hz) and a bright click around 1.7 kHz. The click is what
+    makes it heard over music and through TV speakers, which barely play the low body - the
+    first version (low thud only, ~-13 dBFS) was inaudible with Spotify playing on a TV."""
     import array
-    n = int(rate * 0.11)
+    n = int(rate * 0.12)
     out = array.array("h")
-    phase = 0.0
+    body = click = 0.0
     for k in range(n):
         t = k / rate
-        f = 150 * (1 - 0.25 * min(1.0, t / 0.11))               # drops a little: a thud, not a beep
-        phase += 2 * math.pi * f / rate
-        env = min(1.0, k / (rate * 0.004)) * math.exp(-t / 0.03)  # 4 ms fade-in, then dies away
-        v = int(32767 * 0.22 * env * (math.sin(phase) + 0.3 * math.sin(2 * phase)) / 1.3)
-        out.extend([v] * channels)
+        attack = min(1.0, k / (rate * 0.002))                     # 2 ms: no pop, still crisp
+        body += 2 * math.pi * 190 * (1 - 0.25 * min(1.0, t / 0.12)) / rate
+        click += 2 * math.pi * 1700 / rate
+        v = (0.55 * math.exp(-t / 0.035) * (math.sin(body) + 0.35 * math.sin(2 * body))
+             + 0.35 * math.exp(-t / 0.012) * math.sin(click))
+        out.extend([int(32767 * 0.5 * attack * v)] * channels)
     return out.tobytes()
 
 
