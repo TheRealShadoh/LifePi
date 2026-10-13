@@ -699,6 +699,37 @@ lp = lifepi.damage_sound(44100, 1, low=True); assert len(lp) == int(44100 * 0.4)
 app.start_game(4, 40); app.first_anim = None
 print("death sound ok")
 
+# audio asks PipeWire for a big buffer: a small one made every stream (the music too) run with
+# tiny buffers and stutter on HDMI
+assert os.environ.get("PIPEWIRE_LATENCY") == "2048/48000" and os.environ.get("PULSE_LATENCY_MSEC")
+if real:
+    import array as _arr, math as _m
+    def loudness(snd):                                      # loudest 100 ms, dBFS
+        a = _arr.array("h", snd.get_raw()); rate, _, ch = pygame.mixer.get_init(); w = rate // 10 * ch
+        return max(20 * _m.log10(max(1, (sum(x * x for x in a[i:i + w]) / max(1, len(a[i:i + w]))) ** 0.5) / 32768)
+                   for i in range(0, max(1, len(a) - w), w // 4))
+    grunt = sum(map(loudness, real["hit"])) / 6
+    clang = sum(map(loudness, real["cmd"])) / 3
+    bubble = sum(map(loudness, real["poison"])) / 3
+    assert clang > grunt + 1.5 and abs(bubble - grunt) < 2.5, (grunt, clang, bubble)   # heard over music
+print("audio buffer, sound levels ok")
+
+# shapes have smooth (anti-aliased) edges, so a TV blowing the screen up shows no stair-steps,
+# and no dark rim (transparent pixels carry the shape's colour)
+rr = app.rrect(60, 30, (200, 40, 40), 15)
+edge = [rr.get_at((x, 0))[3] for x in range(0, 16)]
+assert any(0 < a_ < 255 for a_ in edge), edge                 # partial alpha = smoothed
+assert all(rr.get_at((x, 0))[:3] == (200, 40, 40) for x in range(16) if 0 < rr.get_at((x, 0))[3]), "dark rim"
+pl = app.make_pill("KO", 24, bg=(0, 0, 0), alpha=225, outline=(255, 255, 255))
+assert any(0 < pl.get_at((x, 0))[3] < 255 for x in range(pl.get_height() // 2))
+sg = app.sign(True, 40); assert any(0 < sg.get_at((x, y))[3] < 110 for x in range(40) for y in range(40))
+tri = pygame.Surface((60, 60), pygame.SRCALPHA); app.poly(tri, (255, 255, 255), [(5, 5), (55, 15), (20, 55)])
+assert len({tri.get_at((x, y))[3] for x in range(60) for y in range(60)}) > 10   # graded edge
+n_art = len(app.img_cache)
+for k in range(300): app.rrect(20 + k, 20, (1, 2, 3), 5)
+assert len(app.img_cache) == n_art                         # shapes never push card art out
+print("smooth shapes ok")
+
 # music: the Spotify Connect speaker's local API (a stand-in server here)
 import http.server, threading as _th
 sent = []

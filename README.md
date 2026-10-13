@@ -151,7 +151,7 @@ When someone takes damage, LifePi plays a short sound - a different kind for eac
 | Damage | Sound |
 |---|---|
 | life lost | a "hurt" grunt (six of them) |
-| commander damage | a heavy metal clang (three) |
+| commander damage | a heavy metal clang (three), a little louder than the rest so it carries over music |
 | poison | a bubble (three) |
 | knocked out | "You lose!" (two voices) |
 
@@ -306,6 +306,7 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 | No sound from the TV | with `--tv` the sound follows the TV when it's plugged in; without it, pick the HDMI output in the desktop's volume menu. PipeWire only finds HDMI audio when it starts - plugging the TV in before booting also works |
 | Spotify app doesn't list *LifePi* | the phone must be on the same Wi-Fi as the Pi, the account needs Premium, and the speaker must be running: `systemctl --user status lifepi-spotify` |
 | Menu > Music says Spotify isn't set up | run `./install.sh --spotify` |
+| Music cuts out for a moment | that's audio buffers running dry, not the bit rate. LifePi 1.12.1+ asks for large buffers, and `./install.sh --spotify` stops any app forcing tiny ones (takes effect when PipeWire next starts, e.g. after a reboot). `pw-top` shows the HDMI output's QUANT - 1024 or more is good, and its ERR count shouldn't keep climbing |
 | No damage sound | menu > Sounds must not be *off*, and the Pi needs an audio output (TV with `--tv`, headphone jack, USB or Bluetooth speaker) |
 | Taps land in the wrong place | turn off any rotation set in the OS and use LifePi's own *Rotate screen*; with a TV connected, the touchscreen must stay mapped to `DSI-1` in `~/.config/labwc/rc.xml` (Pi OS does this) |
 | Menu opens facing the wrong side | tap the half of the round button nearest you, or use *Turn* in the menu's header |

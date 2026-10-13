@@ -16,6 +16,8 @@ if [[ -f "$HOME/.config/systemd/user/lifepi-spotify.service" ]]; then
   rm -f "$HOME/.config/systemd/user/lifepi-spotify.service" && removed+=("lifepi-spotify.service")
   systemctl --user daemon-reload 2>/dev/null || true
 fi
+pw="$HOME/.config/pipewire/pipewire.conf.d/50-lifepi.conf"
+[[ -e "$pw" ]] && rm -f "$pw" && removed+=("$pw")
 # TV mirror (install.sh --tv); the labwc window rule is harmless and stays
 pkill -f "[l]ifepi-mirror" 2>/dev/null || true
 pkill -x wl-mirror 2>/dev/null || true

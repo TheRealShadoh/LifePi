@@ -90,6 +90,15 @@ WantedBy=default.target
 UNIT
   systemctl --user daemon-reload
   systemctl --user enable --now lifepi-spotify.service
+  # Music on a Pi stutters when PipeWire runs tiny buffers (any app can ask for them): keep them
+  # at least ~21 ms. Picked up when PipeWire next starts (the TV mirror restarts it for HDMI).
+  mkdir -p "$HOME/.config/pipewire/pipewire.conf.d"
+  cat > "$HOME/.config/pipewire/pipewire.conf.d/50-lifepi.conf" <<'PW'
+# LifePi: no tiny audio buffers, so the Spotify speaker plays without dropouts
+context.properties = {
+    default.clock.min-quantum = 1024
+}
+PW
   echo "Spotify: in the Spotify app (Premium), tap the speaker icon and choose \"LifePi\"."
 fi
 if (( tv )); then
