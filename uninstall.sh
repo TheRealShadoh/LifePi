@@ -10,6 +10,13 @@ purge=0
 pkill -TERM -f "[p]ython3 .*$HOME/.local/bin/lifepi" 2>/dev/null && sleep 1 || true   # it saves on SIGTERM
 
 removed=()
+# Spotify speaker (install.sh --spotify)
+if [[ -f "$HOME/.config/systemd/user/lifepi-spotify.service" ]]; then
+  systemctl --user disable --now lifepi-spotify.service 2>/dev/null || true
+  rm -f "$HOME/.config/systemd/user/lifepi-spotify.service" && removed+=("lifepi-spotify.service")
+  systemctl --user daemon-reload 2>/dev/null || true
+fi
+[[ -e "$HOME/.local/bin/go-librespot" ]] && rm -f "$HOME/.local/bin/go-librespot" && removed+=("$HOME/.local/bin/go-librespot")
 for f in "$HOME/.local/bin/lifepi" "$HOME/.local/bin/lifepi.previous" "$HOME/.local/bin/lifepi.new" \
          "$HOME/.local/share/applications/lifepi.desktop" "$HOME/.config/autostart/lifepi.desktop" \
          "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps/lifepi.png"; do
@@ -17,7 +24,7 @@ for f in "$HOME/.local/bin/lifepi" "$HOME/.local/bin/lifepi.previous" "$HOME/.lo
 done
 if (( purge )); then
   for d in "${XDG_CONFIG_HOME:-$HOME/.config}/lifepi" "${XDG_CACHE_HOME:-$HOME/.cache}/lifepi" \
-           "${XDG_DATA_HOME:-$HOME/.local/share}/lifepi"; do
+           "${XDG_DATA_HOME:-$HOME/.local/share}/lifepi" "${XDG_CONFIG_HOME:-$HOME/.config}/go-librespot"; do
     [[ -e "$d" ]] && rm -rf "$d" && removed+=("$d")
   done
 fi

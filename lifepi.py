@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.8.3"
+VERSION = "1.9.0"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -98,6 +98,10 @@ TURN = (110, 210, 255)                               # turn tracker colour (gold
 MERGE_TIME = 2.0                                    # taps this close together are one undo step
 UNDO_MAX = 60
 HISTORY_MAX = 300
+# Music: a Spotify Connect speaker on this machine (go-librespot, set up by install.sh --spotify)
+# that LifePi shows and controls through its local API
+SPOTIFY_API = os.environ.get("LIFEPI_SPOTIFY_API", "http://127.0.0.1:3678")
+SFX_GAP = 0.09                                       # at most one damage sound per this many seconds
 # formats: label, starting life, poison that knocks a player out, commander damage in play
 FORMATS = {"commander": ("Commander", 40, 10, True), "duel": ("1 v 1", 20, 10, False),
            "2hg": ("Two-Headed Giant", 30, 15, False)}
@@ -130,6 +134,33 @@ async def fetch_bytes(url):
             os.unlink(path)
         except OSError:
             pass
+
+
+def damage_sound(rate, channels):
+    """A short, soft low "thock" for damage, synthesised (no sound files): a 150 Hz tone with
+    a little second harmonic, a quick pitch drop and a fast decay, quiet. 16-bit PCM."""
+    import array
+    n = int(rate * 0.11)
+    out = array.array("h")
+    phase = 0.0
+    for k in range(n):
+        t = k / rate
+        f = 150 * (1 - 0.25 * min(1.0, t / 0.11))               # drops a little: a thud, not a beep
+        phase += 2 * math.pi * f / rate
+        env = min(1.0, k / (rate * 0.004)) * math.exp(-t / 0.03)  # 4 ms fade-in, then dies away
+        v = int(32767 * 0.22 * env * (math.sin(phase) + 0.3 * math.sin(2 * phase)) / 1.3)
+        out.extend([v] * channels)
+    return out.tobytes()
+
+
+def http_json(method, url, body=None, timeout=2.0):
+    """Small JSON request to a local API: returns (status, parsed body or None)."""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers={"Content-Type": "application/json"} if data else {})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read()
+        return r.status, (json.loads(raw) if raw.strip() else None)
 
 
 def spawn(coro_fn):
@@ -744,6 +775,7 @@ class App:
         self.settings = {"rotation": 0, "seating": "table", "cmd_hits_life": True,
                          "start_life": 40, "format": "commander", "companion": True, "companion_pin": "", "random_first": True,
                          "turn_tracker": False,   # optional: whose turn it is + the turn number
+                         "sounds": True,          # a soft sound when someone takes damage
                          "auto_rotate": False,    # phone app: follow the phone turning (off = stay put)
                          # installed copies: newest release seen, when we last asked, and the
                          # version whose "update available" banner was closed
@@ -800,6 +832,7 @@ class App:
         self.install_path = Path(getattr(args, "install_path", None) or __file__).resolve()
         self.update_state, self.update_error, self.restart_after = "", "", False
         self.idle = False
+        self.sfx, self.sfx_t = None, 0.0          # damage sound (loaded on first use)
         self.cast = None                          # (Chromecast, name) while casting the TV view
         self.art_results, self.art_pending, self.art_retry_at = queue.Queue(), set(), 0
         self.seats = []
@@ -890,6 +923,8 @@ class App:
             settings["random_first"] = s["random_first"]
         if isinstance(s.get("turn_tracker"), bool):
             settings["turn_tracker"] = s["turn_tracker"]
+        if isinstance(s.get("sounds"), bool):
+            settings["sounds"] = s["sounds"]
         if isinstance(s.get("auto_rotate"), bool):
             settings["auto_rotate"] = s["auto_rotate"]
         for key in ("update_latest", "update_dismissed"):
@@ -1474,6 +1509,8 @@ class App:
         if record:
             self.record(("life", i), i, "life", d, self.players[i]["life"] + d)
         self.players[i]["life"] += d
+        if d < 0:
+            self.play_damage()
         now = time.time()
         fx = self.fx.setdefault(i, {"d": 0, "t": 0})
         if now - fx["t"] > 1.8:
@@ -1487,6 +1524,8 @@ class App:
         new = max(0, c[key] + d)
         if new != c[key]:
             self.record(("counter", i, key), i, key, new - c[key], new)
+            if key == "poison" and new > c[key]:
+                self.play_damage()
         c[key] = new
         self.changed()
 
@@ -1526,6 +1565,8 @@ class App:
         track[src] = new
         if applied and self.settings["cmd_hits_life"]:
             self.change_life(i, -applied, record=False)
+        elif applied > 0:
+            self.play_damage()
         self.changed()
 
     def ko_reason(self, p):
@@ -1599,6 +1640,132 @@ class App:
             self.snap_dirty = True                 # phones/TV get the result now, not before
         if age >= a["land"] + FIRST_SHOW:
             self.first_anim = None
+
+    # ---- sounds
+    def play_damage(self):
+        """A soft sound when someone takes damage (menu > Sounds turns it off). Runs of quick
+        taps and hold-repeats make one sound per SFX_GAP, not one per point."""
+        if WEB or not self.settings["sounds"]:
+            return
+        now = time.time()
+        if now - self.sfx_t < SFX_GAP:
+            return
+        self.sfx_t = now
+        if self.sfx is None:
+            self.sfx = self.load_sounds()
+        if self.sfx:
+            self.sfx.play()
+
+    def load_sounds(self):
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+            rate, size, channels = pygame.mixer.get_init()
+            if size != -16:
+                raise pygame.error(f"unexpected sample format {size}")
+            return pygame.mixer.Sound(buffer=damage_sound(rate, channels))
+        except (pygame.error, NotImplementedError) as e:      # no sound card / audio server
+            print("sounds off:", e, file=sys.stderr)
+            return False
+
+    def toggle_sounds(self):
+        self.settings["sounds"] = not self.settings["sounds"]
+        self.changed()
+        if self.settings["sounds"]:
+            self.sfx_t = 0.0
+            self.play_damage()                       # a sample, so you know what you'll hear
+
+    # ---- music: the Pi as a Spotify Connect speaker (go-librespot), shown and controlled here
+    def open_music(self):
+        m = {"kind": "music", "api": None, "status": None, "cover": None, "cover_url": None}
+        self.push("music", **{k: v for k, v in m.items() if k != "kind"})
+        m = self.modals[-1]
+        threading.Thread(target=self.music_poll, args=(m,), daemon=True).start()
+
+    def music_poll(self, m):
+        """While the Music sheet is open: ask the speaker what's playing every ~1.5 s."""
+        while m in self.modals:
+            try:
+                code, st = http_json("GET", SPOTIFY_API + "/status")
+                m["api"], m["status"] = True, (st if code == 200 else None)
+            except (OSError, ValueError):
+                m["api"], m["status"] = False, None
+            url = ((m["status"] or {}).get("track") or {}).get("album_cover_url")
+            if url and url != m["cover_url"] and url.startswith("https://"):
+                m["cover_url"] = url
+                try:
+                    f = CACHE_DIR / ("cover-" + hashlib.sha1(url.encode()).hexdigest()[:16] + ".jpg")
+                    if not f.exists():
+                        f.write_bytes(http_get(url))
+                    m["cover"] = str(f)
+                except OSError:
+                    m["cover"] = None
+            self.dirty = True
+            m["poke"] = False
+            end = time.time() + 1.5
+            while time.time() < end and not m.get("poke") and m in self.modals:
+                time.sleep(0.05)
+
+    def music_cmd(self, m, path, body=None):
+        def work():
+            try:
+                http_json("POST", SPOTIFY_API + path, body)
+            except (OSError, ValueError) as e:
+                self.say(f"Music: {e}")
+            m["poke"] = True                         # refresh now, not in 1.5 s
+        threading.Thread(target=work, daemon=True).start()
+
+    def draw_music(self, m):
+        v = self.modal_view(m, "Music - Spotify")
+        u, W, H = v.u, v.w, v.h
+        self.button(v, (W - 2 * u, 0, 2 * u, u), "Done", self.pop, bg=BTN_ON)
+        st, size = m["status"], max(16, u * 0.42)
+
+        def lines(texts, y0):
+            for k, (t, c) in enumerate(texts):
+                self.text(v.surf, t, size, c, maxw=W - 40, shadow=False, center=(W // 2, y0 + k * size * 1.6))
+        if m["api"] is None:
+            lines([("Connecting to the speaker...", GREY)], H // 2)
+        elif not m["api"]:
+            lines([("Spotify isn't set up on this LifePi.", WHITE),
+                   ("To add it, run on the Pi:  ./install.sh --spotify", GREY),
+                   ("LifePi then shows up as a speaker in the Spotify app (Spotify Premium).", GREY)],
+                  int(H * 0.38))
+        elif not st or not st.get("track"):
+            lines([("Ready to play.", WHITE),
+                   ("In Spotify on your phone, tap the speaker icon", GREY),
+                   ("and choose \"LifePi\" - the music then plays here.", GREY)], int(H * 0.38))
+        else:
+            t = st["track"]
+            side = min(int(H * 0.5), int(W * 0.34))
+            box = pygame.Rect(u // 2, u + u // 2, side, side)
+            img = self.cover(m["cover"], side, side) if m.get("cover") else None
+            if img:
+                v.surf.blit(img, box)
+            else:
+                pygame.draw.rect(v.surf, BTN, box, border_radius=10)
+            x, tw = box.right + u // 2, W - box.right - u
+            self.text(v.surf, t.get("name", ""), u * 0.62, WHITE, maxw=tw, shadow=False, topleft=(x, box.y + 4))
+            self.text(v.surf, ", ".join(t.get("artist_names") or []), u * 0.44, GREY, maxw=tw, shadow=False,
+                      topleft=(x, box.y + u * 0.95))
+            self.text(v.surf, t.get("album_name", ""), u * 0.36, GREY, maxw=tw, shadow=False,
+                      topleft=(x, box.y + u * 1.6))
+            steps = max(1, as_int(st.get("volume_steps"), 100))
+            pct = round(100 * as_int(st.get("volume"), 0) / steps)
+            by = box.bottom - 2 * u - u // 3
+            bw = tw // 3
+            self.button(v, (x, by, bw, u), "Prev", lambda: self.music_cmd(m, "/player/prev"))
+            self.button(v, (x + bw, by, bw, u), "Play" if st.get("paused") else "Pause",
+                        lambda: self.music_cmd(m, "/player/playpause"), bg=BTN_OK)
+            self.button(v, (x + 2 * bw, by, bw, u), "Next", lambda: self.music_cmd(m, "/player/next"))
+            vy = by + u + u // 3
+            step = max(1, steps // 10)
+            self.button(v, (x, vy, bw, u), "Volume -",
+                        lambda: self.music_cmd(m, "/player/volume", {"volume": -step, "relative": True}))
+            self.text(v.surf, f"{pct}%", u * 0.5, WHITE, shadow=False, center=(x + bw + bw // 2, vy + u // 2))
+            self.button(v, (x + 2 * bw, vy, bw, u), "Volume +",
+                        lambda: self.music_cmd(m, "/player/volume", {"volume": step, "relative": True}))
+        v.finish()
 
     def toggle_random_first(self):
         self.settings["random_first"] = not self.settings["random_first"]
@@ -1947,6 +2114,8 @@ class App:
             (f"Cmdr dmg hits life: {'on' if st['cmd_hits_life'] else 'off'}", self.toggle_cmd, BTN),
             (f"Turn tracker: {'on' if st['turn_tracker'] else 'off'}", self.toggle_turn_tracker,
              BTN_ON if st["turn_tracker"] else BTN),
+            (f"Sounds: {'on' if st['sounds'] else 'off'}", self.toggle_sounds, BTN),
+            ("Music", self.open_music, BTN_ON),
             ("Phones & TV", self.open_remote, BTN_ON),
             ("Stop casting", self.stop_cast, BTN_BAD) if self.cast else ("Cast to TV", self.open_cast, BTN),
             ("Back to game", self.pop, BTN),
@@ -1954,7 +2123,8 @@ class App:
         ]
         armed = {"Reset this game": "reset", "Quit": "quit"}
         if WEB:                                   # no server, casting or quitting in a browser tab
-            items = [it for it in items if it[0] not in ("Phones & TV", "Cast to TV", "Quit")]
+            items = [it for it in items if it[0] not in ("Phones & TV", "Cast to TV", "Quit", "Music")
+                     and not it[0].startswith("Sounds")]
             items.insert(5, (f"Auto-rotate: {'on' if st['auto_rotate'] else 'off'}", self.toggle_auto_rotate, BTN))
         if self.update_available():
             items.insert(len(items) - (0 if WEB else 1),

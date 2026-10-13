@@ -1,6 +1,7 @@
 """Headless smoke test: SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py"""
 import math, os, sys, tempfile, time, json
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 tmp = tempfile.mkdtemp()
 for k in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
     os.environ[k] = os.path.join(tmp, k)
@@ -634,6 +635,72 @@ if {90, 270} & sides:                                   # an end seat: its side 
     app.render()                                        # a portrait menu draws fine
 app.modals.clear(); app.set_seating("table"); app.start_game(4, 40); app.first_anim = None
 print("menu faces whoever opened it ok")
+
+# damage sound: one soft sound per hit (not per point of a hold), on damage only, and switchable
+class FakeSound:
+    def __init__(self): self.n = 0
+    def play(self): self.n += 1
+snd = FakeSound(); app.sfx = snd; app.sfx_t = 0; app.settings["sounds"] = True
+app.change_life(0, -1); assert snd.n == 1
+app.change_life(0, -1); assert snd.n == 1                 # within SFX_GAP: same hit
+time.sleep(lifepi.SFX_GAP + 0.02); app.change_life(0, 3); assert snd.n == 1   # gaining life: silent
+app.change_cmd(0, 1, 2); assert snd.n == 2                # commander damage
+time.sleep(lifepi.SFX_GAP + 0.02); app.change_counter(0, "poison", 1); assert snd.n == 3
+time.sleep(lifepi.SFX_GAP + 0.02); app.change_counter(0, "poison", -1); assert snd.n == 3
+app.push("menu"); app.render(); tog = [z for z in app.zones if z[1] == app.toggle_sounds]; assert len(tog) == 1
+tog[0][1](); app.modals.clear(); assert not app.settings["sounds"]
+time.sleep(lifepi.SFX_GAP + 0.02); app.change_life(0, -1); assert snd.n == 3           # off: silent
+app.toggle_sounds(); assert snd.n == 4                    # on again: plays a sample
+pcm = lifepi.damage_sound(44100, 2); assert len(pcm) == int(44100 * 0.11) * 2 * 2 and max(pcm) > 0
+real = lifepi.App.load_sounds(app); assert real is False or real.get_length() > 0.05     # dummy audio or none
+app.change_cmd(0, 1, -2); app.change_life(0, 1)
+
+# music: the Spotify Connect speaker's local API (a stand-in server here)
+import http.server, threading as _th
+sent = []
+class Spot(http.server.BaseHTTPRequestHandler):
+    status = 204
+    def log_message(self, *a): pass
+    def do_GET(self):
+        if self.path == "/status" and Spot.status == 200:
+            body = json.dumps({"paused": False, "volume": 40, "volume_steps": 100, "track": {
+                "name": "Test Song", "artist_names": ["Some Band"], "album_name": "An Album",
+                "album_cover_url": None}}).encode()
+            self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(204); self.end_headers()
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        sent.append((self.path, json.loads(self.rfile.read(n)) if n else None))
+        self.send_response(200); self.send_header("Content-Length", "0"); self.end_headers()
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Spot)
+_th.Thread(target=srv.serve_forever, daemon=True).start()
+def music_open(api):
+    lifepi.SPOTIFY_API = api
+    app.modals.clear(); app.open_music(); m = app.modals[-1]
+    end = time.time() + 4
+    while time.time() < end and m["api"] is None: time.sleep(0.05)
+    app.render(); return m
+m = music_open("http://127.0.0.1:9")                       # nothing listening: not set up
+assert m["api"] is False
+app.render(); pygame.image.save(app.canvas, os.path.join(shots, "music_not_set_up.png"))
+m = music_open(f"http://127.0.0.1:{srv.server_port}")     # speaker running, nobody playing
+assert m["api"] is True and m["status"] is None
+Spot.status = 200; m["poke"] = True; end = time.time() + 4
+while time.time() < end and not m["status"]: time.sleep(0.05)
+app.render(); pygame.image.save(app.canvas, os.path.join(shots, "music_playing.png"))
+assert m["status"]["track"]["name"] == "Test Song"
+btn = {getattr(z[1], "__code__", None) and z[1].__code__.co_consts: z for z in app.zones if z[1]}
+labels = [z for z in app.zones if z[1] and z[1] != app.pop]
+for z in labels: z[1]()                                   # Prev, Play/Pause, Next, Volume -, Volume +
+end = time.time() + 3
+while time.time() < end and len(sent) < 5: time.sleep(0.05)
+paths = sorted(p for p, _ in sent)
+assert paths == sorted(["/player/prev", "/player/playpause", "/player/next", "/player/volume", "/player/volume"]), paths
+assert {"volume": -10, "relative": True} in [b for _, b in sent] and {"volume": 10, "relative": True} in [b for _, b in sent]
+app.modals.clear(); srv.shutdown()
+print("damage sound, music ok")
 
 # --- random card art for players without art ------------------------------------------
 serial = [0]

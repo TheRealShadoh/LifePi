@@ -32,6 +32,8 @@ life counter — released under the MIT licence so anyone can use, fork and impr
 - **Random card art:** players without art - at start-up, and new seats whenever a game grows - get a random commander's art from Scryfall (all different, credited). Art you pick is never replaced, a saved profile's art wins, and choosing **Colour** for a player keeps them on a colour. Offline it uses art already on the device, and tries again a minute later if there is none
 - **Player profiles** – name + art/colour are remembered and reloadable
 - **Random first player** on every new game (on by default; switch it in New game or on a phone): a highlight spins round the table and lands on who goes first, and a "1st" badge stays by their name all game; the game's history notes who went first
+- **Music (Spotify):** `./install.sh --spotify` makes the Pi a Spotify Connect speaker called *LifePi* (open-source [go-librespot](https://github.com/devgianlu/go-librespot); Spotify Premium). Anyone at the table picks *LifePi* in their Spotify app; menu > **Music** shows what's playing with cover art and has play / pause, previous, next and volume. Nothing is logged in on the Pi itself
+- **Damage sound:** a short, soft thud when someone takes damage (life, commander damage, poison) - one per hit, not one per point; menu > **Sounds** turns it off
 - **Turn tracker** (optional - menu > *Turn tracker*): a blue outline on whoever's turn it is and a *Turn 3 - Ana* pill by the menu button; tap the pill to pass the turn clockwise (knocked-out players are skipped), hold it to go back one. The turn number goes up each time play comes back round to whoever started; passes are in the history and can be undone
 - Dice (d4–d20), coin flip, planar die, random player
 - Player colours chosen to stay distinguishable with colour blindness; a short line under every life total shows which way is up (6 vs 9 from across the table)
@@ -45,7 +47,7 @@ life counter — released under the MIT licence so anyone can use, fork and impr
 
 ```bash
 git clone https://github.com/TheRealShadoh/LifePi.git && cd LifePi
-./install.sh              # add --autostart to launch at login
+./install.sh              # add --autostart to launch at login, --spotify for the Music speaker
 ~/.local/bin/lifepi
 ```
 
@@ -182,7 +184,7 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 - **Name strip** of a panel: opens that player's sheet, turned toward them - rename, card art, local image, colour,
   profiles, partner on / off, counters, *Each opponent* ±1, and every commander's damage as a list
 - Round button: main menu, opened facing whoever tapped it (reach across from the far side and it opens facing you; *Turn* in its header turns it to the other side) - new game, reset, history / undo, dice / coin, rotate, seating, commander damage rule,
-  turn tracker, Phones & TV, Cast to TV / Stop casting, *Update to ...* (when there is one) or *Check for updates*, quit; in the phone app also *Auto-rotate*
+  turn tracker, sounds on / off, Music, Phones & TV, Cast to TV / Stop casting, *Update to ...* (when there is one) or *Check for updates*, quit; in the phone app also *Auto-rotate*
 - **New game:** format (Commander / 1 v 1 / Two-Headed Giant), 1–8 players, starting life (20 / 30 / 40 / custom), seating style,
   random first player on / off, and *Same players* (keep names and art) or *New players*
 - With a keyboard on the card-art search: Tab picks the first suggestion, Enter searches
@@ -192,13 +194,13 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 Cut a release by pushing a version tag (bump `VERSION` in `lifepi.py` first):
 
 ```bash
-git tag v1.8.3 && git push origin v1.8.3
+git tag v1.9.0 && git push origin v1.9.0
 ```
 
 [`release.yml`](.github/workflows/release.yml) first runs **every** test - the whole CI suite below
 plus the container tests - and publishes only if all of them pass:
 
-- the container image `ghcr.io/therealshadoh/lifepi-web:1.8.3` and `:1.8` (amd64 + arm64)
+- the container image `ghcr.io/therealshadoh/lifepi-web:1.9.0` and `:1.9` (amd64 + arm64)
 - a [GitHub Release](https://github.com/TheRealShadoh/LifePi/releases) with release notes and the
   tested phone app attached (`lifepi-web.zip`)
 - the phone app at https://therealshadoh.github.io/LifePi/ (GitHub Pages; controlled by the
