@@ -94,12 +94,13 @@ Open the menu (round button) > **Phones & TV**. It shows a QR code, the address 
   *Cmdr dmg* strip at the bottom for commander damage, tap a name for that player's counters and settings (rename, colour, partner commanders). **↻** turns
   the page sideways (landscape) while the phone stays upright - handy with the rotation lock on. **Pick your seat** (asked the first time a phone joins) gives your panel
   a blue outline; **Undo** takes back the last change; **Game** starts a new game (format, 1–8 players, starting life, same or new players) and holds
-  the seating style, the rules (random first player, commander damage reduces life) and the game's history. The screen stays on while the page is open,
+  the seating style, the rules (random first player, commander damage reduces life) and the game's history. The screen stays on while people are using the page (it may sleep after 5 minutes without a tap),
   and a banner says so if the phone loses its connection to LifePi. Changes show up instantly on the Pi
   and every other phone. Phones must be on the same network as LifePi; nothing is installed.
 - **TV:** the **TV view** address shown there is a live, read-only scoreboard sized for a big screen.
   - *Chromecast, Google TV, Nvidia Shield:* menu > **Cast to TV**, pick the device (needs `python3-pychromecast`,
-    which `install.sh` adds).
+    which `install.sh` adds). The menu then offers **Stop casting**, which closes the TV view and the connection;
+    quitting LifePi stops casting too. Nothing Cast-related runs until you open Cast to TV.
   - *Fire TV, smart TVs with a browser, a laptop on HDMI:* open the TV view address in the browser.
   - *Roku:* Roku has no web browser, so open the TV view on a phone or PC and use screen mirroring
     (Roku supports Miracast from Android / Windows and AirPlay from Apple devices on most models).
@@ -181,7 +182,7 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 - **Name strip** of a panel: opens that player's sheet, turned toward them - rename, card art, local image, colour,
   profiles, partner on / off, counters, *Each opponent* ±1, and every commander's damage as a list
 - Round button: main menu - new game, reset, history / undo, dice / coin, rotate, seating, commander damage rule,
-  turn tracker, Phones & TV, Cast to TV, *Update to ...* (when there is one) or *Check for updates*, quit; in the phone app also *Auto-rotate*
+  turn tracker, Phones & TV, Cast to TV / Stop casting, *Update to ...* (when there is one) or *Check for updates*, quit; in the phone app also *Auto-rotate*
 - **New game:** format (Commander / 1 v 1 / Two-Headed Giant), 1–8 players, starting life (20 / 30 / 40 / custom), seating style,
   random first player on / off, and *Same players* (keep names and art) or *New players*
 - With a keyboard on the card-art search: Tab picks the first suggestion, Enter searches
@@ -191,13 +192,13 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 Cut a release by pushing a version tag (bump `VERSION` in `lifepi.py` first):
 
 ```bash
-git tag v1.8.0 && git push origin v1.8.0
+git tag v1.8.1 && git push origin v1.8.1
 ```
 
 [`release.yml`](.github/workflows/release.yml) first runs **every** test - the whole CI suite below
 plus the container tests - and publishes only if all of them pass:
 
-- the container image `ghcr.io/therealshadoh/lifepi-web:1.8.0` and `:1.8` (amd64 + arm64)
+- the container image `ghcr.io/therealshadoh/lifepi-web:1.8.1` and `:1.8` (amd64 + arm64)
 - a [GitHub Release](https://github.com/TheRealShadoh/LifePi/releases) with release notes and the
   tested phone app attached (`lifepi-web.zip`)
 - the phone app at https://therealshadoh.github.io/LifePi/ (GitHub Pages; controlled by the

@@ -585,6 +585,32 @@ assert "Icon=lifepi" in desk.read_text() and "StartupWMClass=lifepi" in desk.rea
 lifepi.install_desktop_icon(); assert desk.read_text().count("StartupWMClass") == 1     # idempotent
 print("desktop icon ok")
 
+# idle: nothing moving and no finger down -> the loop waits for input instead of spinning
+app.modals.clear(); app.fx.clear(); app.toast = ("", 0); app.armed = None; app.first_anim = None
+app.pointers.clear(); app.save_state(); app.snap_dirty = False; app.render(); app.step()
+assert app.idle, "an untouched table should idle"
+t0 = time.time(); app.step(); waited = time.time() - t0
+assert 0.07 < waited < 0.5, waited                          # waited for input (up to IDLE_WAIT_MS)...
+pygame.event.post(pygame.event.Event(pygame.USEREVENT)); t0 = time.time(); app.step()
+assert time.time() - t0 < 0.07                              # ...but input wakes it at once
+app.change_life(0, 1); app.step(); assert not app.idle      # something changed: full frame rate
+app.change_life(0, -1)
+# casting: Stop casting ends the session (receiver app closed, connection dropped)
+class FakeCast:
+    def __init__(self): self.calls = []
+    def quit_app(self): self.calls.append("quit")
+    def disconnect(self, timeout=None): self.calls.append("disconnect")
+fc = FakeCast(); app.cast = (fc, "Living room TV")
+app.push("menu"); app.render()
+assert any(z[1] == app.stop_cast for z in app.zones) and not any(z[1] == app.open_cast for z in app.zones)
+app.stop_cast(); end = time.time() + 2
+while time.time() < end and len(fc.calls) < 2: time.sleep(0.02)
+assert fc.calls == ["quit", "disconnect"] and app.cast is None and "Stopped casting" in app.toast[0], (fc.calls, app.toast)
+app.push("menu"); app.render(); assert any(z[1] == app.open_cast for z in app.zones); app.modals.clear()
+# the phone page lets the screen sleep after a while without taps
+assert "wakeIdle" in lifepi.PHONE_HTML and "wake.release()" in lifepi.PHONE_HTML
+print("idle loop, stop casting, phone screen sleep ok")
+
 # --- random card art for players without art ------------------------------------------
 serial = [0]
 def scry_random(url, timeout=10):

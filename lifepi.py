@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -89,6 +89,7 @@ MAX_PLAYERS = 8
 ROWS = {1: [1], 2: [1, 1], 3: [2, 1], 4: [2, 2], 5: [3, 2], 6: [3, 3], 7: [4, 3], 8: [4, 4]}
 SEATINGS = {"table": "Table  ===", "ends": "Ends  -=-", "round": "Round", "upright": "Upright"}
 HOLD_DELAY = 0.45
+IDLE_WAIT_MS = 100                                   # idle loop: longest wait for input / background work
 BOARD_GUARD = 0.4                  # s after a sheet closes during which board taps are ignored
 NAME_MAX = 24
 CONFIRM_GAP = 0.35                                 # a confirming tap must come at least this late
@@ -798,6 +799,8 @@ class App:
         self.update_check = bool(getattr(args, "update_check", False))
         self.install_path = Path(getattr(args, "install_path", None) or __file__).resolve()
         self.update_state, self.update_error, self.restart_after = "", "", False
+        self.idle = False
+        self.cast = None                          # (Chromecast, name) while casting the TV view
         self.art_results, self.art_pending, self.art_retry_at = queue.Queue(), set(), 0
         self.seats = []
         self.toast = ("", 0.0)
@@ -1913,7 +1916,7 @@ class App:
             (f"Turn tracker: {'on' if st['turn_tracker'] else 'off'}", self.toggle_turn_tracker,
              BTN_ON if st["turn_tracker"] else BTN),
             ("Phones & TV", self.open_remote, BTN_ON),
-            ("Cast to TV", self.open_cast, BTN),
+            ("Stop casting", self.stop_cast, BTN_BAD) if self.cast else ("Cast to TV", self.open_cast, BTN),
             ("Back to game", self.pop, BTN),
             ("Quit", self.confirm("quit", self.quit), BTN_BAD),
         ]
@@ -2056,10 +2059,36 @@ class App:
                 # force: open the page directly - the DashCast receiver is https, and an
                 # http LAN page inside its iframe would be blocked as mixed content
                 dash.load_url(url, force=True)
-                self.say(f"Showing LifePi on {name}")
+                old, self.cast = self.cast, (cast, name)
+                if old and old[0] is not cast:
+                    self.release_cast(old[0], quit_app=False)
+                self.say(f"Showing LifePi on {name} - menu > Stop casting to end it")
             except Exception as e:
                 self.say(f"Cast failed: {e}")
         threading.Thread(target=work, daemon=True).start()
+
+    def stop_cast(self):
+        """Menu > Stop casting: close the TV view on the Cast device and drop the connection."""
+        if not self.cast:
+            return
+        (cast, name), self.cast = self.cast, None
+        self.modals.clear()
+        self.say(f"Stopped casting to {name}")
+        threading.Thread(target=self.release_cast, args=(cast,), daemon=True).start()
+
+    @staticmethod
+    def release_cast(cast, quit_app=True):
+        """End a Cast session: quit the receiver app (the TV goes back to idle) and close the
+        connection and its keep-alive thread."""
+        try:
+            if quit_app:
+                cast.quit_app()
+        except Exception:
+            pass
+        try:
+            cast.disconnect(timeout=5)
+        except Exception:
+            pass
 
     def toggle_seating(self):
         order = list(SEATINGS)
@@ -2770,11 +2799,7 @@ class App:
         self.draw_drags()
         r = max(22, min(self.W, self.H) // 22)
         c = self.menu_pos(r)
-        pygame.draw.circle(self.canvas, (0, 0, 0), (c[0], c[1] + 2), r + 2)
-        pygame.draw.circle(self.canvas, (24, 24, 32), c, r)
-        pygame.draw.circle(self.canvas, (210, 210, 220), c, r, 2)
-        for dy in (-r // 3, 0, r // 3):
-            pygame.draw.line(self.canvas, WHITE, (c[0] - r // 2, c[1] + dy), (c[0] + r // 2, c[1] + dy), 2)
+        self.blit_round(self.round_icon("menu", r, (210, 210, 220)), c)
         hit = pygame.Rect(0, 0, int(r * 2.6), int(r * 2.6))
         hit.center = c
         self.zones.append((hit.collidepoint, lambda: self.push("menu"), None, 0, None))
@@ -2811,21 +2836,50 @@ class App:
         Tap: undo the last change. Hold: the history list."""
         c = self.undo_pos(r)
         rr = int(r * 0.8)
-        on = bool(self.undo)
-        col = (210, 210, 220) if on else (90, 90, 100)
-        pygame.draw.circle(self.canvas, (0, 0, 0), (c[0], c[1] + 2), rr + 2)
-        pygame.draw.circle(self.canvas, (24, 24, 32), c, rr)
-        pygame.draw.circle(self.canvas, col, c, rr, 2)
-        a = rr // 2                                  # arrow: a 3/4 arc with a head at its top-left
-        box = pygame.Rect(c[0] - a, c[1] - a, 2 * a, 2 * a)
-        pygame.draw.arc(self.canvas, col, box, math.radians(-120), math.radians(150), max(2, rr // 8))
-        tip = (c[0] - int(a * math.cos(math.radians(30))), c[1] - int(a * math.sin(math.radians(30))))
-        k = max(4, rr // 3)
-        pygame.draw.polygon(self.canvas, col, [(tip[0] - k, tip[1] - k // 3), (tip[0] + k // 2, tip[1] - k),
-                                               (tip[0] + k // 3, tip[1] + k // 2)])
+        col = (210, 210, 220) if self.undo else (90, 90, 100)
+        self.blit_round(self.round_icon("undo", rr, col), c)
         hit = pygame.Rect(0, 0, int(rr * 2.4), int(rr * 2.4))
         hit.center = c
         self.zones.append((hit.collidepoint, self.undo_last, lambda: self.push("history"), 10 ** 6, None))
+
+    def round_icon(self, kind, r, col):
+        """The round menu / undo buttons and the update dot, drawn 4x larger and scaled down:
+        smooth edges on the panel, and no stair-steps when a TV mirror blows the screen up.
+        Cached; centred in a (2r + 10) square surface (the shadow sits 2 px lower)."""
+        key = ("round", kind, r, col)
+        img = self.img_cache.get(key)
+        if img:
+            return img
+        S, R = 4, r + 5
+        big = pygame.Surface((2 * R * S, 2 * R * S), pygame.SRCALPHA)
+        c = (R * S, R * S)
+        if kind == "dot":
+            pygame.draw.circle(big, (0, 0, 0), c, (r + 2) * S)
+            pygame.draw.circle(big, col, c, r * S)
+        else:
+            pygame.draw.circle(big, (0, 0, 0, 200), (c[0], c[1] + 2 * S), (r + 2) * S)
+            pygame.draw.circle(big, (24, 24, 32), c, r * S)
+            pygame.draw.circle(big, col, c, r * S, 2 * S)
+        if kind == "menu":                          # three rounded bars
+            w, t = r * S, 2 * S
+            for dy in (-r // 3, 0, r // 3):
+                bar = pygame.Rect(0, 0, w, t + S)
+                bar.center = (c[0], c[1] + dy * S)
+                pygame.draw.rect(big, WHITE, bar, border_radius=t)
+        elif kind == "undo":                        # a 3/4 arc with a head at its top-left
+            a = (r // 2) * S
+            box = pygame.Rect(c[0] - a, c[1] - a, 2 * a, 2 * a)
+            pygame.draw.arc(big, col, box, math.radians(-120), math.radians(150), max(2, r // 8) * S)
+            tip = (c[0] - int(a * math.cos(math.radians(30))), c[1] - int(a * math.sin(math.radians(30))))
+            k = max(4, r // 3) * S
+            pygame.draw.polygon(big, col, [(tip[0] - k, tip[1] - k // 3), (tip[0] + k // 2, tip[1] - k),
+                                           (tip[0] + k // 3, tip[1] + k // 2)])
+        img = pygame.transform.smoothscale(big, (2 * R, 2 * R))
+        self.img_cache[key] = img
+        return img
+
+    def blit_round(self, img, centre):
+        self.canvas.blit(img, img.get_rect(center=centre))
 
     def menu_pos(self, r):
         """Menu button spot on the row divider, as clear of the (centred) names as possible."""
@@ -2977,9 +3031,7 @@ class App:
         if not self.update_badge():
             return
         d = (c[0] + int(r * 0.72), c[1] - int(r * 0.72))
-        k = max(6, int(r * 0.34))
-        pygame.draw.circle(self.canvas, (0, 0, 0), d, k + 2)
-        pygame.draw.circle(self.canvas, (255, 210, 70), d, k)
+        self.blit_round(self.round_icon("dot", max(6, int(r * 0.34)), (255, 210, 70)), d)
 
     def draw_first_spin(self):
         """Random first player: a highlight runs round the table, slows and lands; then
@@ -3159,7 +3211,9 @@ class App:
         try:
             while self.running:
                 self.step()
-                await asyncio.sleep(0)
+                # phone app: a frame per screen refresh only while something is happening -
+                # idle, wake ~10x a second instead of 60 (phone batteries)
+                await asyncio.sleep(IDLE_WAIT_MS / 1000 if self.idle else 0)
         finally:
             self.end()
 
@@ -3172,8 +3226,23 @@ class App:
             if hasattr(signal, name):
                 signal.signal(getattr(signal, name), self.stop)
 
+    def busy(self):
+        """Anything that needs frames right now? When not, the loop idles (see step)."""
+        now = time.time()
+        return bool(self.dirty or self.state_dirty or self.snap_dirty or self.pointers or self.modals
+                    or self.first_anim or self.armed or self.update_state == "working"
+                    or (self.toast[0] and now - self.toast[1] < 3.2)
+                    or any(now - fx["t"] < 1.9 for fx in self.fx.values())
+                    or (self.companion and not self.companion.actions.empty()))
+
     def step(self):
-        """One frame: input, timers, phones, drawing, autosave."""
+        """One frame: input, timers, phones, drawing, autosave. Idle (nothing moving, no finger
+        down): wait up to IDLE_WAIT for input instead of spinning at full frame rate - a touch
+        still wakes it at once; background work (phones, downloads) is picked up within it."""
+        if self.idle and not WEB:
+            e = pygame.event.wait(IDLE_WAIT_MS)
+            if e.type != pygame.NOEVENT:
+                self.handle(e)
         for e in pygame.event.get():
             self.handle(e)
         self.tick_holds()
@@ -3206,11 +3275,16 @@ class App:
             self.render()
         if self.state_dirty and now - self.last_save > SAVE_INTERVAL:
             self.save_state()
-        self.clock.tick(self.args.fps)
+        self.idle = not self.busy()
+        if not self.idle:
+            self.clock.tick(self.args.fps)
 
     def end(self):
         if self.state_dirty:
             self.save_state()
+        if self.cast:                              # leaving: take the TV view down with us
+            self.release_cast(self.cast[0])
+            self.cast = None
         if self.companion:
             self.companion.stop()
         pygame.quit()
@@ -3611,8 +3685,12 @@ function undo() {
   toast("Undone: " + state.undo); act({ op: "undo" });
 }
 // keep the screen on while the page is open (where the browser allows it)
-let wake = null;
+let wake = null, wakeIdle = null;
 async function keepAwake() {
+  // keep the screen on while people are using the page - but not forever: 5 minutes without
+  // a tap lets the phone sleep as usual (a page left open was draining batteries)
+  clearTimeout(wakeIdle);
+  wakeIdle = setTimeout(() => { if (wake) { wake.release(); wake = null; } }, 5 * 60 * 1000);
   try { if (!wake && navigator.wakeLock && document.visibilityState === "visible") {
     wake = await navigator.wakeLock.request("screen"); wake.addEventListener("release", () => { wake = null; }); } } catch (e) {}
 }
