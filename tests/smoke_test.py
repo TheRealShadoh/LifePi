@@ -636,23 +636,39 @@ if {90, 270} & sides:                                   # an end seat: its side 
 app.modals.clear(); app.set_seating("table"); app.start_game(4, 40); app.first_anim = None
 print("menu faces whoever opened it ok")
 
-# damage sound: one soft sound per hit (not per point of a hold), on damage only, and switchable
+# damage sound: one sound per hit (not per point of a hold), on damage only; Sounds cycles
+# grunts -> tock -> off, and a grunt never repeats twice in a row
 class FakeSound:
     def __init__(self): self.n = 0
     def play(self): self.n += 1
-snd = FakeSound(); app.sfx = snd; app.sfx_t = 0; app.settings["sounds"] = True
-app.change_life(0, -1); assert snd.n == 1
-app.change_life(0, -1); assert snd.n == 1                 # within SFX_GAP: same hit
-time.sleep(lifepi.SFX_GAP + 0.02); app.change_life(0, 3); assert snd.n == 1   # gaining life: silent
-app.change_cmd(0, 1, 2); assert snd.n == 2                # commander damage
-time.sleep(lifepi.SFX_GAP + 0.02); app.change_counter(0, "poison", 1); assert snd.n == 3
-time.sleep(lifepi.SFX_GAP + 0.02); app.change_counter(0, "poison", -1); assert snd.n == 3
+grunts, tock = [FakeSound() for _ in range(6)], FakeSound()
+def heard(): return sum(g.n for g in grunts) + tock.n
+app.sfx = {"grunt": grunts, "tock": tock}; app.sfx_t = 0
+app.settings.update(sounds=True, sound_style="grunt")
+app.change_life(0, -1); assert heard() == 1 and tock.n == 0
+app.change_life(0, -1); assert heard() == 1                # within SFX_GAP: same hit
+time.sleep(lifepi.SFX_GAP + 0.02); app.change_life(0, 3); assert heard() == 1   # gaining life: silent
+app.change_cmd(0, 1, 2); assert heard() == 2               # commander damage
+time.sleep(lifepi.SFX_GAP + 0.02); app.change_counter(0, "poison", 1); assert heard() == 3
+time.sleep(lifepi.SFX_GAP + 0.02); app.change_counter(0, "poison", -1); assert heard() == 3
+order = []
+for _ in range(20):
+    before = [g.n for g in grunts]; time.sleep(lifepi.SFX_GAP + 0.01); app.play_damage()
+    order.append(next(k for k, g in enumerate(grunts) if g.n != before[k]))
+assert all(a != b for a, b in zip(order, order[1:])), order        # never the same grunt twice running
+assert len(set(order)) > 2, order                                  # and not always the same few
 app.push("menu"); app.render(); tog = [z for z in app.zones if z[1] == app.toggle_sounds]; assert len(tog) == 1
-tog[0][1](); app.modals.clear(); assert not app.settings["sounds"]
-time.sleep(lifepi.SFX_GAP + 0.02); app.change_life(0, -1); assert snd.n == 3           # off: silent
-app.toggle_sounds(); assert snd.n == 4                    # on again: plays a sample
+assert app.sounds_label() == "Sounds: grunts"
+n = heard(); tog[0][1](); app.modals.clear()
+assert app.settings["sound_style"] == "tock" and app.sounds_label() == "Sounds: tock" and tock.n == 1   # sample
+tock.n = 0; app.toggle_sounds(); assert not app.settings["sounds"] and app.sounds_label() == "Sounds: off"
+n = heard(); time.sleep(lifepi.SFX_GAP + 0.02); app.change_life(0, -1); assert heard() == n   # off: silent
+app.toggle_sounds(); assert app.settings["sounds"] and app.settings["sound_style"] == "grunt" and heard() == n + 1
 pcm = lifepi.damage_sound(44100, 2); assert len(pcm) == int(44100 * 0.12) * 2 * 2 and max(pcm) > 0
-real = lifepi.App.load_sounds(app); assert real is False or real.get_length() > 0.05     # dummy audio or none
+real = lifepi.App.load_sounds(app)
+if real:                                                   # an audio driver: the six grunts decode
+    assert real["tock"].get_length() > 0.05 and len(real["grunt"]) == 6, real
+    assert all(0.1 < g.get_length() < 0.6 for g in real["grunt"])
 app.change_cmd(0, 1, -2); app.change_life(0, 1)
 
 # music: the Spotify Connect speaker's local API (a stand-in server here)
