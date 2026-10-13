@@ -181,7 +181,7 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 - **Hold a player's name and drag it** onto another panel to swap seats (commander damage follows the players)
 - **Name strip** of a panel: opens that player's sheet, turned toward them - rename, card art, local image, colour,
   profiles, partner on / off, counters, *Each opponent* ±1, and every commander's damage as a list
-- Round button: main menu - new game, reset, history / undo, dice / coin, rotate, seating, commander damage rule,
+- Round button: main menu, opened facing whoever tapped it (reach across from the far side and it opens facing you; *Turn* in its header turns it to the other side) - new game, reset, history / undo, dice / coin, rotate, seating, commander damage rule,
   turn tracker, Phones & TV, Cast to TV / Stop casting, *Update to ...* (when there is one) or *Check for updates*, quit; in the phone app also *Auto-rotate*
 - **New game:** format (Commander / 1 v 1 / Two-Headed Giant), 1–8 players, starting life (20 / 30 / 40 / custom), seating style,
   random first player on / off, and *Same players* (keep names and art) or *New players*
@@ -192,13 +192,13 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 Cut a release by pushing a version tag (bump `VERSION` in `lifepi.py` first):
 
 ```bash
-git tag v1.8.2 && git push origin v1.8.2
+git tag v1.8.3 && git push origin v1.8.3
 ```
 
 [`release.yml`](.github/workflows/release.yml) first runs **every** test - the whole CI suite below
 plus the container tests - and publishes only if all of them pass:
 
-- the container image `ghcr.io/therealshadoh/lifepi-web:1.8.2` and `:1.8` (amd64 + arm64)
+- the container image `ghcr.io/therealshadoh/lifepi-web:1.8.3` and `:1.8` (amd64 + arm64)
 - a [GitHub Release](https://github.com/TheRealShadoh/LifePi/releases) with release notes and the
   tested phone app attached (`lifepi-web.zip`)
 - the phone app at https://therealshadoh.github.io/LifePi/ (GitHub Pages; controlled by the

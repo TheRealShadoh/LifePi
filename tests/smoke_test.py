@@ -1,5 +1,5 @@
 """Headless smoke test: SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py"""
-import os, sys, tempfile, time, json
+import math, os, sys, tempfile, time, json
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 tmp = tempfile.mkdtemp()
 for k in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
@@ -420,16 +420,18 @@ print("undo + history ok (merged taps, cmd, counters, each opponent, reset, swap
 
 # --- two taps for Reset / Quit / Start over a game / partner off -------------------------
 app.modals.clear(); app.start_game(4, 40); app.first_anim = None; app.change_life(0, -6)
+def mz():                                                    # menu buttons, without the Turn button
+    return [z for z in app.zones if not (z[1] and "turn_sheet" in getattr(getattr(z[1], "__code__", None), "co_names", ()))]
 app.push("menu"); app.render()
-reset = app.zones[1]                                        # 2nd menu button: Reset this game
+reset = mz()[1]                                             # 2nd menu button: Reset this game
 tap(find_point(reset[0])); assert app.players[0]["life"] == 34 and app.is_armed("reset")
 app.render(); pygame.image.save(app.canvas, os.path.join(shots, "menu_armed.png"))
 tap(find_point(reset[0])); assert app.players[0]["life"] == 34 and app.is_armed("reset")  # a double tap isn't a confirm
 def later(): app.armed = (app.armed[0], app.armed[1] - lifepi.CONFIRM_GAP)              # ...a deliberate 2nd tap is
 later(); tap(find_point(reset[0])); assert app.players[0]["life"] == 40 and not app.modals    # second tap: reset
 app.undo_last(); assert app.players[0]["life"] == 34
-app.push("menu"); app.render(); tap(find_point(app.zones[1][0])); app.armed = ("reset", time.time() - 5)
-app.step(); app.render(); tap(find_point(app.zones[1][0])); assert app.players[0]["life"] == 34   # timed out: arms again
+app.push("menu"); app.render(); tap(find_point(mz()[1][0])); app.armed = ("reset", time.time() - 5)
+app.step(); app.render(); tap(find_point(mz()[1][0])); assert app.players[0]["life"] == 34   # timed out: arms again
 app.modals.clear(); app.armed = None
 app.push("menu"); app.render()
 quit_zone = app.zones[len(app.zones) - 1]                    # Quit: the last button
@@ -608,6 +610,30 @@ app.push("menu"); app.render(); assert any(z[1] == app.open_cast for z in app.zo
 # the phone page lets the screen sleep after a while without taps
 assert "wakeIdle" in lifepi.PHONE_HTML and "wake.release()" in lifepi.PHONE_HTML
 print("idle loop, stop casting, phone screen sleep ok")
+
+# the shared menu button opens the menu facing whoever tapped it; screens opened from it follow
+app.modals.clear(); app.set_seating("table"); app.start_game(4, 40); app.first_anim = None; app.render()
+R = max(22, min(app.W, app.H) // 22); mx, my = app.menu_pos(R)
+def menu_from(dx, dy):
+    app.modals.clear(); app.render(); tap((mx + dx, my + dy)); return app.modals[-1]
+m = menu_from(0, R // 2); assert m["kind"] == "menu" and m["angle"] == 0, m          # near side: upright
+m = menu_from(0, -R // 2); assert m["angle"] == 180, m                               # far side: facing them
+app.render(); pygame.image.save(app.canvas, os.path.join(shots, "menu_far_side.png"))
+app.push("dice", result="", sub=""); assert app.modals[-1]["angle"] == 180          # opened from it: same way
+app.pop(); app.render(); turn = [z for z in app.zones if z[1] and "turn_sheet" in z[1].__code__.co_names]
+assert len(turn) == 1, "menu should have a Turn button"
+turn[0][1](); assert app.modals[-1]["angle"] == 0                                    # Turn: the other side
+app.modals.clear(); app.set_seating("ends"); app.start_game(4, 40); app.first_anim = None; app.render()
+sides = {round(st.angle / 90) * 90 % 360 for st in app.seats}
+if {90, 270} & sides:                                   # an end seat: its side faces it too
+    mx, my = app.menu_pos(R)
+    ends = [st for st in app.seats if round(st.angle / 90) * 90 % 360 in (90, 270)]
+    e = ends[0]; vx, vy = e.frame[0] - mx, e.frame[1] - my; n = math.hypot(vx, vy)
+    m = menu_from(int(vx / n * R * 0.8), int(vy / n * R * 0.8))
+    assert m["angle"] == round(e.angle / 90) * 90 % 360, (m["angle"], e.angle)
+    app.render()                                        # a portrait menu draws fine
+app.modals.clear(); app.set_seating("table"); app.start_game(4, 40); app.first_anim = None
+print("menu faces whoever opened it ok")
 
 # --- random card art for players without art ------------------------------------------
 serial = [0]

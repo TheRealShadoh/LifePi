@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.8.2"
+VERSION = "1.8.3"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -1730,7 +1730,36 @@ class App:
 
     # ------------------------------------------------------------------ modal plumbing
     def push(self, kind, **kw):
+        """Open a sheet. Without an angle it faces the same way as the sheet it was opened from
+        (so everything opened from the menu faces whoever opened the menu)."""
+        if kw.get("angle") is None:
+            kw["angle"] = self.modals[-1].get("angle", 0) if self.modals else 0
         self.modals.append(dict(kind=kind, **kw))
+        self.dirty = True
+
+    def open_menu(self):
+        self.push("menu", angle=self.facing_angle(getattr(self, "press_pos", None)))
+
+    def facing_angle(self, pos):
+        """The menu button is shared, so open the menu facing whoever tapped it: the player whose
+        seat lies in the direction the tap landed from the button's centre (a finger reaching
+        across from the far side lands on the far half). Sheet angles are multiples of 90."""
+        if pos is None or not self.seats or len(self.players) < 2:
+            return 0
+        mx, my = self.menu_pos(max(22, min(self.W, self.H) // 22))
+        dx, dy = pos[0] - mx, pos[1] - my
+        d = math.hypot(dx, dy)
+        if d < 1:
+            return 0
+        best = max(self.seats, key=lambda st: (dx * (st.frame[0] - mx) + dy * (st.frame[1] - my))
+                   / (d * (math.hypot(st.frame[0] - mx, st.frame[1] - my) or 1)))
+        return round(best.angle / 90) * 90 % 360
+
+    def turn_sheet(self, m):
+        """The Turn button on the menu: face the next side of the table that has players."""
+        sides = sorted({round(st.angle / 90) * 90 % 360 for st in self.seats} | {0})
+        cur = m.get("angle", 0)
+        m["angle"] = next((a for a in sides if a > cur), sides[0])
         self.dirty = True
 
     def pop(self, *_):
@@ -1738,7 +1767,7 @@ class App:
             self.modals.pop()
         self.dirty = True
 
-    def ask_text(self, title, initial, cb, angle=0, **kw):
+    def ask_text(self, title, initial, cb, angle=None, **kw):
         """On-screen keyboard. Optional kw: local(text) -> instant suggestions,
         suggest(text) -> slower suggestions (run on a thread after a pause in typing),
         pick(suggestion) -> called when a suggestion is tapped, hint -> shown when none."""
@@ -1903,6 +1932,9 @@ class App:
         v = self.modal_view(m, f"LifePi {VERSION}")
         u, W = v.u, v.w
         st = self.settings
+        if len({round(s.angle / 90) * 90 % 360 for s in self.seats} | {0}) > 1:   # players on 2+ sides
+            self.button(v, (W - int(u * 2.2), 0, int(u * 2.2), u), "Turn", lambda: self.turn_sheet(m),
+                        size=u * 0.42)
         items = [
             ("New game", lambda: self.push("newgame", n=len(self.players), life=st["start_life"],
                                            seating=st["seating"]), BTN_OK),
@@ -2016,7 +2048,7 @@ class App:
         """Find Google Cast devices (Chromecast, Google TV, Nvidia Shield...) and cast /tv."""
         if not (self.companion and self.companion.running):
             return self.say("Turn on Phones & TV first (menu > Phones & TV)")
-        grid = dict(title="Cast the TV view to...", items=[], page=0, angle=0,
+        grid = dict(title="Cast the TV view to...", items=[], page=0,
                     status="Looking for Chromecast / Google TV / Shield...",
                     on_pick=lambda it: self.cast_to(it["value"], it["label"]))
         self.push("grid", **grid)
@@ -2802,7 +2834,7 @@ class App:
         self.blit_round(self.round_icon("menu", r, (210, 210, 220)), c)
         hit = pygame.Rect(0, 0, int(r * 2.6), int(r * 2.6))
         hit.center = c
-        self.zones.append((hit.collidepoint, lambda: self.push("menu"), None, 0, None))
+        self.zones.append((hit.collidepoint, self.open_menu, None, 0, None))
         self.draw_undo_button(r)
         self.draw_turn(r)
         self.draw_update_badge(c, r)
@@ -3092,6 +3124,7 @@ class App:
         return unrotate(int(sx), int(sy), sw, sh, self.rot())
 
     def pointer_down(self, pid, pos):
+        self.press_pos = pos                       # where the latest press began (see open_menu)
         for z in reversed(self.zones):
             if z[0](pos):
                 self.pointers[pid] = {"zone": z, "t": time.time(), "held": False, "next": 0, "pos": pos,
