@@ -642,12 +642,12 @@ print("menu faces whoever opened it ok")
 class FakeSound:
     def __init__(self): self.n = 0
     def play(self): self.n += 1
-fx = {k: [FakeSound() for _ in range(n)] for k, n in (("hit", 6), ("cmd", 3), ("poison", 3))}
-tock = FakeSound()
+fx = {k: [FakeSound() for _ in range(n)] for k, n in (("hit", 6), ("cmd", 3), ("poison", 3), ("death", 2))}
+tock, tock_death = FakeSound(), FakeSound()
 def heard(kind=None):
     return sum(c.n for k, cl in fx.items() if kind in (None, k) for c in cl) + (tock.n if kind in (None, "tock") else 0)
 def gap(): time.sleep(lifepi.SFX_GAP + 0.02)
-app.sfx = dict(fx, tock=tock); app.sfx_t = 0
+app.sfx = dict(fx, tock=tock, tock_death=tock_death); app.sfx_t = 0
 app.settings.update(sounds=True, sound_style="grunt", cmd_hits_life=True)
 app.change_life(0, -1); assert heard("hit") == 1 and heard() == 1
 app.change_life(0, -1); assert heard() == 1                 # within SFX_GAP: same hit
@@ -675,9 +675,29 @@ pcm = lifepi.damage_sound(44100, 2); assert len(pcm) == int(44100 * 0.12) * 2 * 
 real = lifepi.App.load_sounds(app)
 if real:                                                   # an audio driver: every clip decodes
     assert real["tock"].get_length() > 0.05
-    assert [len(real[k]) for k in ("hit", "cmd", "poison")] == [6, 3, 3], {k: len(v) for k, v in real.items() if k != "tock"}
+    assert [len(real[k]) for k in ("hit", "cmd", "poison", "death")] == [6, 3, 3, 2]
     assert all(0.1 < c.get_length() < 0.6 for k in ("hit", "cmd", "poison") for c in real[k])
+    assert all(0.8 < c.get_length() < 2.0 for c in real["death"]) and real["tock_death"].get_length() > 0.3
 app.change_life(0, 1)
+
+# a knockout plays "You lose!" instead - once, even straight after another hit, from any cause
+def died(): return heard("death")
+app.start_game(4, 40); app.first_anim = None; app.settings.update(sounds=True, sound_style="grunt")
+app.players[0]["life"] = 2; gap()
+app.change_life(1, -1); app.change_life(0, -2)            # a hit then a knockout inside SFX_GAP
+assert died() == 1, died()
+gap(); app.change_life(0, -1); assert died() == 1         # already out: just a grunt
+gap(); app.change_life(0, 5); gap(); app.change_life(0, -6); assert died() == 2   # back in, out again
+app.players[1]["cmd"][2] = 19; gap(); app.change_cmd(1, 2, 2)    # 21 commander damage
+assert died() == 3 and app.ko_reason(app.players[1]) == "commander"
+c = heard("cmd"); gap(); app.change_cmd(1, 2, 1); assert heard("cmd") == c + 1 and died() == 3
+app.players[2]["counters"]["poison"] = 9; gap(); app.change_counter(2, "poison", 1); assert died() == 4
+app.settings["sound_style"] = "tock"; app.players[3]["life"] = 1; gap(); app.change_life(3, -1)
+assert tock_death.n == 1 and died() == 4
+app.settings["sound_style"] = "grunt"
+lp = lifepi.damage_sound(44100, 1, low=True); assert len(lp) == int(44100 * 0.4) * 2
+app.start_game(4, 40); app.first_anim = None
+print("death sound ok")
 
 # music: the Spotify Connect speaker's local API (a stand-in server here)
 import http.server, threading as _th
@@ -716,15 +736,64 @@ while time.time() < end and not m["status"]: time.sleep(0.05)
 app.render(); pygame.image.save(app.canvas, os.path.join(shots, "music_playing.png"))
 assert m["status"]["track"]["name"] == "Test Song"
 btn = {getattr(z[1], "__code__", None) and z[1].__code__.co_consts: z for z in app.zones if z[1]}
-labels = [z for z in app.zones if z[1] and z[1] != app.pop]
+labels = [z for z in app.zones if z[1] and z[1] not in (app.pop, app.toggle_banner)]
 for z in labels: z[1]()                                   # Prev, Play/Pause, Next, Volume -, Volume +
 end = time.time() + 3
 while time.time() < end and len(sent) < 5: time.sleep(0.05)
 paths = sorted(p for p, _ in sent)
 assert paths == sorted(["/player/prev", "/player/playpause", "/player/next", "/player/volume", "/player/volume"]), paths
 assert {"volume": -10, "relative": True} in [b for _, b in sent] and {"volume": 10, "relative": True} in [b for _, b in sent]
-app.modals.clear(); srv.shutdown()
+app.modals.clear()
 print("damage sound, music ok")
+
+# now-playing banner: off by default; on, a see-through strip along the bottom with no touch
+# zones of its own (everything under it still works), hidden while a sheet is open
+assert app.settings["music_banner"] is False and app.banner_text() is None
+def zmap():                                                 # which zone each point lands on
+    pts = [(x, y) for x in range(5, app.W, 37) for y in range(3, app.H, 23)]
+    return len(app.zones), [next((k for k, z in enumerate(app.zones) if z[0]((x, y))), None) for x, y in pts]
+app.render(); plain = app.canvas.copy(); zones_off = zmap()
+app.open_music(); app.render()
+tb = [z for z in app.zones if z[1] == app.toggle_banner]; assert len(tb) == 1
+tb[0][1](); assert app.settings["music_banner"] is True
+end = time.time() + 5
+while time.time() < end and not app.now_playing: time.sleep(0.05)
+assert app.now_playing == "Test Song  -  Some Band", app.now_playing
+assert app.banner_text() is None                           # the Music sheet is open: hidden
+app.modals.clear(); app.render()
+assert "Test Song" in app.banner_text()
+assert zmap() == zones_off                                  # same zones, same places
+x0 = app.W // 2; yb = app.H - 3
+got, was = app.canvas.get_at((x0, yb))[:3], plain.get_at((x0, yb))[:3]
+assert got != was and got != (8, 8, 14), (got, was)        # darkened but see-through
+assert app.canvas.get_at((x0, app.H // 2)) == plain.get_at((x0, app.H // 2))   # rest untouched
+# the table under the strip still takes taps: a tap there changes the bottom player's life
+under = [z for z in app.zones if z[0]((app.W // 4, app.H - 6))]; assert under
+pygame.image.save(app.canvas, os.path.join(shots, "banner.png"))
+assert not app.banner_scrolling()                          # fits: still
+app.say("hello"); app.render(); app.toast = ("", 0)
+# a long title scrolls, using the cheap path (no full redraw)
+app.now_playing = "A Really Very Long Song Title That Goes On  -  " + ", ".join(f"Artist {k}" for k in range(12))
+app.banner_t0 = time.time() - 1; app.render()
+assert app.banner_scrolling() and app.busy()
+full = [0]; real_render = app.render
+def counting(): full[0] += 1; real_render()
+app.render = counting; app.dirty = False
+f1 = app.canvas.copy(); app.banner_t0 -= 0.5; app.render_banner_frame()
+assert full[0] == 0
+strip = lambda c: pygame.image.tobytes(c.subsurface((0, app.H - 10, app.W, 10)), "RGB")
+assert strip(app.canvas) != strip(f1)                      # the text moved
+assert app.canvas.get_at((x0, app.H // 2)) == f1.get_at((x0, app.H // 2))
+app.render = real_render
+pygame.image.save(app.canvas, os.path.join(shots, "banner_scrolling.png"))
+# paused: no banner; switched off: gone and the poller stops
+Spot.status = 204; end = time.time() + 6
+while time.time() < end and app.now_playing: time.sleep(0.05)
+assert app.now_playing is None and app.banner_text() is None
+app.toggle_banner(); assert app.settings["music_banner"] is False
+app.banner_thread.join(2); assert not app.banner_thread.is_alive()
+srv.shutdown()
+print("now-playing banner ok")
 
 # --- random card art for players without art ------------------------------------------
 serial = [0]

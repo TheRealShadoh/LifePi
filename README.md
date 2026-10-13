@@ -51,8 +51,8 @@ life counter — released under the MIT licence so anyone can use, fork and impr
 - **Hold a player's name and drag it** onto another seat to swap seats (their damage, counters and turn go with them)
 
 **Around the table**
-- **Music:** the Pi can be a Spotify Connect speaker called *LifePi*; menu > **Music** shows what's playing and has play / pause, skip and volume ([details](#music-spotify))
-- **Damage sounds:** a grunt when someone loses life, a metal clang for commander damage, a bubble for poison (or a soft tock for all); menu > **Sounds** picks which, or off ([details](#sounds))
+- **Music:** the Pi can be a Spotify Connect speaker called *LifePi*; menu > **Music** shows what's playing and has play / pause, skip and volume, plus an optional scrolling now-playing banner ([details](#music-spotify))
+- **Damage sounds:** a grunt when someone loses life, a metal clang for commander damage, a bubble for poison, "You lose!" on a knockout (or a soft tock for all); menu > **Sounds** picks which, or off ([details](#sounds))
 - **TV on the Pi's HDMI:** plug in a TV and it shows the touchscreen and plays the sound ([details](#tv-on-the-pis-hdmi))
 - **Phones as controllers:** everyone on the same Wi-Fi scans a QR code and runs their own life, counters and commander damage from their phone - changes show up instantly on the Pi and on every other phone
 - **TV view over Wi-Fi:** a live scoreboard for a big screen - cast it to a Chromecast / Google TV / Nvidia Shield from the menu (and **Stop casting** when you're done), open it in a smart-TV browser, or mirror a phone to a Roku
@@ -131,7 +131,12 @@ the user service `lifepi-spotify`, settings in `~/.config/go-librespot/config.ym
   icon and choose **LifePi**. Spotify Connect needs **Spotify Premium**.
 - **Menu > Music** shows the cover, song, artists and album, with **Prev**, **Play / Pause**, **Next** and
   **Volume − / +**. With nothing playing it tells you how to start; without the speaker installed it says how
-  to add it. It only talks to the speaker while the Music sheet is open.
+  to add it.
+- **Now-playing banner** (off by default; **Banner** in the Music sheet): a thin, see-through strip along the
+  bottom edge with the song and artists, scrolling when it's too long to fit. It has no buttons of its own -
+  taps go straight through to the table underneath - and it hides while a sheet is open, while paused and
+  when nothing is playing. With it off, LifePi only talks to the speaker while the Music sheet is open; with
+  it on, it checks every few seconds.
 - **No account is stored on the Pi** - whoever picks LifePi in their app plays to it, and control stays with
   them in Spotify as well.
 - Sound goes to the Pi's default audio output: the headphone jack, a USB / Bluetooth speaker, or the TV
@@ -148,19 +153,23 @@ When someone takes damage, LifePi plays a short sound - a different kind for eac
 | life lost | a "hurt" grunt (six of them) |
 | commander damage | a heavy metal clang (three) |
 | poison | a bubble (three) |
+| knocked out | "You lose!" (two voices) |
 
 Within each kind it picks at random and never plays the same clip twice in a row. **Menu > Sounds** switches
 between **grunts** (the sounds above, the default), **tock** (one short synthesised knock for every kind of
 damage, with a click that carries over music) and **off**; each choice plays a sample.
 
 A run of quick taps or a held −10 makes one sound per hit, not one per point; commander damage that also
-takes life plays just the clang; gaining life or taking damage back is silent. Sounds play on the Pi's
+takes life plays just the clang; the hit that knocks a player out - life to 0 or below, 21 commander damage
+or 10 poison - plays "You lose!" instead (a deeper, longer knock in tock style), and further damage to a
+player who's already out is an ordinary hit; gaining life or taking damage back is silent. Sounds play on the Pi's
 default audio output (the TV with [`--tv`](#tv-on-the-pis-hdmi)); they aren't played in the phone app or in
 Docker. All clips are CC0 (public domain), trimmed and levelled, and built into `lifepi.py` so updates bring
 them along:
 ["Hurt Sound Effects" by EZduzziteh](https://opengameart.org/content/hurt-sound-effects) (grunts),
 ["Impact Sounds" by Kenney](https://kenney.nl/assets/impact-sounds) (clang),
-["Bubble Sound Effects" by Brian MacIntosh](https://opengameart.org/content/bubble-sound-effects) (bubbles).
+["Bubble Sound Effects" by Brian MacIntosh](https://opengameart.org/content/bubble-sound-effects) (bubbles),
+["Voiceover Pack" and "Voiceover Pack: Fighter" by Kenney](https://kenney.nl/assets/voiceover-pack) ("You lose!").
 
 ## TV on the Pi's HDMI
 
@@ -330,7 +339,7 @@ All headless; CI runs them on every push and before every release.
 
 | Test | Covers |
 |---|---|
-| `SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` | the app itself: rotation and touch mapping, tap / hold, slides and palm brushes not counting as taps, taps after a sheet closes, every seating style for 1–8 players (each screen point belongs to one seat, clockwise order, taps on rotated seats), modals and rotated sheets, the menu facing whoever opened it, drag-to-swap, the commander damage pane (halves, hold, rotated, poison tile), partner commanders (separate tracking, KO rules, swaps, saves), undo + history (merged taps, resets, swaps, the button, saved), two-tap confirms (double taps don't count, time-out), formats, each opponent, the planar die, warnings, random first player (incl. fairness) and in the history, the turn tracker, random card art, search cache and suggestions incl. commanders first and *Search again* (mocked Scryfall), the damage sounds (grunt / clang / bubble per kind of damage, no clip twice in a row, grunts / tock / off), Music against a stand-in speaker, Stop casting, the idle frame rate, the desktop icon, the update check (toast + dot, Check for updates, bad downloads rejected, update + restart), saving / restart / crash / corrupt-save recovery, the installers' executable bits |
+| `SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` | the app itself: rotation and touch mapping, tap / hold, slides and palm brushes not counting as taps, taps after a sheet closes, every seating style for 1–8 players (each screen point belongs to one seat, clockwise order, taps on rotated seats), modals and rotated sheets, the menu facing whoever opened it, drag-to-swap, the commander damage pane (halves, hold, rotated, poison tile), partner commanders (separate tracking, KO rules, swaps, saves), undo + history (merged taps, resets, swaps, the button, saved), two-tap confirms (double taps don't count, time-out), formats, each opponent, the planar die, warnings, random first player (incl. fairness) and in the history, the turn tracker, random card art, search cache and suggestions incl. commanders first and *Search again* (mocked Scryfall), the damage sounds (grunt / clang / bubble per kind of damage, no clip twice in a row, grunts / tock / off), the knockout sound (life, commander, poison; once), Music against a stand-in speaker, the now-playing banner (no touch zones, see-through, scrolling without full redraws, hidden under sheets and when paused), Stop casting, the idle frame rate, the desktop icon, the update check (toast + dot, Check for updates, bad downloads rejected, update + restart), saving / restart / crash / corrupt-save recovery, the installers' executable bits |
 | `SDL_VIDEODRIVER=dummy python3 tests/companion_test.py` | the Phones & TV server: PIN and lock-out, every phone action (undo, each opponent, formats included), bad input, live updates, seat positions matching the Pi, art serving |
 | `python tests/phone_test.py` | the phone page (QR code) in headless Chrome on a busy table (another phone tapping every 150 ms): the seat picker on first join, the life number as -/+, starting games (two taps, formats) and changing seating from the phone, scrolling sheets, the commander damage sheet (halves, hold, partner and poison tiles), undo, history, the offline banner, force landscape (needs Chrome) |
 | `python web/build.py && python tests/web_test.py` | the phone app end to end in headless Chrome at phone size: boot, real touch input, holds, Scryfall in the browser, reload, the layout staying put when the phone turns, starting offline (needs Chrome and internet) |
