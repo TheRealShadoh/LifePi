@@ -703,12 +703,12 @@ print("death sound ok")
 import http.server, threading as _th
 sent = []
 class Spot(http.server.BaseHTTPRequestHandler):
-    status = 204
+    status, song = 204, "Test Song"
     def log_message(self, *a): pass
     def do_GET(self):
         if self.path == "/status" and Spot.status == 200:
             body = json.dumps({"paused": False, "volume": 40, "volume_steps": 100, "track": {
-                "name": "Test Song", "artist_names": ["Some Band"], "album_name": "An Album",
+                "name": Spot.song, "artist_names": ["Some Band"], "album_name": "An Album",
                 "album_cover_url": None}}).encode()
             self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers()
             self.wfile.write(body)
@@ -773,7 +773,9 @@ pygame.image.save(app.canvas, os.path.join(shots, "banner.png"))
 assert not app.banner_scrolling()                          # fits: still
 app.say("hello"); app.render(); app.toast = ("", 0)
 # a long title scrolls, using the cheap path (no full redraw)
-app.now_playing = "A Really Very Long Song Title That Goes On  -  " + ", ".join(f"Artist {k}" for k in range(12))
+Spot.song = "A Really Very Long Song Title That Goes On And On, " * 3   # from the speaker, as in use
+end = time.time() + 6
+while time.time() < end and "Really" not in (app.now_playing or ""): time.sleep(0.05)
 app.banner_t0 = time.time() - 1; app.render()
 assert app.banner_scrolling() and app.busy()
 full = [0]; real_render = app.render
