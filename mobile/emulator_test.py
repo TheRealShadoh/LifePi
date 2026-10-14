@@ -230,6 +230,7 @@ def main(apk):
     p.close()
 
     # 3. store screenshots: a game in progress (names, damage, poison, random card art)
+    p = Page()
     p.js("""(() => { const s = JSON.parse(localStorage['lifepi-state']);
       const names = ["Chris", "Mike", "Nate", "Jared"], life = [34, 29, 42, 17];
       s.players.forEach((p, i) => { p.name = names[i] || p.name; p.life = life[i] ?? p.life;
