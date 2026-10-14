@@ -25,8 +25,9 @@
     get reserve() { return N._shown && !N.removed ? (N.height || N._last) : 0; },
     _last: (() => { try { return +localStorage.getItem("lifepi-banner-h") || 0; } catch (e) { return 0; } })(),
     _want: false, _shown: false, _loaded: false, _starting: null, _sheets: 0,
-    want(on) { on = !!on; if (on !== N._want) { N._want = on; sync(); } },
-    sheets(n) { N._sheets = n | 0; },
+    _calls: 0,                                          // how often the game has called in (tests)
+    want(on) { N._calls++; on = !!on; if (on !== N._want) { N._want = on; sync(); } },
+    sheets(n) { N._calls++; N._sheets = n | 0; },
     buy() { buy(); },
     privacy() { plugin("AdMob") && plugin("AdMob").showPrivacyOptionsForm().catch(() => {}); },
   };

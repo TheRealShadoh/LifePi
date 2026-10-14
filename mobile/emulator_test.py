@@ -33,7 +33,11 @@ BOOTED = ("(() => { const c = document.querySelector('#canvas');"
           " return !!c && c.width > 1 && !!localStorage['lifepi-state']; })()")
 LIVES = "JSON.parse(localStorage['lifepi-state']).players.map(p => p.life)"
 NATIVE = ("(() => { const n = window.lifepiNative; return n ? {ads: n.ads, removed: n.removed, want: n._want,"
-          " shown: n._shown, loaded: n._loaded, reserve: n.reserve, sheets: n._sheets} : null; })()")
+          " shown: n._shown, loaded: n._loaded, reserve: n.reserve, sheets: n._sheets, calls: n._calls} : null; })()")
+ESCAPE = ("(() => { const c = document.getElementById('canvas') || window;"
+          " const e = {key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true};"
+          " c.dispatchEvent(new KeyboardEvent('keydown', e));"
+          " setTimeout(() => c.dispatchEvent(new KeyboardEvent('keyup', e)), 40); return true; })()")
 
 
 def adb(*args, check=True, timeout=120):
@@ -120,7 +124,7 @@ class Page:
             self.js("1")
             term = self.js('((document.querySelector(".xterm-rows") || {}).innerText || "").slice(-800)')
             state = self.js("JSON.stringify({href: location.href, ready: document.readyState, cap: !!window.Capacitor,"
-                            " native: !!window.lifepiNative, saved: !!localStorage['lifepi-state']})")
+                            " saved: !!localStorage['lifepi-state']})") + " native " + json.dumps(self.js(NATIVE))
         except Exception as e:
             term, state = f"(no page: {e})", ""
         keep = [e for e in self.events if not e.startswith("req: https://localhost")]
@@ -174,10 +178,11 @@ def main(apk):
     p = Page()
     p.wait(BOOTED, 120, "the app to start")
     time.sleep(2)
+    p.wait("window.lifepiNative && window.lifepiNative._calls > 0", 15, "the game to talk to the app")
     n = p.js(NATIVE)
     assert n and n["ads"] and not n["want"] and not n["shown"], n
     shot("android_table_no_ad.png")
-    tap(W / 2, H / 2)                                          # the round menu button, centre
+    p.js(ESCAPE)                                               # Escape opens LifePi's menu
     p.wait("window.lifepiNative && window.lifepiNative._want", 10, "the menu to ask for the banner")
     try:
         p.wait("window.lifepiNative._loaded && window.lifepiNative.reserve > 0", 60, "a (sample) banner")
