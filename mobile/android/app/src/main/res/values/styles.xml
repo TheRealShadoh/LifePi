@@ -13,6 +13,10 @@
         <item name="windowActionBar">false</item>
         <item name="windowNoTitle">true</item>
         <item name="android:background">@null</item>
+        <!-- LifePi's dark background behind everything, also around a camera cut-out -->
+        <item name="android:windowBackground">@color/lifepi_dark</item>
+        <item name="android:statusBarColor">@color/lifepi_dark</item>
+        <item name="android:navigationBarColor">@color/lifepi_dark</item>
     </style>
 
 

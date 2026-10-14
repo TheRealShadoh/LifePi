@@ -4,11 +4,13 @@
   "webDir": "www",
   "android": {
     "allowMixedContent": false,
-    "captureInput": true
+    "captureInput": true,
+    "backgroundColor": "#121218"
   },
   "plugins": {
     "SplashScreen": {
       "launchAutoHide": true
     }
-  }
+  },
+  "backgroundColor": "#121218"
 }
