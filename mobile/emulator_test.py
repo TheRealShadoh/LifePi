@@ -33,7 +33,7 @@ BOOTED = ("(() => { const c = document.querySelector('#canvas');"
           " return !!c && c.width > 1 && !!localStorage['lifepi-state']; })()")
 LIVES = "JSON.parse(localStorage['lifepi-state']).players.map(p => p.life)"
 NATIVE = ("(() => { const n = window.lifepiNative; return n ? {ads: n.ads, removed: n.removed, want: n._want,"
-          " shown: n._shown, loaded: n._loaded, reserve: n.reserve, sheets: n._sheets, calls: n._calls} : null; })()")
+          " shown: n._shown, loaded: n._loaded, reserve: n.reserve, sheets: n._sheets, calls: n._calls, backs: n._backs} : null; })()")
 ESCAPE = ("(() => { const c = document.getElementById('canvas') || window;"
           " const e = {key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true};"
           " c.dispatchEvent(new KeyboardEvent('keydown', e));"

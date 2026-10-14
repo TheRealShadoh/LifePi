@@ -4,6 +4,7 @@ import android.os.Bundle;
 import android.view.View;
 import android.view.WindowManager;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
@@ -18,6 +19,8 @@ import com.getcapacitor.BridgeActivity;
  *  - serves pygbag's Python runtime from inside the app (see CdnWebViewClient), so it starts
  *    with no internet at all
  *  - the Remove ads purchase (BillingPlugin)
+ *  - Back closes LifePi's open sheet (menu, history...); with none open the app goes to the
+ *    background, keeping the game as it is
  */
 public class MainActivity extends BridgeActivity {
 
@@ -30,6 +33,20 @@ public class MainActivity extends BridgeActivity {
         }
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         immersive();
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (bridge == null || bridge.getWebView() == null) {
+                    moveTaskToBack(true);
+                    return;
+                }
+                bridge.getWebView().evaluateJavascript(
+                        "(window.lifepiNative && window.lifepiNative.back) ? window.lifepiNative.back() : false",
+                        handled -> {
+                            if (!"true".equals(handled)) moveTaskToBack(true);
+                        });
+            }
+        });
     }
 
     @Override

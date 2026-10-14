@@ -6,6 +6,7 @@
 //               shown only while one is; the sheet leaves the strip at the bottom free for it.
 //   sheets(n) - how many sheets are open (the Back button closes the top one)
 //   buy()     - the Remove ads purchase        privacy() - Google's ad privacy form
+// and the app calls back() for Android's Back button.
 // and reads: ads (show the Remove ads button), removed, reserve (CSS px to leave free at the
 // bottom right now: the banner's height while it's up, the last height while it loads),
 // price, privacyRequired, notice (one-off message for a toast; the game clears it).
@@ -37,20 +38,18 @@
     return C && C.isNativePlatform && C.isNativePlatform() && C.Plugins ? C.Plugins[name] : null;
   }
 
-  // Android Back: close the open sheet; with none open, leave the app (it stays in recents)
-  const App = plugin("App");
-  if (App) {
-    App.addListener("backButton", () => {
-      if (N._sheets > 0) {
-        const c = document.getElementById("canvas");
-        const ev = { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true };
-        (c || window).dispatchEvent(new KeyboardEvent("keydown", ev));
-        setTimeout(() => (c || window).dispatchEvent(new KeyboardEvent("keyup", ev)), 30);
-      } else {
-        App.minimizeApp();
-      }
-    });
-  }
+  // Android Back (MainActivity asks): close the open sheet and say so; false = nothing open, so
+  // the app goes to the background
+  N._backs = 0;
+  N.back = function () {
+    N._backs++;
+    if (N._sheets <= 0) return false;
+    const c = document.getElementById("canvas") || window;
+    const ev = { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true };
+    c.dispatchEvent(new KeyboardEvent("keydown", ev));
+    setTimeout(() => c.dispatchEvent(new KeyboardEvent("keyup", ev)), 40);
+    return true;
+  };
 
   const Billing = plugin("LifePiBilling");
   const AdMob = plugin("AdMob");
