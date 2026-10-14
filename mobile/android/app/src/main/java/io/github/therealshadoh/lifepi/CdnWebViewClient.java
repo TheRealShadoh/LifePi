@@ -39,7 +39,12 @@ public class CdnWebViewClient extends BridgeWebViewClient {
                 try {
                     InputStream in = assets.open("cdn/" + host + path);
                     Map<String, String> headers = new HashMap<>();
-                    headers.put("Access-Control-Allow-Origin", "*");   // fetched from https://localhost
+                    // fetched from the app's own origin (https://localhost), maybe with credentials:
+                    // name the origin rather than "*", which credentialed requests refuse
+                    String origin = request.getRequestHeaders().get("Origin");
+                    headers.put("Access-Control-Allow-Origin", origin != null ? origin : "*");
+                    if (origin != null) headers.put("Access-Control-Allow-Credentials", "true");
+                    headers.put("Vary", "Origin");
                     headers.put("Cache-Control", "max-age=31536000");
                     return new WebResourceResponse(mime(path), null, 200, "OK", headers, in);
                 } catch (IOException notBundled) {

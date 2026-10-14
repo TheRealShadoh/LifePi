@@ -88,17 +88,47 @@ class Page:
         else:
             raise RuntimeError("no page in the WebView")
         self.ws = websocket.create_connection(page["webSocketDebuggerUrl"], suppress_origin=True, timeout=30)
-        self.n = 0
+        self.n, self.events = 0, []
+        for m in ("Runtime.enable", "Network.enable", "Log.enable"):
+            self.call(m)
 
-    def js(self, expr):
+    def call(self, method, **params):
         self.n += 1
         my = self.n
-        self.ws.send(json.dumps({"id": my, "method": "Runtime.evaluate",
-                                 "params": {"expression": expr, "returnByValue": True, "awaitPromise": True}}))
+        self.ws.send(json.dumps({"id": my, "method": method, "params": params}))
         while True:
             msg = json.loads(self.ws.recv())
             if msg.get("id") == my:
-                return msg.get("result", {}).get("result", {}).get("value")
+                return msg.get("result", {})
+            ev, prm = msg.get("method", ""), msg.get("params", {})
+            if ev == "Runtime.exceptionThrown":
+                d = prm.get("exceptionDetails", {})
+                self.events.append("exception: " + str(d.get("exception", {}).get("description") or d.get("text"))[:300])
+            elif ev == "Runtime.consoleAPICalled" and prm.get("type") in ("error", "warning"):
+                self.events.append("console: " + " ".join(str(a.get("value", a.get("description", ""))) for a in prm.get("args", []))[:300])
+            elif ev == "Log.entryAdded" and prm.get("entry", {}).get("level") == "error":
+                e = prm["entry"]
+                self.events.append(f"log: {e.get('text', '')[:200]} {e.get('url', '')}")
+            elif ev == "Network.requestWillBeSent":
+                self.events.append("req: " + prm.get("request", {}).get("url", "")[:160])
+            elif ev == "Network.loadingFailed":
+                self.events.append(f"FAILED: {prm.get('errorText')} {prm.get('blockedReason') or ''} {prm.get('corsErrorStatus') or ''}")
+
+    def diagnose(self):
+        """What the page saw: errors, failed requests, the Python terminal."""
+        try:
+            self.js("1")
+            term = self.js('((document.querySelector(".xterm-rows") || {}).innerText || "").slice(-800)')
+            state = self.js("JSON.stringify({href: location.href, ready: document.readyState, cap: !!window.Capacitor,"
+                            " native: !!window.lifepiNative, saved: !!localStorage['lifepi-state']})")
+        except Exception as e:
+            term, state = f"(no page: {e})", ""
+        keep = [e for e in self.events if not e.startswith("req: https://localhost")]
+        return "\n".join(["page: " + str(state), *keep[-25:], "--- terminal ---", str(term)])
+
+    def js(self, expr):
+        r = self.call("Runtime.evaluate", expression=expr, returnByValue=True, awaitPromise=True)
+        return r.get("result", {}).get("value")
 
     def wait(self, expr, timeout, what):
         end = time.time() + timeout
@@ -109,8 +139,8 @@ class Page:
             except Exception:
                 pass
             time.sleep(0.5)
-        term = self.js('((document.querySelector(".xterm-rows") || {}).innerText || "").slice(-2000)')
-        raise AssertionError(f"timed out waiting for {what}\n{term}")
+        print(self.diagnose())
+        raise AssertionError(f"timed out waiting for {what}")
 
     def close(self):
         try:
@@ -137,23 +167,10 @@ def main(apk):
     W, H = screen_size()
     print("screen", W, H)
 
-    # 1. offline first start: the bundled runtime
-    network(False)
-    launch(clear=True)
-    p = Page()
-    p.wait(BOOTED, 180, "the app to start offline")
-    shot("android_offline_boot.png")
-    before = p.js(LIVES)
-    tap(W * 0.88, H * 0.75)                                    # bottom-right player's + half
-    time.sleep(1)
-    after = p.js(LIVES)
-    assert before != after and sum(after) == sum(before) + 1, (before, after)
-    print("offline start and a tap ok", after)
-    p.close()
-
-    # 2. the banner: none on the table; with the menu open, asked for and its strip kept free
+    # 1. start (with internet), and the banner: none on the table; with the menu open, asked
+    #    for and its strip kept free
     network(True)
-    launch()
+    launch(clear=True)
     p = Page()
     p.wait(BOOTED, 120, "the app to start")
     time.sleep(2)
@@ -173,7 +190,7 @@ def main(apk):
     print("menu open:", n, "(banner loaded)" if loaded else "(no ad arrived in time - network?)")
     assert n["want"] and n["sheets"] >= 1, n
 
-    # 3. Back closes the menu (and the banner goes); the app stays
+    # 2. Back closes the menu (and the banner goes); the app stays
     adb("shell", "input", "keyevent", "4")
     p.wait("window.lifepiNative && !window.lifepiNative._want && window.lifepiNative._sheets === 0", 10,
            "Back to close the menu")
@@ -184,6 +201,22 @@ def main(apk):
     shot("android_back_closed_menu.png")
     print("back closes the menu, banner gone ok")
     p.close()
+
+    # 4. offline first start (app data cleared): the bundled runtime
+    network(False)
+    launch(clear=True)
+    p = Page()
+    p.wait(BOOTED, 180, "the app to start offline")
+    shot("android_offline_boot.png")
+    before = p.js(LIVES)
+    tap(W * 0.88, H * 0.75)                                    # bottom-right player's + half
+    time.sleep(1)
+    after = p.js(LIVES)
+    assert before != after and sum(after) == sum(before) + 1, (before, after)
+    print("offline start and a tap ok", after)
+    p.close()
+
+    network(True)
 
     log = adb("logcat", "-d", "-b", "crash", check=False)
     assert PKG not in log, log[-3000:]
