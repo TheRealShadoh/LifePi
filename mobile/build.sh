@@ -43,6 +43,10 @@ os.remove("mobile/www/sw.js") if os.path.exists("mobile/www/sw.js") else None
 print("page prepared; ads:", "real banner ID" if cfg["bannerId"] else "Google's sample (test) ads")
 PY
 
+# Android's asset packaging mangles *.gz files: store them as *.gz.lpz (CdnWebViewClient serves
+# them under their real names) - the game itself is lifepi.tar.gz
+find mobile/www mobile/android/app/src/main/assets/cdn -name '*.gz' -exec mv {} {}.lpz \; -print
+
 cd mobile
 npm ci --no-audit --no-fund
 npx cap sync android
