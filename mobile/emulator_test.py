@@ -161,6 +161,21 @@ def launch(clear=False):
     adb("shell", "am", "start", "-n", f"{PKG}/.MainActivity")
 
 
+def focus():
+    lines = [l.strip() for l in adb("shell", "dumpsys", "window", check=False).splitlines() if "mCurrentFocus" in l]
+    return lines[0] if lines else ""
+
+
+def ensure_focus(timeout=20):
+    """Our activity in front: a slow emulator pops "not responding" dialogs for its own apps
+    (the launcher), and a key press would go to them instead."""
+    end = time.time() + timeout
+    while PKG not in focus() and time.time() < end:
+        adb("shell", "am", "broadcast", "-a", "android.intent.action.CLOSE_SYSTEM_DIALOGS", check=False)
+        time.sleep(1)
+    assert PKG in focus(), f"LifePi isn't in front: {focus()}"
+
+
 def tap(x, y):
     adb("shell", "input", "tap", str(int(x)), str(int(y)))
     time.sleep(1.0)
@@ -168,6 +183,7 @@ def tap(x, y):
 
 def main(apk):
     adb("install", "-r", "-g", apk, timeout=300)
+    adb("shell", "settings", "put", "global", "hide_error_dialogs", "1", check=False)   # no ANR pop-ups
     adb("logcat", "-c", check=False)
     W, H = screen_size()
     print("screen", W, H)
@@ -197,8 +213,7 @@ def main(apk):
     assert n["want"] and n["sheets"] >= 1, n
 
     # 2. Back closes the menu (and the banner goes); the app stays
-    focus = [l.strip() for l in adb("shell", "dumpsys", "window", check=False).splitlines() if "mCurrentFocus" in l]
-    print("focus before Back:", focus[:2])
+    ensure_focus()
     adb("shell", "input", "keyevent", "4")
     time.sleep(1.5)
     print("logcat:", adb("logcat", "-d", "-s", "LifePi:I", check=False).strip()[-800:])
