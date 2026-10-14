@@ -1,0 +1,19 @@
+{
+  "name": "lifepi-android",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LifePi for Android: the phone/web build of lifepi.py in a Capacitor shell, with a menu-only banner and a one-time Remove ads purchase",
+  "license": "MIT",
+  "scripts": {
+    "sync": "cap sync android"
+  },
+  "dependencies": {
+    "@capacitor-community/admob": "8.2.1",
+    "@capacitor/android": "8.5.3",
+    "@capacitor/app": "8.1.2",
+    "@capacitor/core": "8.5.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.3"
+  }
+}

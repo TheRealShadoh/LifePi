@@ -730,6 +730,76 @@ for k in range(300): app.rrect(20 + k, 20, (1, 2, 3), 5)
 assert len(app.img_cache) == n_art                         # shapes never push card art out
 print("smooth shapes ok")
 
+# Android app ads: a banner only while the menu / history / dice sheet is open, never on the
+# table; sheets leave its strip (the bottom of the physical screen, however the canvas or sheet
+# is turned) free, so no button sits under it; Remove ads / Ad privacy in the menu
+class FakeNative:
+    def __init__(self):
+        self.ads, self.removed, self.price, self.privacyRequired = True, False, "$2.99", False
+        self.reserve, self.notice, self.calls = 0, "", []
+        self.want_on = False
+    def want(self, on): self.calls.append(("want", on)); self.want_on = on; self.reserve = 50 if on else 0
+    def sheets(self, n): self.calls.append(("sheets", n))
+    def buy(self): self.calls.append(("buy",))
+    def privacy(self): self.calls.append(("privacy",))
+def native_tick(a):
+    a.native_t = 0; a.tick_native(); a.native_t = 0; a.tick_native(); a.render()
+assert app.native_bridge() is None and app.native_menu_items() == []        # Pi / browser: nothing
+app.modals.clear(); app.start_game(4, 40); app.first_anim = None
+fn = app.native = FakeNative()
+native_tick(app)
+assert ("sheets", 0) in fn.calls and app.ad_strip() is None and app.ad_reserve == 0
+app.push("menu"); native_tick(app)
+assert ("want", True) in fn.calls and ("sheets", 1) in fn.calls and app.ad_reserve == 50
+labels = [z for z in app.zones if z[1] == app.buy_remove_ads]
+assert len(labels) == 1
+labels[0][1](); assert fn.calls[-1] == ("buy",)
+pygame.image.save(app.canvas, os.path.join(shots, "android_menu_ad_strip.png"))
+def screen_points_free(a):
+    """No touch zone in the banner strip at the bottom of the physical screen."""
+    sw, sh = a.screen.get_size()
+    rot = a.rot()
+    for sx in range(4, sw, 13):
+        for sy in range(sh - 49, sh, 7):
+            # screen point -> canvas point (canvas turned clockwise by rot onto the screen)
+            cx, cy = {0: (sx, sy), 90: (sy, a.H - 1 - sx), 180: (a.W - 1 - sx, a.H - 1 - sy),
+                      270: (a.W - 1 - sy, sx)}[rot]
+            hits = [z for z in a.zones if z[0]((cx, cy))]
+            assert not hits, (rot, a.modals[-1]["kind"], a.modals[-1].get("angle"), (sx, sy), (cx, cy))
+for rot in (0, 90, 180, 270):
+    app.settings["rotation"] = rot; app.make_canvas()
+    for kind in ("menu", "history", "dice"):
+        for ang in (0, 90, 180, 270):
+            app.modals.clear(); app.push(kind, **({"result": "", "sub": ""} if kind == "dice" else {}))
+            app.modals[-1]["angle"] = ang
+            native_tick(app)
+            strip = app.ad_strip(); assert strip and min(strip.w, strip.h) == 50, (rot, kind, strip)
+            screen_points_free(app)
+            # the strip really is the screen's bottom edge: paint it, put the frame on screen, look
+            app.canvas.fill((255, 0, 0), strip); app.present()
+            sw, sh = app.screen.get_size()
+            assert app.screen.get_at((sw // 2, sh - 3))[:3] == (255, 0, 0), (rot, strip)
+            assert app.screen.get_at((sw // 2, 3))[:3] != (255, 0, 0), (rot, strip)
+app.settings["rotation"] = 0; app.make_canvas()
+# the table and other sheets: no banner, nothing reserved
+app.modals.clear(); native_tick(app)
+assert fn.want_on is False and app.ad_strip() is None
+app.push("newgame", n=4, life=40, seating="table"); native_tick(app)
+assert fn.want_on is False and app.ad_strip() is None
+app.modals.clear(); native_tick(app)
+# messages from the purchase show as a toast
+fn.notice = "Thanks for supporting LifePi! Ads are gone."; native_tick(app)
+assert app.toast[0].startswith("Thanks") and fn.notice == ""
+# bought: no Remove ads; the EU / UK privacy form gets a button when Google says it's needed
+fn.removed, fn.privacyRequired = True, True
+app.push("menu"); native_tick(app)
+assert not [z for z in app.zones if z[1] == app.buy_remove_ads]
+pz = [z for z in app.zones if z[1] == app.ad_privacy]; assert len(pz) == 1
+pz[0][1](); assert fn.calls[-1] == ("privacy",)
+app.modals.clear(); native_tick(app)
+app.native = None
+print("android ads: menu-only banner, free strip at every rotation, remove ads, privacy ok")
+
 # music: the Spotify Connect speaker's local API (a stand-in server here)
 import http.server, threading as _th
 sent = []

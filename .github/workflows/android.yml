@@ -1,0 +1,114 @@
+name: Android app
+
+# Builds LifePi for Google Play (mobile/) and tests the real APK in an emulator.
+# Secrets (Settings > Secrets and variables > Actions), all optional:
+#   LIFEPI_UPLOAD_KEYSTORE_B64, LIFEPI_UPLOAD_STORE_PASSWORD  - signs the Play bundle (upload key)
+#   ADMOB_APP_ID, ADMOB_BANNER_ID                             - real ads (else Google's sample ads)
+# The signed bundle to upload to Play Console is the "lifepi-play-bundle" artifact of a run.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths: ["lifepi.py", "web/**", "mobile/**", "tests/web_test.py", ".github/workflows/android.yml"]
+  pull_request:
+    paths: ["lifepi.py", "web/**", "mobile/**", ".github/workflows/android.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (web app + bundled runtime + Capacitor + Gradle)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: pip install pygbag==0.9.3 pygame-ce websocket-client
+      - name: Upload key
+        env:
+          KEYSTORE_B64: ${{ secrets.LIFEPI_UPLOAD_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/upload.p12"
+            echo "LIFEPI_UPLOAD_KEYSTORE=$RUNNER_TEMP/upload.p12" >> "$GITHUB_ENV"
+            echo "signing with the upload key"
+          else
+            echo "::warning::no LIFEPI_UPLOAD_KEYSTORE_B64 secret - the release bundle is unsigned (can't go to Play)"
+          fi
+      - name: Build
+        env:
+          SDL_VIDEODRIVER: dummy
+          LIFEPI_UPLOAD_STORE_PASSWORD: ${{ secrets.LIFEPI_UPLOAD_STORE_PASSWORD }}
+          ADMOB_APP_ID: ${{ secrets.ADMOB_APP_ID }}
+          ADMOB_BANNER_ID: ${{ secrets.ADMOB_BANNER_ID }}
+        run: |
+          # pygbag's runtime comes from its CDN: retry the web part once before failing
+          mobile/build.sh || { echo "retrying once"; sleep 20; mobile/build.sh; }
+      - name: What's bundled
+        run: |
+          du -sh mobile/android/app/src/main/assets/cdn
+          ls -la mobile/android/app/build/outputs/bundle/release/ mobile/android/app/build/outputs/apk/*/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lifepi-play-bundle
+          path: mobile/android/app/build/outputs/bundle/release/*.aab
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lifepi-apk
+          path: |
+            mobile/android/app/build/outputs/apk/debug/*.apk
+            mobile/android/app/build/outputs/apk/release/*.apk
+
+  emulator:
+    name: emulator test (offline start, menu-only banner, Back)
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install websocket-client
+      - uses: actions/download-artifact@v4
+        with:
+          name: lifepi-apk
+          path: apk
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run in the emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          LIFEPI_SHOTS: ${{ runner.temp }}/android-shots
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          script: python mobile/emulator_test.py "$(find apk -name '*debug*.apk' | head -1)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots-android
+          path: ${{ runner.temp }}/android-shots/*.png

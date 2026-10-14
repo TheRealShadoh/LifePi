@@ -26,32 +26,36 @@ OUT = ROOT / "build" / "web"
 THEME = "#121218"
 
 
-def make_icons(folder):
-    """App icons drawn with pygame: four seats around a life total."""
+def draw_icon(size, pad, background=(18, 18, 24)):
+    """LifePi's icon, drawn with pygame: four seats around a life total (background None:
+    transparent, for Android's adaptive icon foreground)."""
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     import pygame
     pygame.display.init()
     pygame.font.init()
     colours = [(46, 78, 140), (150, 42, 42), (38, 108, 62), (176, 150, 84)]
+    s = pygame.Surface((size, size), pygame.SRCALPHA)
+    s.fill((0, 0, 0, 0) if background is None else background)
+    inner = size - 2 * pad
+    gap = max(2, inner // 40)
+    half = (inner - gap) // 2
+    for k, c in enumerate(colours):
+        r = pygame.Rect(pad + (k % 2) * (half + gap), pad + (k // 2) * (half + gap), half, half)
+        pygame.draw.rect(s, c, r, border_radius=max(3, inner // 10))
+    rad = inner // 4
+    centre = (size // 2, size // 2)
+    pygame.draw.circle(s, (18, 18, 24), centre, rad + gap * 2)
+    pygame.draw.circle(s, (240, 240, 246), centre, rad, max(2, size // 64))
+    f = pygame.font.Font(None, int(rad * 1.25))
+    t = f.render("40", True, (255, 255, 255))
+    s.blit(t, t.get_rect(center=(centre[0], centre[1] + size // 90)))
+    return s
 
-    def icon(size, pad):
-        s = pygame.Surface((size, size))
-        s.fill((18, 18, 24))
-        inner = size - 2 * pad
-        gap = max(2, inner // 40)
-        half = (inner - gap) // 2
-        for k, c in enumerate(colours):
-            r = pygame.Rect(pad + (k % 2) * (half + gap), pad + (k // 2) * (half + gap), half, half)
-            pygame.draw.rect(s, c, r, border_radius=max(3, inner // 10))
-        rad = inner // 4
-        centre = (size // 2, size // 2)
-        pygame.draw.circle(s, (18, 18, 24), centre, rad + gap * 2)
-        pygame.draw.circle(s, (240, 240, 246), centre, rad, max(2, size // 64))
-        f = pygame.font.Font(None, int(rad * 1.25))
-        t = f.render("40", True, (255, 255, 255))
-        s.blit(t, t.get_rect(center=(centre[0], centre[1] + size // 90)))
-        return s
 
+def make_icons(folder):
+    """The web app's icons (favicon, home screen, maskable)."""
+    import pygame
+    icon = draw_icon
     folder.mkdir(parents=True, exist_ok=True)
     for name, size, pad in (("favicon.png", 64, 2), ("icon-192.png", 192, 10), ("icon-512.png", 512, 26),
                             ("apple-touch-icon.png", 180, 12), ("icon-maskable-512.png", 512, 96)):
@@ -164,6 +168,7 @@ def build():
     (OUT / "sw.js").write_text(SERVICE_WORKER % {"version": int(time.time()), "shell": json.dumps(shell)},
                                encoding="utf-8")
     (OUT / ".nojekyll").write_text("")        # GitHub Pages: serve files as they are
+    shutil.copy(ROOT / "web" / "privacy.html", OUT / "privacy.html")   # the Play listing links here
     print(f"\nBuilt {OUT}  ({sum(f.stat().st_size for f in OUT.rglob('*') if f.is_file()) // 1024} KB)")
 
 

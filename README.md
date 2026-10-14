@@ -17,7 +17,7 @@ life counter — released under the MIT licence so anyone can use, fork and impr
 **Contents:** [Features](#features) · [Install on a Pi](#install-on-a-pi) ·
 [Updates](#updates) · [Music (Spotify)](#music-spotify) · [Sounds](#sounds) ·
 [TV on the Pi's HDMI](#tv-on-the-pis-hdmi) · [Phones & TV over Wi-Fi](#phones--tv-over-wi-fi) ·
-[Phone app](#on-a-phone-or-tablet-no-pi-needed) · [Docker](#run-it-in-a-browser-docker) ·
+[Phone app](#on-a-phone-or-tablet-no-pi-needed) · [Android app](#android-app-google-play) · [Docker](#run-it-in-a-browser-docker) ·
 [Controls](#controls) · [Troubleshooting](#troubleshooting) · [Releases](#releases) · [Tests](#tests)
 
 ## Features
@@ -243,6 +243,24 @@ python web/build.py --serve    # try it at http://127.0.0.1:8000 (use 127.0.0.1,
 ```
 
 Any HTTPS host works; installing and offline mode need HTTPS (or localhost).
+
+## Android app (Google Play)
+
+`mobile/` wraps the same phone build in a native Android app ([Capacitor](https://capacitorjs.com)) for
+Google Play. It's free with every feature:
+
+- **Ads only where they don't get in the way:** a small banner at the bottom of the **menu, history and dice**
+  screens, never on the life totals. Those screens leave room for it, so it never covers a button. No pop-up
+  ads, no ads at launch.
+- **Remove ads:** a one-time purchase (menu > *Remove ads*) turns them off for good on all your devices.
+- **Works with no internet:** the Python runtime is inside the app; only card search and art need a connection.
+- Keeps the screen on, runs full screen, and Android's Back button closes the open sheet.
+
+The app's privacy policy is [privacy.html](https://therealshadoh.github.io/LifePi/privacy.html). Builds run on
+GitHub Actions ([android.yml](.github/workflows/android.yml)): web build, then `mobile/vendor_cdn.py` copies
+pygbag's runtime into the app, then Gradle. An emulator test checks the app starts offline, shows no banner on
+the table, and that Back closes the menu. To build it yourself (Android SDK, JDK 21, Node, Python + pygbag,
+Chrome): `mobile/build.sh`.
 
 ## Run it in a browser (Docker)
 

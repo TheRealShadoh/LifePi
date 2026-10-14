@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.12.1"
+VERSION = "1.13.0"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -1645,6 +1645,9 @@ class App:
         self.idle = False
         self.sfx, self.sfx_t = None, 0.0          # damage sound (loaded on first use)
         self.now_playing, self.banner_t0, self.banner_thread = None, 0.0, None
+        # Android app (mobile/): ads only inside the menu / history / dice sheets
+        self.native, self.native_t, self.native_sent = None, 0.0, (None, None)
+        self.ad_reserve = 0                       # screen px the banner takes at the bottom
         self.canvas_clean = None                  # the last full frame without the banner
         self.cast = None                          # (Chromecast, name) while casting the TV view
         self.art_results, self.art_pending, self.art_retry_at = queue.Queue(), set(), 0
@@ -3096,10 +3099,107 @@ class App:
         v.finish()
 
     # ------------------------------------------------------------------ modals
+    # ---- Android app: the banner (only on these sheets) and the Remove ads purchase
+    AD_SHEETS = ("menu", "history", "dice")
+
+    def native_bridge(self):
+        """The Android app's window.lifepiNative (mobile/native.js), or None - in a browser, on
+        a Pi. Tests set app.native to a stand-in."""
+        if self.native is None and WEB:
+            try:
+                import platform
+                n = platform.window.lifepiNative
+                self.native = n if str(n) not in ("undefined", "null", "None") else False
+            except Exception:
+                self.native = False
+        return self.native or None
+
+    def tick_native(self):
+        n = self.native_bridge()
+        if not n:
+            return
+        now = time.time()
+        top = self.modals[-1]["kind"] if self.modals else None
+        want, count = top in self.AD_SHEETS, len(self.modals)
+        if (want, count) != self.native_sent:     # tell it at once: the banner follows the sheet
+            if want != self.native_sent[0]:
+                n.want(want)
+            if count != self.native_sent[1]:
+                n.sheets(count)
+            self.native_sent = (want, count)
+            self.native_t = 0
+        if now - self.native_t < 0.2:
+            return
+        self.native_t = now
+        try:
+            css = float(n.reserve or 0) if want else 0.0
+            px = round(css * WEB_SCALE[0]) if css > 0 else 0
+            note = str(n.notice or "")
+        except Exception:
+            return
+        if px != self.ad_reserve:
+            self.ad_reserve = px
+            self.dirty = True
+        if note and note not in ("undefined", "null"):
+            n.notice = ""
+            self.say(note)
+
+    def ad_strip(self):
+        """The canvas area under the banner (always the bottom of the physical screen, whichever
+        way the canvas is turned), or None."""
+        h = min(self.ad_reserve, min(self.W, self.H) // 4)
+        if h <= 0 or not self.modals or self.modals[-1]["kind"] not in self.AD_SHEETS:
+            return None
+        rot = self.rot()                          # canvas is turned clockwise by rot onto the screen
+        if rot == 0:
+            return pygame.Rect(0, self.H - h, self.W, h)
+        if rot == 180:
+            return pygame.Rect(0, 0, self.W, h)
+        if rot == 90:
+            return pygame.Rect(self.W - h, 0, h, self.H)
+        return pygame.Rect(0, 0, h, self.H)
+
+    def sheet_area(self):
+        """Where a sheet may draw: the whole canvas, minus the banner's strip while one shows."""
+        full = pygame.Rect(0, 0, self.W, self.H)
+        strip = self.ad_strip()
+        if not strip:
+            return full
+        self.canvas.fill(DARK, strip)
+        if strip.w == self.W:                      # top or bottom
+            return pygame.Rect(0, strip.bottom if strip.y == 0 else 0, self.W, self.H - strip.h)
+        return pygame.Rect(strip.right if strip.x == 0 else 0, 0, self.W - strip.w, self.H)
+
+    def buy_remove_ads(self):
+        n = self.native_bridge()
+        if n:
+            n.buy()
+
+    def ad_privacy(self):
+        n = self.native_bridge()
+        if n:
+            n.privacy()
+
+    def native_menu_items(self):
+        """Remove ads (and Google's ad privacy form where the law asks for one)."""
+        n = self.native_bridge()
+        out = []
+        try:
+            if n and n.ads and not n.removed:
+                price = str(n.price or "")
+                out.append((f"Remove ads ({price})" if price and price not in ("undefined", "null") else "Remove ads",
+                            self.buy_remove_ads, BTN_OK))
+            if n and n.privacyRequired:
+                out.append(("Ad privacy", self.ad_privacy, BTN))
+        except Exception:
+            pass
+        return out
+
     def modal_view(self, m, title, accent=HEADER):
         """Full-screen modal facing m["angle"] (0/90/180/270). Draw with v.w x v.h - for a
-        player at a table end that is portrait on a landscape screen."""
-        v = View(self, (0, 0, self.W, self.H), m.get("angle", 0))
+        player at a table end that is portrait on a landscape screen. In the Android app the
+        menu, history and dice sheets leave the banner's strip free (sheet_area)."""
+        v = View(self, self.sheet_area(), m.get("angle", 0))
         v.surf.fill(DARK)
         v.u = max(40, min(v.h // 8, v.w // 8))  # basic row height (portrait: not taller)
         pygame.draw.rect(v.surf, accent, (0, 0, v.w, v.u))
@@ -3140,20 +3240,27 @@ class App:
             items = [it for it in items if it[0] not in ("Phones & TV", "Cast to TV", "Quit", "Music")
                      and not it[0].startswith("Sounds")]
             items.insert(5, (f"Auto-rotate: {'on' if st['auto_rotate'] else 'off'}", self.toggle_auto_rotate, BTN))
+        back = next(k for k, it in enumerate(items) if it[0] == "Back to game")
+        items[back:back] = self.native_menu_items()  # Android app: Remove ads / Ad privacy
         if self.update_available():
             items.insert(len(items) - (0 if WEB else 1),
                          (f"Update to {self.settings['update_latest'].lstrip('v')}", self.start_update, BTN_OK))
         elif self.update_mode():                  # installed copies: check now, install if newer
             items.insert(len(items) - (0 if WEB else 1), ("Check for updates", self.update_now, BTN))
-        rh = (v.h - u - u // 2) // ((len(items) + 1) // 2)
+        fs = max(10, min(u * 0.26, W * 0.022))  # the disclaimer's two lines at the bottom
+        rh = (v.h - u - max(u // 2, int(fs * 2.2) + 8)) // ((len(items) + 1) // 2)
         for k, (label, fn, bg) in enumerate(items):
             r = (k % 2 * W // 2, u + k // 2 * rh, W // 2, rh)
             if label in armed and self.is_armed(armed[label]):
                 label, bg = f"Tap again to {label.split()[0].lower()}", BTN_BAD
             self.button(v, r, label, fn, bg=bg, size=min(rh * 0.42, W * 0.035))
-        self.text(v.surf, "Unofficial fan content - not affiliated with Wizards of the Coast. "
-                  "Card art via Scryfall.", u * 0.3, GREY, maxw=W - 20, shadow=False,
-                  midbottom=(W // 2, v.h - 4))
+        # Wizards' Fan Content Policy asks for this wording
+        self.text(v.surf, "LifePi is unofficial Fan Content permitted under the Fan Content Policy. "
+                  "Not approved/endorsed by Wizards.", fs, GREY, maxw=W - 20, shadow=False,
+                  midbottom=(W // 2, v.h - 4 - int(fs * 1.05)))
+        self.text(v.surf, "Portions of the materials used are property of Wizards of the Coast. "
+                  "\u00a9Wizards of the Coast LLC. Card art via Scryfall.", fs, GREY, maxw=W - 20,
+                  shadow=False, midbottom=(W // 2, v.h - 4))
         v.finish()
 
     def open_remote(self):
@@ -4035,6 +4142,9 @@ class App:
             if age > 2.6:
                 pl.set_alpha(int(255 * (3.2 - age) / 0.6))
             lift = self.banner_layout()[0].h if self.banner_text() else 0   # sits above the banner
+            strip = self.ad_strip()
+            if strip and strip.bottom == self.H and strip.w == self.W:
+                lift = max(lift, strip.h)                                   # ...or the ad
             self.canvas.blit(pl, pl.get_rect(midbottom=(self.W // 2, self.H - 12 - lift)))
         if self.banner_text():
             self.canvas_clean = self.canvas.copy()
@@ -4474,6 +4584,7 @@ class App:
         self.tick_remote()
         self.tick_art()
         self.tick_update()
+        self.tick_native()
         now = time.time()
         if WEB and now - self.web_checked > 0.5:     # phone rotated / window resized
             self.web_checked = now
@@ -5408,6 +5519,9 @@ def web_screen_angle():
     return as_int(a, 0) % 360 // 90 * 90
 
 
+WEB_SCALE = [1.0]                                    # screen px per CSS px (browser)
+
+
 def web_screen_size():
     """Browser: framebuffer for the page's current shape (sharper on high-DPI phones, capped
     so drawing stays fast)."""
@@ -5420,6 +5534,7 @@ def web_screen_size():
     except Exception:
         pass
     scale = min(2.0, float(platform.window.devicePixelRatio or 1), 1600 / max(w, h, 1))
+    WEB_SCALE[0] = scale
     return max(320, round(w * scale)), max(240, round(h * scale))
 
 

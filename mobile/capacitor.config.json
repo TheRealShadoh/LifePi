@@ -1,0 +1,14 @@
+{
+  "appId": "io.github.therealshadoh.lifepi",
+  "appName": "LifePi",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": true
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchAutoHide": true
+    }
+  }
+}
