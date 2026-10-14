@@ -36,7 +36,7 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: mobile/package-lock.json
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
@@ -59,8 +59,20 @@ jobs:
           ADMOB_APP_ID: ${{ secrets.ADMOB_APP_ID }}
           ADMOB_BANNER_ID: ${{ secrets.ADMOB_BANNER_ID }}
         run: |
-          # pygbag's runtime comes from its CDN: retry the web part once before failing
-          mobile/build.sh || { echo "retrying once"; sleep 20; mobile/build.sh; }
+          # pygbag's runtime comes from its CDN: retry once before failing. On failure the log's
+          # tail also goes into an annotation, readable without downloading the log.
+          set -o pipefail
+          ok=0
+          for try in 1 2; do
+            mobile/build.sh 2>&1 | tee "$RUNNER_TEMP/build.log" && { ok=1; break; }
+            echo "attempt $try failed"; sleep 20
+          done
+          if [ "$ok" != 1 ]; then
+            grep -E "error|Error|FAIL|What went wrong|^e: |\.java:[0-9]+|Traceback|assert" "$RUNNER_TEMP/build.log" | tail -40 > "$RUNNER_TEMP/err.txt" || true
+            tail -40 "$RUNNER_TEMP/build.log" >> "$RUNNER_TEMP/err.txt"
+            echo "::error title=build failed::$(sed 's/%/%25/g' "$RUNNER_TEMP/err.txt" | sed ':a;N;$!ba;s/\n/%0A/g' | cut -c1-30000)"
+            exit 1
+          fi
       - name: What's bundled
         run: |
           du -sh mobile/android/app/src/main/assets/cdn
@@ -106,7 +118,7 @@ jobs:
           profile: pixel_6
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
-          script: python mobile/emulator_test.py "$(find apk -name '*debug*.apk' | head -1)"
+          script: python mobile/emulator_test.py "$(find apk -name '*debug*.apk' | head -1)" > "$RUNNER_TEMP/emu.log" 2>&1 || { cat "$RUNNER_TEMP/emu.log"; echo "::error title=emulator test failed::$(tail -40 "$RUNNER_TEMP/emu.log" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g' | cut -c1-30000)"; exit 1; }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
