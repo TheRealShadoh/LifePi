@@ -8,7 +8,7 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         // From the build (mobile/build.sh): versionName = LifePi's VERSION, versionCode derived from it
-        versionCode (System.getenv("LIFEPI_VERSION_CODE") ?: "1") as Integer
+        versionCode Integer.parseInt(System.getenv("LIFEPI_VERSION_CODE") ?: "1")
         versionName System.getenv("LIFEPI_VERSION") ?: "dev"
         // AdMob app ID (AdMob > Apps > App settings). Google's sample ID until the real one is set.
         manifestPlaceholders = [admobAppId: System.getenv("ADMOB_APP_ID") ?: "ca-app-pub-3940256099942544~3347511713"]
