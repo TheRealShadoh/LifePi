@@ -13,6 +13,7 @@ page's requests for those URLs from there; anything missing still comes from the
 import json
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -71,10 +72,16 @@ def main():
         dest = OUT / parts.hostname / parts.path.lstrip("/")
         if parts.path.endswith("/"):
             continue                                        # a directory listing, not a file
-        dest.parent.mkdir(parents=True, exist_ok=True)
         req = urllib.request.Request(u, headers={"User-Agent": "LifePi-build"})
-        with urllib.request.urlopen(req, timeout=120) as r:
-            data = r.read()
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                data = r.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 404:                                # the page probes for optional files
+                print(f"  (not on the CDN, skipped)  {u}")
+                continue
+            raise
+        dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
         total += len(data)
         print(f"  {len(data) / 1024:8.0f} KB  {u}")
