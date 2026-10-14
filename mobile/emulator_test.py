@@ -207,6 +207,29 @@ def main(apk):
     print("back closes the menu, banner gone ok")
     p.close()
 
+    # 3. store screenshots: a game in progress (names, damage, poison, random card art)
+    p.js("""(() => { const s = JSON.parse(localStorage['lifepi-state']);
+      const names = ["Chris", "Mike", "Nate", "Jared"], life = [34, 29, 42, 17];
+      s.players.forEach((p, i) => { p.name = names[i] || p.name; p.life = life[i] ?? p.life;
+                                    p.art = null; p.art_auto = false; p.credit = ""; });
+      if (s.players[1]) s.players[1].cmd[0] = 12;
+      if (s.players[3]) { s.players[3].cmd[2] = 18; s.players[3].counters.poison = 3; }
+      s.history = []; s.first = 0;
+      localStorage['lifepi-state'] = JSON.stringify(s); return true; })()""")
+    p.close()
+    adb("shell", "am", "force-stop", PKG)                     # before it saves over the demo game
+    launch()
+    p = Page()
+    p.wait(BOOTED, 120, "the demo game")
+    time.sleep(12)                                            # random art arrives
+    shot("store_1_table.png")
+    p.js("window.lifepiNative && (window.lifepiNative.removed = true)")   # no (sample) ad in a store shot
+    p.js(ESCAPE)
+    time.sleep(2.5)
+    shot("store_2_menu.png")
+    p.js(ESCAPE)
+    p.close()
+
     # 4. offline first start (app data cleared): the bundled runtime
     network(False)
     launch(clear=True)

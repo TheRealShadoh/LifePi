@@ -92,6 +92,8 @@ jobs:
     name: emulator test (offline start, menu-only banner, Back)
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write        # screenshots to the ci-shots branch (artifacts aren't reachable everywhere)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -119,6 +121,17 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
           script: python mobile/emulator_test.py "$(find apk -name '*debug*.apk' | head -1)" > "$RUNNER_TEMP/emu.log" 2>&1 || { cat "$RUNNER_TEMP/emu.log"; echo "::error title=emulator test failed::$(tail -70 "$RUNNER_TEMP/emu.log" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g' | cut -c1-30000)"; exit 1; }
+      - name: Screenshots to the ci-shots branch
+        if: always() && github.event_name != 'pull_request'
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP/android-shots" 2>/dev/null && ls *.png >/dev/null 2>&1 || exit 0
+          git init -q -b ci-shots
+          git add -A
+          git -c user.name="github-actions" -c user.email="github-actions@users.noreply.github.com" \
+            commit -qm "Android screenshots for ${GITHUB_SHA::7}"
+          git push -qf "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" ci-shots
       - uses: actions/upload-artifact@v4
         if: always()
         with:

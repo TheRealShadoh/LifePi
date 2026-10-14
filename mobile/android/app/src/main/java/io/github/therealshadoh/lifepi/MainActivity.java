@@ -1,6 +1,7 @@
 package io.github.therealshadoh.lifepi;
 
 import android.os.Bundle;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
 
@@ -36,17 +37,31 @@ public class MainActivity extends BridgeActivity {
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
-                if (bridge == null || bridge.getWebView() == null) {
-                    moveTaskToBack(true);
-                    return;
-                }
-                bridge.getWebView().evaluateJavascript(
-                        "(window.lifepiNative && window.lifepiNative.back) ? window.lifepiNative.back() : false",
-                        handled -> {
-                            if (!"true".equals(handled)) moveTaskToBack(true);
-                        });
+                back();                        // gesture navigation
             }
         });
+    }
+
+    /** The Back key, before the WebView sees it: the page's keyboard handling would swallow it. */
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent e) {
+        if (e.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+            if (e.getAction() == KeyEvent.ACTION_UP && !e.isCanceled()) back();
+            return true;
+        }
+        return super.dispatchKeyEvent(e);
+    }
+
+    private void back() {
+        if (bridge == null || bridge.getWebView() == null) {
+            moveTaskToBack(true);
+            return;
+        }
+        bridge.getWebView().evaluateJavascript(
+                "(window.lifepiNative && window.lifepiNative.back) ? window.lifepiNative.back() : false",
+                handled -> {
+                    if (!"true".equals(handled)) moveTaskToBack(true);
+                });
     }
 
     @Override
