@@ -37,6 +37,7 @@ public class CdnWebViewClient extends BridgeWebViewClient {
         Uri url = request.getUrl();
         String host = url.getHost();
         String path = url.getPath();
+        if (path != null) path = path.replaceAll("/+", "/");     // pygbag asks for ".../0.9.3//x.js" too
         if (!"GET".equals(request.getMethod()) || host == null || path == null || path.contains("..")) {
             return super.shouldInterceptRequest(view, request);
         }

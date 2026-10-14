@@ -92,7 +92,7 @@ class Page:
         else:
             raise RuntimeError("no page in the WebView")
         self.ws = websocket.create_connection(page["webSocketDebuggerUrl"], suppress_origin=True, timeout=30)
-        self.n, self.events = 0, []
+        self.n, self.events, self.urls = 0, [], {}
         for m in ("Runtime.enable", "Network.enable", "Log.enable"):
             self.call(m)
 
@@ -114,9 +114,12 @@ class Page:
                 e = prm["entry"]
                 self.events.append(f"log: {e.get('text', '')[:200]} {e.get('url', '')}")
             elif ev == "Network.requestWillBeSent":
-                self.events.append("req: " + prm.get("request", {}).get("url", "")[:160])
+                url = prm.get("request", {}).get("url", "")
+                self.urls[prm.get("requestId")] = url
+                self.events.append("req: " + url[:160])
             elif ev == "Network.loadingFailed":
-                self.events.append(f"FAILED: {prm.get('errorText')} {prm.get('blockedReason') or ''} {prm.get('corsErrorStatus') or ''}")
+                url = self.urls.get(prm.get("requestId"), "?")
+                self.events.append(f"FAILED: {url[:160]} {prm.get('errorText')} {prm.get('blockedReason') or ''}")
 
     def diagnose(self):
         """What the page saw: errors, failed requests, the Python terminal."""
@@ -127,9 +130,11 @@ class Page:
                             " saved: !!localStorage['lifepi-state']})") + " native " + json.dumps(self.js(NATIVE))
         except Exception as e:
             term, state = f"(no page: {e})", ""
-        keep = [e for e in self.events if not e.startswith("req: https://localhost")
-                and "MEDIA USER ACTION" not in e]          # pygbag's audio probe, retried every 2 s
-        return "\n".join(["page: " + str(state), *keep[-30:], "--- terminal ---", str(term)])
+        keep = [e for e in self.events if not e.startswith("req: ")
+                and "MEDIA USER ACTION" not in e and not e.startswith("    at ")]
+        failed = sorted({e for e in self.events if e.startswith("FAILED: ")})
+        return "\n".join(["page: " + str(state), *keep[-20:], "--- failed requests ---", *failed,
+                          "--- terminal ---", str(term)])
 
     def js(self, expr):
         try:

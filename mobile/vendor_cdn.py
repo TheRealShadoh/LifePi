@@ -11,6 +11,7 @@ mobile/android/app/src/main/assets/cdn/<host>/<path>. The app's CdnWebViewClient
 page's requests for those URLs from there; anything missing still comes from the network.
 """
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -23,6 +24,9 @@ sys.path.insert(0, str(ROOT / "tests"))
 import web_test as wt                       # noqa: E402  (Browser, serve, wait_for, BOOTED)
 
 HOSTS = {"pygame-web.github.io"}           # keep in step with CdnWebViewClient.HOSTS
+# asked for on a phone but not in a desktop browser (seen offline in the emulator test)
+EXTRA = ["https://pygame-web.github.io/cdn/0.9.3/browserfs.min.js",
+         "https://pygame-web.github.io/cdn/0.9.3/empty.ogg"]
 OUT = ROOT / "mobile" / "android" / "app" / "src" / "main" / "assets" / "cdn"
 
 LIST_URLS = """(async () => {
@@ -63,8 +67,10 @@ def main():
         b.close()
         httpd.shutdown()
 
-    wanted = sorted({u.split("#")[0].split("?")[0] for u in urls
-                     if urllib.parse.urlsplit(u).hostname in HOSTS})
+    def clean(u):
+        parts = urllib.parse.urlsplit(u.split("#")[0].split("?")[0])
+        return f"{parts.scheme}://{parts.hostname}{re.sub('/+', '/', parts.path)}"
+    wanted = sorted({clean(u) for u in list(urls) + EXTRA if urllib.parse.urlsplit(u).hostname in HOSTS})
     assert wanted, "no CDN files seen - did the page load pygbag's runtime?"
     total = 0
     for u in wanted:
