@@ -132,7 +132,13 @@ class Page:
         return "\n".join(["page: " + str(state), *keep[-30:], "--- terminal ---", str(term)])
 
     def js(self, expr):
-        r = self.call("Runtime.evaluate", expression=expr, returnByValue=True, awaitPromise=True)
+        try:
+            r = self.call("Runtime.evaluate", expression=expr, returnByValue=True, awaitPromise=True)
+        except (websocket.WebSocketException, OSError) as e:      # DevTools dropped: once more
+            print(f"devtools connection lost ({e!r}); app pid now: {adb('shell', 'pidof', PKG, check=False).strip()}")
+            self.close()
+            self.__init__()
+            r = self.call("Runtime.evaluate", expression=expr, returnByValue=True, awaitPromise=True)
         return r.get("result", {}).get("value")
 
     def wait(self, expr, timeout, what):
@@ -275,4 +281,11 @@ def main(apk):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    try:
+        main(sys.argv[1])
+    except BaseException:
+        print("--- on failure ---")
+        print("focus:", focus())
+        print("crash log:", adb("logcat", "-d", "-b", "crash", check=False)[-2500:])
+        print("LifePi log:", adb("logcat", "-d", "-s", "LifePi:I", "chromium:E", "AndroidRuntime:E", check=False)[-2000:])
+        raise
