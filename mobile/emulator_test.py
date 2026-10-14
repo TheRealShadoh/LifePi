@@ -127,8 +127,9 @@ class Page:
                             " saved: !!localStorage['lifepi-state']})") + " native " + json.dumps(self.js(NATIVE))
         except Exception as e:
             term, state = f"(no page: {e})", ""
-        keep = [e for e in self.events if not e.startswith("req: https://localhost")]
-        return "\n".join(["page: " + str(state), *keep[-25:], "--- terminal ---", str(term)])
+        keep = [e for e in self.events if not e.startswith("req: https://localhost")
+                and "MEDIA USER ACTION" not in e]          # pygbag's audio probe, retried every 2 s
+        return "\n".join(["page: " + str(state), *keep[-30:], "--- terminal ---", str(term)])
 
     def js(self, expr):
         r = self.call("Runtime.evaluate", expression=expr, returnByValue=True, awaitPromise=True)
@@ -176,7 +177,7 @@ def main(apk):
     network(True)
     launch(clear=True)
     p = Page()
-    p.wait(BOOTED, 120, "the app to start")
+    p.wait(BOOTED, 300, "the app to start")                  # a cold emulator can be very slow
     time.sleep(2)
     p.wait("window.lifepiNative && window.lifepiNative._calls > 0", 15, "the game to talk to the app")
     n = p.js(NATIVE)
