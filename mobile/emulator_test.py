@@ -184,6 +184,8 @@ def tap(x, y):
 def main(apk):
     adb("install", "-r", "-g", apk, timeout=300)
     adb("shell", "settings", "put", "global", "hide_error_dialogs", "1", check=False)   # no ANR pop-ups
+    # Android's one-time "Viewing full screen" tip (a person taps "Got it"), already seen
+    adb("shell", "settings", "put", "secure", "immersive_mode_confirmations", "confirmed", check=False)
     adb("logcat", "-c", check=False)
     W, H = screen_size()
     print("screen", W, H)
