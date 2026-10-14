@@ -85,7 +85,8 @@ class Page:
         for _ in range(60):
             try:
                 tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json", timeout=5).read())
-                page = next(t for t in tabs if t.get("type") == "page")
+                # LifePi's page - the ads SDK has hidden pages of its own in the same process
+                page = next(t for t in tabs if t.get("type") == "page" and t.get("url", "").startswith("https://localhost"))
                 break
             except Exception:
                 time.sleep(1)
