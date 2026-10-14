@@ -197,7 +197,11 @@ def main(apk):
     assert n["want"] and n["sheets"] >= 1, n
 
     # 2. Back closes the menu (and the banner goes); the app stays
+    focus = [l.strip() for l in adb("shell", "dumpsys", "window", check=False).splitlines() if "mCurrentFocus" in l]
+    print("focus before Back:", focus[:2])
     adb("shell", "input", "keyevent", "4")
+    time.sleep(1.5)
+    print("logcat:", adb("logcat", "-d", "-s", "LifePi:I", check=False).strip()[-800:])
     p.wait("window.lifepiNative && !window.lifepiNative._want && window.lifepiNative._sheets === 0", 10,
            "Back to close the menu")
     time.sleep(1.5)

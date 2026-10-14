@@ -1,6 +1,7 @@
 package io.github.therealshadoh.lifepi;
 
 import android.os.Bundle;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
@@ -46,6 +47,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
         if (e.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+            Log.i("LifePi", "back key " + e.getAction());
             if (e.getAction() == KeyEvent.ACTION_UP && !e.isCanceled()) back();
             return true;
         }
@@ -53,6 +55,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void back() {
+        Log.i("LifePi", "back");
         if (bridge == null || bridge.getWebView() == null) {
             moveTaskToBack(true);
             return;
@@ -60,6 +63,7 @@ public class MainActivity extends BridgeActivity {
         bridge.getWebView().evaluateJavascript(
                 "(window.lifepiNative && window.lifepiNative.back) ? window.lifepiNative.back() : false",
                 handled -> {
+                    Log.i("LifePi", "back handled by the page: " + handled);
                     if (!"true".equals(handled)) moveTaskToBack(true);
                 });
     }
