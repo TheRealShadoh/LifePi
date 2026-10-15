@@ -47,6 +47,7 @@ it, up to 500 characters), so it's written for players.
 - AdMob: add payment (billing) info so Google reviews the account; add the Play store to the app once it's listed
 - GitHub secrets ADMOB_APP_ID / ADMOB_BANNER_ID (only if CI should build the real-ads bundle)
 - Play Console: public contact email (Store settings), first upload by hand, Remove ads product
-- Google Cloud: enable the Play Developer API, service account lifepi-play-release, key to dev\keys
+- Google Cloud: LifePi project, Play Developer API, service account lifepi-play-release (its own, not OkayBee's)
+- GitHub secrets for tag releases to Play: upload key, password, AdMob IDs, LIFEPI_PLAY_SERVICE_ACCOUNT
 - Play Console: invite the service account with the two testing permissions
 - Closed test: 12 testers opted in for 14 days in a row, then apply for production

@@ -4,7 +4,9 @@ name: Android app
 # Secrets (Settings > Secrets and variables > Actions), all optional:
 #   LIFEPI_UPLOAD_KEYSTORE_B64, LIFEPI_UPLOAD_STORE_PASSWORD  - signs the Play bundle (upload key)
 #   ADMOB_APP_ID, ADMOB_BANNER_ID                             - real ads (else Google's sample ads)
-# The signed bundle to upload to Play Console is the "lifepi-play-bundle" artifact of a run.
+#   LIFEPI_PLAY_SERVICE_ACCOUNT                               - the Play service account's JSON key:
+#       a version tag (v1.15.0) then also uploads the tested bundle to Google Play closed testing
+# The signed bundle is also the "lifepi-play-bundle" artifact of every run.
 
 on:
   push:
@@ -137,3 +139,42 @@ jobs:
         with:
           name: screenshots-android
           path: ${{ runner.temp }}/android-shots/*.png
+
+  play:
+    name: upload to Google Play (closed testing)
+    # only for version tags, and only once the bundle built and the emulator test passed
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, emulator]
+    runs-on: ubuntu-24.04
+    environment: google-play       # optional: add required reviewers there to approve each upload
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: lifepi-play-bundle
+          path: bundle
+      - name: Upload to the closed testing track
+        env:
+          PLAY_KEY: ${{ secrets.LIFEPI_PLAY_SERVICE_ACCOUNT }}
+          HAS_KEYSTORE: ${{ secrets.LIFEPI_UPLOAD_KEYSTORE_B64 != '' }}
+          HAS_ADMOB: ${{ secrets.ADMOB_APP_ID != '' && secrets.ADMOB_BANNER_ID != '' }}
+        run: |
+          if [ -z "$PLAY_KEY" ]; then
+            echo "::notice::no LIFEPI_PLAY_SERVICE_ACCOUNT secret - not uploading to Play (the bundle is the lifepi-play-bundle artifact)"
+            exit 0
+          fi
+          # never send Play a bundle that is unsigned or carries Google's test ads
+          [ "$HAS_KEYSTORE" = "true" ] || { echo "::error::no upload key secret - the bundle is unsigned"; exit 1; }
+          [ "$HAS_ADMOB" = "true" ] || { echo "::error::no ADMOB_APP_ID / ADMOB_BANNER_ID secrets - the bundle would show test ads"; exit 1; }
+          pip install -q google-auth requests
+          umask 077
+          printf '%s' "$PLAY_KEY" > "$RUNNER_TEMP/play.json"
+          aab=$(find bundle -name '*.aab' | head -1)
+          python scripts/play_upload.py "$aab" --track alpha --key "$RUNNER_TEMP/play.json" 2>&1 | tee "$RUNNER_TEMP/play.log" || {
+            echo "::error title=Play upload failed::$(tail -20 "$RUNNER_TEMP/play.log" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+            rm -f "$RUNNER_TEMP/play.json"; exit 1; }
+          rm -f "$RUNNER_TEMP/play.json"
+          echo "::notice title=On Google Play::$(grep -E 'version .* track' "$RUNNER_TEMP/play.log" | tail -1)"

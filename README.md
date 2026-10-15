@@ -270,6 +270,14 @@ tests, builds the signed bundle and uploads it with `scripts/play_upload.py` (Pl
 service-account key kept outside the repo); `scripts/play_upload.py --check` lists the tracks without
 changing anything. The release notes come from the newest dated section of [STATUS.md](STATUS.md).
 
+**Releases go to Play by themselves:** pushing a version tag (`v1.15.0`) builds the signed bundle on GitHub,
+runs the emulator test and - with the `LIFEPI_PLAY_SERVICE_ACCOUNT` secret set - uploads it to the closed
+testing track with the same script. It refuses an unsigned bundle or one without the real AdMob IDs. Secrets
+(Settings > Secrets and variables > Actions): `LIFEPI_UPLOAD_KEYSTORE_B64`, `LIFEPI_UPLOAD_STORE_PASSWORD`,
+`ADMOB_APP_ID`, `ADMOB_BANNER_ID`, `LIFEPI_PLAY_SERVICE_ACCOUNT` (the service account's JSON key, with
+only "Release to testing tracks" on LifePi). Bump `VERSION` in `lifepi.py` first: every upload needs a new
+version code.
+
 ## Run it in a browser (Docker)
 
 No Pi handy? The container runs the real desktop app on a virtual display and streams it to any
