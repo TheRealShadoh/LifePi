@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""End-to-end test of the Android app in an emulator (GitHub Actions: .github/workflows/android.yml).
+"""End-to-end test of the Android app in an emulator: on GitHub Actions (.github/workflows/android.yml)
+and on a PC (mobile/local_test.ps1).
 
     adb devices    # an emulator running, API 35+ with Google Play services
     python mobile/emulator_test.py mobile/android/app/build/outputs/apk/debug/app-debug.apk
+    python mobile/emulator_test.py --serial emulator-5556 app-debug.apk     # one of several
 
 Installs the debug APK and talks to its WebView over the DevTools protocol (debug builds only).
 Checks:
@@ -28,6 +30,13 @@ import websocket
 
 PKG = "io.github.therealshadoh.lifepi"
 SHOTS = Path(os.environ.get("LIFEPI_SHOTS") or tempfile.mkdtemp())
+if "--serial" in sys.argv:                     # adb and everything below follow ANDROID_SERIAL
+    k = sys.argv.index("--serial")
+    os.environ["ANDROID_SERIAL"] = sys.argv[k + 1]
+    del sys.argv[k:k + 2]
+# a DevTools port per emulator, so two can be tested side by side
+_m = re.search(r"(\d+)$", os.environ.get("ANDROID_SERIAL", ""))
+PORT = 9333 + (int(_m.group(1)) % 1000 if _m else 0)
 SHOTS.mkdir(parents=True, exist_ok=True)
 BOOTED = ("(() => { const c = document.querySelector('#canvas');"
           " return !!c && c.width > 1 && !!localStorage['lifepi-state']; })()")
@@ -80,11 +89,11 @@ class Page:
             if time.time() > end:
                 raise RuntimeError("the app's WebView never offered DevTools (debug build?)")
             time.sleep(1)
-        adb("forward", "--remove-all", check=False)
-        adb("forward", "tcp:9333", f"localabstract:{name}")
+        adb("forward", "--remove", f"tcp:{PORT}", check=False)
+        adb("forward", f"tcp:{PORT}", f"localabstract:{name}")
         for _ in range(60):
             try:
-                tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json", timeout=5).read())
+                tabs = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{PORT}/json", timeout=5).read())
                 # LifePi's page - the ads SDK has hidden pages of its own in the same process
                 page = next(t for t in tabs if t.get("type") == "page" and t.get("url", "").startswith("https://localhost"))
                 break
@@ -308,3 +317,5 @@ if __name__ == "__main__":
         print("crash log:", adb("logcat", "-d", "-b", "crash", check=False)[-2500:])
         print("LifePi log:", adb("logcat", "-d", "-s", "LifePi:I", "chromium:E", "AndroidRuntime:E", check=False)[-2000:])
         raise
+    finally:
+        network(True)                          # never leave an emulator offline

@@ -24,28 +24,8 @@ if [[ "${LIFEPI_SKIP_WEB:-}" != 1 ]]; then
   python3 mobile/vendor_cdn.py
 fi
 
-# the page: the web build, without its service worker (the app bundles everything itself), plus
-# the ads / purchase bridge
-rm -rf mobile/www && cp -r build/web mobile/www
-cp mobile/native.js mobile/www/native.js
-python3 - <<'PY'
-import json, os, re
-p = "mobile/www/index.html"
-s = open(p, encoding="utf-8").read()
-s, n = re.subn(r'\s*if \("serviceWorker" in navigator\)[^\n]*\n', "\n", s)
-assert n == 1, "service worker registration not found in index.html"
-cfg = {"bannerId": os.environ.get("ADMOB_BANNER_ID", "")}
-tag = f'<script>window.LIFEPI_ADS = {json.dumps(cfg)};</script>\n<script src="native.js"></script>\n'
-s, n = re.subn(r"(<head[^>]*>)", lambda m: m.group(1) + "\n" + tag, s, count=1, flags=re.I)
-assert n == 1, "no <head> in index.html"
-open(p, "w", encoding="utf-8").write(s)
-os.remove("mobile/www/sw.js") if os.path.exists("mobile/www/sw.js") else None
-print("page prepared; ads:", "real banner ID" if cfg["bannerId"] else "Google's sample (test) ads")
-PY
-
-# Android's asset packaging mangles *.gz files: store them as *.gz.lpz (CdnWebViewClient serves
-# them under their real names) - the game itself is lifepi.tar.gz
-find mobile/www mobile/android/app/src/main/assets/cdn -name '*.gz' -exec mv {} {}.lpz \; -print
+# the page: the web build plus the ads / purchase bridge (mobile/prepare.py)
+python3 mobile/prepare.py
 
 cd mobile
 npm ci --no-audit --no-fund
