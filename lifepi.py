@@ -3180,8 +3180,14 @@ class App:
         if n:
             n.privacy()
 
+    def privacy_policy(self):
+        n = self.native_bridge()
+        if n:
+            n.policy()
+
     def native_menu_items(self):
-        """Remove ads (and Google's ad privacy form where the law asks for one)."""
+        """Remove ads, Google's ad privacy form where the law asks for one, and the privacy
+        policy (Google Play wants it reachable inside the app)."""
         n = self.native_bridge()
         out = []
         try:
@@ -3191,6 +3197,8 @@ class App:
                             self.buy_remove_ads, BTN_OK))
             if n and n.privacyRequired:
                 out.append(("Ad privacy", self.ad_privacy, BTN))
+            if n:
+                out.append(("Privacy policy", self.privacy_policy, BTN))
         except Exception:
             pass
         return out

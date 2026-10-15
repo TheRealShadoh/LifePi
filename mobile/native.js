@@ -6,6 +6,7 @@
 //               shown only while one is; the sheet leaves the strip at the bottom free for it.
 //   sheets(n) - how many sheets are open (the Back button closes the top one)
 //   buy()     - the Remove ads purchase        privacy() - Google's ad privacy form
+//   policy()  - open the privacy policy in the phone's browser
 // and the app calls back() for Android's Back button.
 // and reads: ads (show the Remove ads button), removed, reserve (CSS px to leave free at the
 // bottom right now: the banner's height while it's up, the last height while it loads),
@@ -16,6 +17,7 @@
   const bannerId = CFG.bannerId || TEST_BANNER;
   const testing = !CFG.bannerId;
   const KEY = "lifepi-adfree";
+  const POLICY = "https://therealshadoh.github.io/LifePi/privacy.html";
   const store = {
     get() { try { return localStorage.getItem(KEY) === "1"; } catch (e) { return false; } },
     set(v) { try { localStorage.setItem(KEY, v ? "1" : "0"); } catch (e) {} },
@@ -31,6 +33,8 @@
     sheets(n) { N._calls++; N._sheets = n | 0; },
     buy() { buy(); },
     privacy() { plugin("AdMob") && plugin("AdMob").showPrivacyOptionsForm().catch(() => {}); },
+    // the privacy policy page; Capacitor hands any outside address to the phone's browser
+    policy() { N._calls++; window.location.href = POLICY; },
   };
 
   function plugin(name) {

@@ -16,12 +16,16 @@ it, up to 500 characters), so it's written for players.
 - GitHub Actions: build and emulator test on every push (android.yml)
 - Local: helper and person emulators on the PC with host GPU, mobile/local_test.ps1 runs the same test - both pass
 - Play: privacy policy live, store listing text, graphics, upload key, scripts/play_upload.py and release.ps1
+- Upload key in %USERPROFILE%\dev\keys\lifepi-upload.p12
+- Play Console: app created; App content done except Content ratings - privacy policy, ads, app access,
+  government, financial, health, advertising ID, target audience 18 and over, Data safety
+- Menu: Privacy policy button in the Android app (Play wants the policy inside the app)
 
 ### Left
 
-- Upload key file into %USERPROFILE%\dev\keys\lifepi-upload.p12
 - AdMob account and banner ad unit, then %USERPROFILE%\dev\keys\lifepi-admob.json
-- Play Console: create the app, first upload by hand, Remove ads product, App content sections
+- Play Console: Content ratings questionnaire (agrees to IARC's terms), store listing, first upload by
+  hand, Remove ads product
 - Google Cloud: enable the Play Developer API, service account lifepi-play-release, key to dev\keys
 - Play Console: invite the service account with the two testing permissions
 - Closed test: 12 testers opted in for 14 days in a row, then apply for production

@@ -742,6 +742,7 @@ class FakeNative:
     def sheets(self, n): self.calls.append(("sheets", n))
     def buy(self): self.calls.append(("buy",))
     def privacy(self): self.calls.append(("privacy",))
+    def policy(self): self.calls.append(("policy",))
 def native_tick(a):
     a.native_t = 0; a.tick_native(); a.native_t = 0; a.tick_native(); a.render()
 assert app.native_bridge() is None and app.native_menu_items() == []        # Pi / browser: nothing
@@ -796,9 +797,11 @@ app.push("menu"); native_tick(app)
 assert not [z for z in app.zones if z[1] == app.buy_remove_ads]
 pz = [z for z in app.zones if z[1] == app.ad_privacy]; assert len(pz) == 1
 pz[0][1](); assert fn.calls[-1] == ("privacy",)
+pp = [z for z in app.zones if z[1] == app.privacy_policy]; assert len(pp) == 1     # Play wants it in the app
+pp[0][1](); assert fn.calls[-1] == ("policy",)
 app.modals.clear(); native_tick(app)
 app.native = None
-print("android ads: menu-only banner, free strip at every rotation, remove ads, privacy ok")
+print("android ads: menu-only banner, free strip at every rotation, remove ads, privacy, policy ok")
 
 # music: the Spotify Connect speaker's local API (a stand-in server here)
 import http.server, threading as _th
