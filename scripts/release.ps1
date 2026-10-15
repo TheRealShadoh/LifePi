@@ -18,7 +18,10 @@ param(
     [switch]$PasswordFromClipboard,
     [switch]$SkipTests
 )
-$ErrorActionPreference = "Stop"
+# "Continue": Windows PowerShell 5 turns any stderr line of a program (a Python warning, say)
+# into a fatal error under "Stop"; every step checks its exit code instead
+$ErrorActionPreference = "Continue"
+$env:PYTHONWARNINGS = "ignore"
 $repo = Split-Path -Parent $PSScriptRoot
 $dev = Join-Path $env:USERPROFILE "dev"
 $keys = Join-Path $dev "keys"

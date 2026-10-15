@@ -15,7 +15,10 @@ param(
     [switch]$SkipWeb,
     [switch]$SkipBuild
 )
-$ErrorActionPreference = "Stop"
+# "Continue": Windows PowerShell 5 turns any stderr line of a program (a Python warning, say)
+# into a fatal error under "Stop"; every step checks its exit code instead
+$ErrorActionPreference = "Continue"
+$env:PYTHONWARNINGS = "ignore"
 $ProgressPreference = "SilentlyContinue"            # PowerShell 5 downloads crawl with a progress bar
 $repo = Split-Path -Parent $PSScriptRoot
 $dev = Join-Path $env:USERPROFILE "dev"
