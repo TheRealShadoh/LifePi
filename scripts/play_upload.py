@@ -36,9 +36,18 @@ def key_path(arg):
     return Path.home() / "dev" / "keys" / "lifepi-play.json"
 
 
-def session(path):
+def session(path, federated=False):
+    """A signed-in session: the service-account key file, or (--federated, on GitHub Actions)
+    the short-lived credentials google-github-actions/auth set up with Workload Identity
+    Federation - no key exists at all then."""
+    import google.auth
     from google.auth.transport.requests import AuthorizedSession
     from google.oauth2 import service_account
+    if federated:
+        creds, _ = google.auth.default(scopes=[SCOPE])
+        print("signed in with Workload Identity Federation:",
+              getattr(creds, "service_account_email", None) or os.environ.get("LIFEPI_PLAY_ACCOUNT", "?"))
+        return AuthorizedSession(creds)
     if not path.exists():
         sys.exit(f"no service-account key at {path} (use --key or $LIFEPI_PLAY_KEY)")
     creds = service_account.Credentials.from_service_account_file(str(path), scopes=[SCOPE])
@@ -94,8 +103,10 @@ def main():
     ap.add_argument("--track", default="alpha", help='"alpha" = closed testing (default), "internal", "production"')
     ap.add_argument("--key", help="service-account JSON key")
     ap.add_argument("--check", action="store_true", help="list tracks and versions; change nothing")
+    ap.add_argument("--federated", action="store_true",
+                    help="sign in with the ambient Google credentials (GitHub Actions + Workload Identity Federation)")
     args = ap.parse_args()
-    s = session(key_path(args.key))
+    s = session(key_path(args.key), args.federated)
     edit = ok(s.post(f"{API}/edits"), "open an edit")["id"]
     try:
         if args.check or not args.aab:

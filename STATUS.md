@@ -35,6 +35,8 @@ it, up to 500 characters), so it's written for players.
 - Play: privacy policy live, store listing text, graphics, upload key, scripts/play_upload.py and release.ps1
 - Upload key in %USERPROFILE%\dev\keys\lifepi-upload.p12
 - AdMob account, app "LifePi - Life Counter" and "Menu banner" ad unit; IDs in dev\keys\lifepi-admob.json
+- Google Cloud project lifepi-play: Play Developer API, service account lifepi-play-release (no key),
+  Workload Identity Federation for this repo's v* tags; Play Console: it may release LifePi to testing only
 - Play Console: app created; all App content done - privacy policy, ads, app access, government,
   financial, health, advertising ID, target audience 18 and over, Data safety, content rating (IARC:
   Teen / 14+ because card art can show fantasy violence)
@@ -47,7 +49,5 @@ it, up to 500 characters), so it's written for players.
 - AdMob: add payment (billing) info so Google reviews the account; add the Play store to the app once it's listed
 - GitHub secrets ADMOB_APP_ID / ADMOB_BANNER_ID (only if CI should build the real-ads bundle)
 - Play Console: public contact email (Store settings), first upload by hand, Remove ads product
-- Google Cloud: LifePi project, Play Developer API, service account lifepi-play-release (its own, not OkayBee's)
-- GitHub secrets for tag releases to Play: upload key, password, AdMob IDs, LIFEPI_PLAY_SERVICE_ACCOUNT
-- Play Console: invite the service account with the two testing permissions
+- GitHub secrets for tag releases to Play: upload key (base64), its password, ADMOB_APP_ID, ADMOB_BANNER_ID
 - Closed test: 12 testers opted in for 14 days in a row, then apply for production
