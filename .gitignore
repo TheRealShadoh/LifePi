@@ -3,3 +3,10 @@ __pycache__/
 *.part
 .venv/
 build/
+# keys never live in the repo (Play service account, upload key)
+*play*.json
+service-account*.json
+*.p12
+*.jks
+*.keystore
+key.properties

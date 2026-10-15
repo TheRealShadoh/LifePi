@@ -15,6 +15,7 @@ param(
     [switch]$SkipBuild
 )
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"            # PowerShell 5 downloads crawl with a progress bar
 $repo = Split-Path -Parent $PSScriptRoot
 $dev = Join-Path $env:USERPROFILE "dev"
 $env:ANDROID_HOME = Join-Path $dev "android-sdk"
