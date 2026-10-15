@@ -68,6 +68,7 @@ def release_notes():
     if not sections:
         return "Bug fixes and improvements."
     body = sections[0].split("\n", 1)[1] if "\n" in sections[0] else ""
+    body = re.split(r"(?m)^###", body)[0]               # the notes end at the first sub-heading
     lines = [re.sub(r"^\s*[-*]\s*", "- ", l).rstrip() for l in body.splitlines()
              if l.strip() and not l.lstrip().startswith("#")]
     notes = "\n".join(lines).strip()
