@@ -262,6 +262,13 @@ pygbag's runtime into the app, then Gradle. An emulator test checks the app star
 the table, and that Back closes the menu. To build it yourself (Android SDK, JDK 21, Node, Python + pygbag,
 Chrome): `mobile/build.sh`.
 
+On a Windows PC with emulators running (Android SDK and the emulators under `%USERPROFILE%\dev`),
+`mobile\local_test.ps1` builds a debug APK and runs the same emulator test on each one (it sets up
+JDK 21 and a Python environment the first time). `scripts\release.ps1 -Play [-Track alpha]` runs the
+tests, builds the signed bundle and uploads it with `scripts/play_upload.py` (Play Developer API, a
+service-account key kept outside the repo); `scripts/play_upload.py --check` lists the tracks without
+changing anything. The release notes come from the newest dated section of [STATUS.md](STATUS.md).
+
 ## Run it in a browser (Docker)
 
 No Pi handy? The container runs the real desktop app on a virtual display and streams it to any

@@ -14,11 +14,12 @@ it, up to 500 characters), so it's written for players.
 
 - Android app (mobile/): Capacitor shell, menu-only AdMob banner, Remove ads purchase, offline runtime
 - GitHub Actions: build and emulator test on every push (android.yml)
-- Local: helper and person emulators on the PC with host GPU, mobile/local_test.ps1 runs the same test
+- Local: helper and person emulators on the PC with host GPU, mobile/local_test.ps1 runs the same test - both pass
 - Play: privacy policy live, store listing text, graphics, upload key, scripts/play_upload.py and release.ps1
 
 ### Left
 
+- Upload key file into %USERPROFILE%\dev\keys\lifepi-upload.p12
 - AdMob account and banner ad unit, then %USERPROFILE%\dev\keys\lifepi-admob.json
 - Play Console: create the app, first upload by hand, Remove ads product, App content sections
 - Google Cloud: enable the Play Developer API, service account lifepi-play-release, key to dev\keys
