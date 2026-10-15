@@ -24,7 +24,7 @@ $dev = Join-Path $env:USERPROFILE "dev"
 $keys = Join-Path $dev "keys"
 $py = Join-Path $dev "lifepi-venv\Scripts\python.exe"
 function Step($text) { Write-Host ""; Write-Host "== $text" -ForegroundColor Cyan }
-function Check($ok, $text) { if (-not $ok) { throw $text } }
+function Check($ok, $text) { if (-not $ok) { Write-Host "FAILED: $text" -ForegroundColor Red; throw $text } }
 
 Set-Location $repo
 Check (Test-Path $py) "no Python environment yet: run mobile\local_test.ps1 once (it sets one up)"
@@ -50,7 +50,7 @@ if (-not $SkipTests) {
 if ($Play) {
     Step "Checking Play"
     & $py -c "import google.auth, requests" 2>$null
-    if ($LASTEXITCODE -ne 0) { uv pip install --python $py google-auth requests | Out-Null }
+    if ($LASTEXITCODE -ne 0) { & $py -m pip install -q google-auth requests }
     $out = & $py scripts/play_upload.py --check 2>&1
     $out | ForEach-Object { Write-Host $_ }
     Check ($LASTEXITCODE -eq 0) "Play check failed (see above)"

@@ -7,7 +7,8 @@
 #   powershell -File mobile\local_test.ps1 -Serial emulator-5556
 #
 # First run sets up what's missing, all under %USERPROFILE%\dev: JDK 21 (Capacitor 8 needs it;
-# the JDK 17 there stays for other projects) and a Python 3.12 venv with pygbag (made with uv).
+# the JDK 17 there stays for other projects) and a venv with pygbag, made from the installed
+# Python (Windows Application Control blocks the Pythons uv downloads on this PC).
 # Debug builds only, with Google's sample ads - nothing here signs a release.
 param(
     [string[]]$Serial = @("emulator-5554", "emulator-5556"),
@@ -27,7 +28,7 @@ $venv = Join-Path $dev "lifepi-venv"
 $py = Join-Path $venv "Scripts\python.exe"
 
 function Step($text) { Write-Host ""; Write-Host "== $text" -ForegroundColor Cyan }
-function Check($ok, $text) { if (-not $ok) { throw $text } }
+function Check($ok, $text) { if (-not $ok) { Write-Host "FAILED: $text" -ForegroundColor Red; throw $text } }
 
 # ---- one-time setup
 if (-not (Test-Path "$env:JAVA_HOME\bin\java.exe")) {
@@ -41,14 +42,14 @@ if (-not (Test-Path "$env:JAVA_HOME\bin\java.exe")) {
     Remove-Item $zip, $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 if (-not (Test-Path $py)) {
-    Step "Making the Python 3.12 environment $venv"
-    uv venv --python 3.12 $venv
-    Check ($LASTEXITCODE -eq 0) "uv couldn't make the venv"
+    Step "Making the Python environment $venv"
+    python -m venv $venv
+    Check ($LASTEXITCODE -eq 0) "couldn't make the venv"
 }
-& $py -c "import pygbag, pygame, websocket" 2>$null
+& $py -c "import pygbag, pygame, websocket, google.auth" 2>$null
 if ($LASTEXITCODE -ne 0) {
-    Step "Installing pygbag, pygame-ce, websocket-client"
-    uv pip install --python $py "pygbag==0.9.3" pygame-ce websocket-client
+    Step "Installing pygbag, pygame-ce, websocket-client, google-auth"
+    & $py -m pip install -q "pygbag==0.9.3" pygame-ce websocket-client google-auth requests
     Check ($LASTEXITCODE -eq 0) "pip install failed"
 }
 
