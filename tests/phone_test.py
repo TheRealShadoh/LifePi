@@ -125,7 +125,7 @@ def main():
             time.sleep(0.25)
         time.sleep(0.5)
         assert b.js("document.getElementById('sheet').hidden"), "the seat picker opens only the first time"
-        assert b.js("!document.querySelector('.lifebtn')"), "the life number is part of the -/+ halves now"
+        assert b.js("document.querySelectorAll('.lifebtn').length") == 4, "the life numbers are buttons"
         print("first join asks for a seat once; your seat is outlined")
 
         # --- a drag that starts in a sheet and ends on the dimmed backdrop must not close it
@@ -176,13 +176,19 @@ def main():
         # --- Lifetap-style commander damage: tap a life total -------------------------
         target = 2
         l0 = state()["players"][target]["life"]
-        # the life number changes life like the rest of the panel: left of centre -1, right +1
-        lr = b.js(f"(() => {{ const r = document.querySelectorAll('.cell .life')[{target}].getBoundingClientRect();"
-                  f" return [r.left, r.top, r.width, r.height]; }})()")
-        b.touch(lr[0] + lr[2] * 0.3, lr[1] + lr[3] / 2, 120); time.sleep(0.5)
+        # beside the life number is -/+; the number itself opens commander damage (like the Pi)
+        lr = b.js(f"(() => {{ const r = document.querySelectorAll('.cell .life')[{target}].getBoundingClientRect(),"
+                  f" n = document.querySelectorAll('.cell .lifebtn')[{target}].getBoundingClientRect();"
+                  f" return [r.left, r.top, r.width, r.height, n.left, n.width]; }})()")
+        b.touch(lr[0] + lr[2] * 0.02, lr[1] + lr[3] / 2, 120); time.sleep(0.5)
         assert state()["players"][target]["life"] == l0 - 1 and b.js("document.getElementById('sheet').hidden")
-        b.touch(lr[0] + lr[2] * 0.7, lr[1] + lr[3] / 2, 120); time.sleep(0.5)
+        b.touch(lr[0] + lr[2] * 0.98, lr[1] + lr[3] / 2, 120); time.sleep(0.5)
         assert state()["players"][target]["life"] == l0
+        assert lr[5] < lr[2] * 0.75, lr                    # the number button leaves room for -/+
+        tap(".cell .lifebtn", target)
+        assert b.js("!!document.querySelector('#box .cmdgrid')"), "the life number did not open commander damage"
+        assert state()["players"][target]["life"] == l0
+        b.js("closeSheet()"); time.sleep(0.3)
         tap(".cell .strip.bot", target)              # "+ Cmdr dmg" opens commander damage
         assert b.js("!!document.querySelector('#box .cmdgrid')"), "the strip did not open commander damage"
         assert b.js("document.querySelectorAll('#box .ctile').length") == 6 + 1      # 6 commanders + poison
@@ -190,6 +196,8 @@ def main():
         tap("#box .ctile .half2.plus", 3)          # right half of seat 3's tile: +1
         p = state()["players"][target]
         assert p["cmd"][3] == 1 and p["life"] == l0 - 1, (p["cmd"], p["life"], l0)
+        assert b.js("(document.querySelectorAll('#box .ctile')[3].querySelector('.cdelta') || {}).textContent") == "+1", \
+            "the damage tile should show the running +1"
         tap("#box .ctile .half2.minus", 3)         # left half: -1
         p = state()["players"][target]
         assert p["cmd"][3] == 0 and p["life"] == l0, (p["cmd"], p["life"])

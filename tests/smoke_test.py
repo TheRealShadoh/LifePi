@@ -56,10 +56,10 @@ while time.time() < end: app.tick_holds(); time.sleep(0.01)
 app.pointer_up("s", (450, 470)); app.render()
 assert app.players[2]["life"] == life - 10, app.players[2]["life"]  # ...and stopped there
 life = app.players[2]["life"]
-app.pointer_down("s", (650, 360)); app.pointer_move("s", (650 + int(app.slop()) + 10, 360))
-app.pointer_up("s", (650 + int(app.slop()) + 10, 360)); app.render()
+app.pointer_down("s", (700, 360)); app.pointer_move("s", (700 + int(app.slop()) + 10, 360))
+app.pointer_up("s", (700 + int(app.slop()) + 10, 360)); app.render()
 assert app.players[2]["life"] == life                               # slid, still inside "+": no tap
-app.pointer_down("s", (650, 360)); app.pointer_move("s", (655, 364)); app.pointer_up("s", (655, 364))
+app.pointer_down("s", (720, 360)); app.pointer_move("s", (725, 364)); app.pointer_up("s", (725, 364))
 app.render(); assert app.players[2]["life"] == life + 1             # a wobble is still a tap
 # a quick second tap right after a sheet closes must not reach the seat underneath
 life = app.players[2]["life"]
@@ -263,8 +263,8 @@ for seating in lifepi.SEATINGS:
                 assert after[k] == before[k] + d and sum(after) == sum(before) + d, (seating, n, k, d, pos)
         # the name strip opens the sheet facing that player (end seats: 90 / 270)
         for k, s in enumerate(seats):
-            pos = next(pt for fx in (0.5, 0.25, 0.75, 0.1, 0.9) for pt in [seat_point(s, fx, 0.06)]
-                       if not near_buttons(pt))
+            pos = next((pt for fy in (0.06, 0.16) for fx in (0.5, 0.25, 0.75, 0.1, 0.9) for pt in [seat_point(s, fx, fy)]
+                       if not near_buttons(pt)), None); assert pos, (seating, n, k, app.menu_pos(22))
             tap(pos)
             m = app.modals[-1] if app.modals else None
             assert m and m["kind"] == "player" and m["idx"] == k, (seating, n, k)
@@ -314,12 +314,18 @@ for seating in ("table", "ends", "round"):
         assert m["angle"] == round(s.angle / 90) * 90 % 360
         app.render()                                         # draws facing that player
     app.modals.clear(); app.render()
-    # the life number itself is part of the -/+ halves: left of centre -1, right of centre +1
-    for fx, d in ((0.45, -1), (0.55, 1)):
+    # tapping the life number itself opens that player's commander damage; beside it is still -/+
+    life = app.players[1]["life"]
+    tap(seat_point(app.seats[1], 0.5, 0.5))
+    m = app.modals[-1] if app.modals else None
+    assert m and m["kind"] == "cmd" and m["idx"] == 1 and app.players[1]["life"] == life, (seating, m)
+    assert m["angle"] == round(app.seats[1].angle / 90) * 90 % 360
+    app.modals.clear(); app.render()
+    for fx, d in ((0.15, -1), (0.85, 1)):
         life = app.players[1]["life"]
         tap(seat_point(app.seats[1], fx, 0.5))
         assert app.players[1]["life"] == life + d and not app.modals, (seating, fx)
-print("damage strip opens commander damage; the life number is -/+ like the rest")
+print("damage strip and the life number open commander damage; beside the number is -/+")
 
 app.modals.clear(); app.settings["seating"] = "ends"; app.start_game(6, 40); app.first_anim = None; app.render()
 end = next(k for k, s in enumerate(app.seats) if s.angle == 270)    # sideways pane at a table end
@@ -1107,4 +1113,40 @@ assert b.players[0]["counters"]["poison"] == 0 and b.settings["rotation"] == 0
 # hand-edited on Windows: a UTF-8 BOM must not make the save "unreadable"
 lifepi.STATE_FILE.write_bytes(b"\xef\xbb\xbf" + json.dumps(d).encode())
 assert fresh().players[1]["life"] == 17
-print("corrupt / partial saves ok"); print("SHOTS", shots)
+print("corrupt / partial saves ok")
+
+# a TV on HDMI at boot can be listed first: LifePi opens on the touchscreen (the smaller screen),
+# unless $LIFEPI_DISPLAY says otherwise
+td = lifepi.touch_display
+assert td([(1920, 1080), (800, 480)]) == 1 and td([(800, 480), (1920, 1080)]) == 0
+assert td([(720, 1280), (3840, 2160)]) == 0 and td([(800, 480)]) == 0 and td([]) == 0
+assert td([(1920, 1080), (800, 480)], "0") == 0 and td([(800, 480)], "3") == 0 and td([(1, 1), (2, 2)], "x") == 0
+# the window being resized (the desktop moving it to the touchscreen) redraws at the new size
+a = lifepi.App(NS(windowed="1920x1080", rotate=None, fps=30)); a.render()
+pygame.display.set_mode((800, 480)); a.screen = pygame.display.set_mode((800, 480)); a.fit_window()
+assert (a.W, a.H) == (800, 480); a.render()
+print("display choice and resize ok")
+
+# the menu and Undo buttons sit as a pair in the middle of the screen; names step aside
+for seating in lifepi.SEATINGS:
+    for n in range(2, lifepi.MAX_PLAYERS + 1):
+        a.modals.clear(); a.settings["seating"] = seating; a.start_game(n, 40); a.first_anim = None; a.render()
+        r = a.hub_r(); m, u = a.menu_pos(r), a.undo_pos(r)
+        assert abs((m[0] + u[0]) / 2 - a.W / 2) <= 1, (seating, n, m, u)
+        assert m[1] == u[1] == a.H // 2 and m[0] < u[0]
+print("menu / undo centred ok")
+
+# changing commander damage shows the running +n / -n, like life totals do
+a.settings["seating"] = "table"; a.start_game(4, 40); a.first_anim = None
+a.push("cmd", idx=1, angle=0)
+a.change_cmd(1, 0, 1); a.change_cmd(1, 0, 1); a.change_cmd(1, 0, 1)
+assert a.fx[("cmd", 1, 0, 1)]["d"] == 3 and a.fx_pill(("cmd", 1, 0, 1), 20)
+a.change_cmd(1, 0, -1); assert a.fx[("cmd", 1, 0, 1)]["d"] == 2
+a.change_cmd(1, 3, -1); assert ("cmd", 1, 3, 1) not in a.fx            # nothing to take off: no pill
+a.change_counter(1, "poison", 2); assert a.fx[("counter", 1, "poison")]["d"] == 2
+a.render(); pygame.image.save(a.canvas, os.path.join(shots, "cmd_running_delta.png"))
+a.fx[("cmd", 1, 0, 1)]["t"] -= 5; assert a.fx_pill(("cmd", 1, 0, 1), 20) is None   # fades away
+a.change_cmd(1, 0, 1); assert a.fx[("cmd", 1, 0, 1)]["d"] == 1                    # ...and starts over
+a.modals.clear(); a.push("player", idx=1, angle=0); a.render()
+pygame.image.save(a.canvas, os.path.join(shots, "player_running_delta.png"))
+print("commander damage +/- ok"); print("SHOTS", shots)

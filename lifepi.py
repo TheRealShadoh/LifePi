@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -1064,6 +1064,17 @@ def unrotate(px, py, disp_w, disp_h, rot):
     return px, py
 
 
+def touch_display(sizes, override=None):
+    """Which screen LifePi opens on: $LIFEPI_DISPLAY if set, else the smallest one - the Pi's
+    touchscreen, even when a TV on HDMI is listed first because it was plugged in at boot."""
+    if override not in (None, "") and str(override).strip().isdigit():
+        i = int(override)
+        return i if i < max(1, len(sizes)) else 0
+    if len(sizes) < 2:
+        return 0
+    return min(range(len(sizes)), key=lambda i: (sizes[i][0] * sizes[i][1], i))
+
+
 def new_player(i, life):
     return {"name": f"Player {i + 1}", "life": life, "color": i % len(PALETTE),
             "art": None, "credit": "", "art_url": None, "art_auto": False, "color_chosen": False,
@@ -1631,7 +1642,17 @@ class App:
             w, h = (int(v) for v in args.windowed.lower().split("x"))
             self.screen = pygame.display.set_mode((w, h))
         else:
-            self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+            # The touchscreen, not whichever screen SDL lists first: with a TV on HDMI at boot the TV
+            # can be display 0, and a window sized for it doesn't fit (or work on) the touchscreen
+            try:
+                sizes = pygame.display.get_desktop_sizes()
+            except (pygame.error, AttributeError):
+                sizes = []
+            self.display_index = touch_display(sizes, os.environ.get("LIFEPI_DISPLAY"))
+            try:
+                self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN, display=self.display_index)
+            except (pygame.error, TypeError):
+                self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         self.clock = pygame.time.Clock()
         self.fonts, self.img_cache, self.shape_cache = {}, {}, {}
         self.zones, self.pointers, self.modals, self.fx = [], {}, [], {}
@@ -2392,13 +2413,31 @@ class App:
         self.players[i]["life"] += d
         if d < 0 and sound:
             self.play_damage("death" if not was_ko and self.ko_reason(self.players[i]) else "hit")
+        self.bump_fx(i, d)
+        self.changed()
+
+    def bump_fx(self, key, d):
+        """The running +n / -n shown while a total is being changed (fades 1.8 s after the last tap).
+        key: a seat (its life), or ("cmd", seat, source, which) / ("poison", seat) on the damage pane."""
         now = time.time()
-        fx = self.fx.setdefault(i, {"d": 0, "t": 0})
+        fx = self.fx.setdefault(key, {"d": 0, "t": 0})
         if now - fx["t"] > 1.8:
             fx["d"] = 0
         fx["d"] += d
         fx["t"] = now
-        self.changed()
+
+    def fx_pill(self, key, size):
+        """The +n / -n pill for key, faded as it ages, or None."""
+        fx = self.fx.get(key)
+        if not fx or not fx["d"]:
+            return None
+        age = time.time() - fx["t"]
+        if age >= 1.8:
+            return None
+        pl = self.make_pill(f"{fx['d']:+d}", size, bg=GOOD if fx["d"] > 0 else BAD, alpha=235)
+        if age > 1.2:
+            pl.set_alpha(int(255 * (1.8 - age) / 0.6))
+        return pl
 
     def change_counter(self, i, key, d):
         c = self.players[i]["counters"]
@@ -2407,6 +2446,7 @@ class App:
         old = c[key]
         if new != old:
             self.record(("counter", i, key), i, key, new - old, new)
+            self.bump_fx(("counter", i, key), new - old)
         c[key] = new
         if key == "poison" and new > old:
             self.play_damage("death" if not was_ko and self.ko_reason(self.players[i]) else "poison")
@@ -2446,6 +2486,7 @@ class App:
         was_ko = bool(self.ko_reason(p))
         if applied:
             self.record(("cmd", i, src, which), i, "cmd", applied, new, src=src, which=which)
+            self.bump_fx(("cmd", i, src, which), applied)
         track[src] = new
         if applied and self.settings["cmd_hits_life"]:
             self.change_life(i, -applied, record=False, sound=False)
@@ -2930,7 +2971,7 @@ class App:
         across from the far side lands on the far half). Sheet angles are multiples of 90."""
         if pos is None or not self.seats or len(self.players) < 2:
             return 0
-        mx, my = self.menu_pos(max(22, min(self.W, self.H) // 22))
+        mx, my = self.menu_pos(self.hub_r())
         dx, dy = pos[0] - mx, pos[1] - my
         d = math.hypot(dx, dy)
         if d < 1:
@@ -3023,11 +3064,35 @@ class App:
         top, bot = int(h * 0.2), int(h * 0.22)
         first = i == self.first and not self.first_spinning() and not why
         fade = 120 if why else 255                  # knocked out: text fades back (wedges too)
-        nr = self.text(s, p["name"], max(20, top * 0.6), maxw=w * (0.68 if first else 0.85), alpha=fade,
-                       center=(w // 2, top // 2))
+        # the name: centred, unless the middle buttons sit on its line - then just beside them
+        nsize = max(20, top * 0.6)
+        maxw = w * (0.68 if first else 0.85)
+        bw = int(max(16, top * 0.36) * 1.9) + max(4, top // 8) if first else 0   # the "1st" badge + gap
+        tw = min(self.font(nsize).size(p["name"])[0], maxw)
+        cx = w // 2                                  # the name's centre (the badge hangs off its right)
+        bx0 = bx1 = by0 = by1 = 0
+        pad, edge = max(6, top // 5), max(6, w // 40)
+        if len(self.players) > 1:
+            pts = [v.to_local(c) for c in (lambda b: (b.topleft, b.topright, b.bottomleft, b.bottomright))(self.hub_rect())]
+            bx0, bx1 = min(x for x, _ in pts), max(x for x, _ in pts)
+            by0, by1 = min(y for _, y in pts), max(y for _, y in pts)
+        ny = top // 2
+        if len(self.players) > 1 and by0 < top and by1 > 0 and bx0 - pad < cx + tw / 2 + bw and bx1 + pad > cx - tw / 2:
+            room_l, room_r = bx0 - pad - edge, w - edge - (bx1 + pad)
+            room = max(room_l, room_r) - bw
+            below = int(by1 + nsize * 0.45)
+            if room < tw * 0.8 and below + nsize * 0.4 < h * 0.34:
+                ny = below                          # a narrow seat: under the buttons instead
+            elif room_r >= room_l:
+                tw = min(tw, max(30, room_r - bw))
+                cx, maxw = int(bx1 + pad + tw / 2), tw
+            else:
+                tw = min(tw, max(30, room_l - bw))
+                cx, maxw = int(bx0 - pad - bw - tw / 2), tw
+        nr = self.text(s, p["name"], nsize, maxw=maxw, alpha=fade, center=(cx, ny))
         if first:                                   # who went first, for the rest of the game
             badge = self.make_pill("1st", max(16, top * 0.36), fg=(30, 24, 0), bg=(255, 220, 90), alpha=240)
-            s.blit(badge, badge.get_rect(midleft=(nr.right + max(4, top // 8), top // 2)))
+            s.blit(badge, badge.get_rect(midleft=(nr.right + max(4, top // 8), ny)))
 
         size = int(min(h * 0.56, w * 0.5))
         low = p["life"] <= 5 and not why
@@ -3043,14 +3108,9 @@ class App:
             g = self.sign(plus, min(size * 0.2, w * 0.07, 44))
             s.blit(g, g.get_rect(center=(int(x), h // 2)))
 
-        fx = self.fx.get(i)
-        if fx and fx["d"]:
-            age = time.time() - fx["t"]
-            if age < 1.8:
-                pl = self.make_pill(f"{fx['d']:+d}", size * 0.24, bg=GOOD if fx["d"] > 0 else BAD, alpha=235)
-                if age > 1.2:
-                    pl.set_alpha(int(255 * (1.8 - age) / 0.6))
-                s.blit(pl, pl.get_rect(center=(w // 2, h // 2 - int(size * 0.5))))
+        pl = self.fx_pill(i, size * 0.24)
+        if pl:
+            s.blit(pl, pl.get_rect(center=(w // 2, h // 2 - int(size * 0.5))))
 
         poison_ko = self.format()[2]
         chips = [(f"{short} {p['counters'][k]}", CHIP_COLORS[k],
@@ -3093,7 +3153,12 @@ class App:
         sheet_angle = round(seat.angle / 90) * 90 % 360   # sheets open facing that player
         opener = lambda: self.push("player", idx=i, angle=sheet_angle)
         cmd_pane = lambda: self.push("cmd", idx=i, angle=sheet_angle)
-        v.zone((0, 0, w, top), opener, drag=i)       # hold + drag the name to swap seats
+        # tap the life number itself: the commander damage pane (no commanders: the player sheet).
+        # Only the number - the rest of each half stays -1 / +1
+        num = life_rect.inflate(0, -int(life_rect.h * 0.15)).clip(pygame.Rect(int(w * 0.24), top, w - 2 * int(w * 0.24), mid))
+        if num.w > 0 and num.h > 0:
+            v.zone(num, cmd_pane if self.uses_cmd() else opener)
+        v.zone((0, 0, w, max(top, nr.bottom)), opener, drag=i)   # hold + drag the name to swap seats
         # damage tiles / counters strip: the commander damage pane (no commanders: the sheet)
         v.zone((0, h - bot, w, bot), cmd_pane if self.uses_cmd() else opener)
         v.finish()
@@ -3261,7 +3326,7 @@ class App:
             r = (k % 2 * W // 2, u + k // 2 * rh, W // 2, rh)
             if label in armed and self.is_armed(armed[label]):
                 label, bg = f"Tap again to {label.split()[0].lower()}", BTN_BAD
-            self.button(v, r, label, fn, bg=bg, size=min(rh * 0.42, W * 0.035))
+            self.button(v, r, label, fn, bg=bg, size=min(rh * 0.42, W * 0.048))
         # Wizards' Fan Content Policy asks for this wording
         self.text(v.surf, "LifePi is unofficial Fan Content permitted under the Fan Content Policy. "
                   "Not approved/endorsed by Wizards.", fs, GREY, maxw=W - 20, shadow=False,
@@ -3606,14 +3671,18 @@ class App:
         y0 = 2 * u + u // 6
         cx, cy0 = (0, y0 + (nc + 1) * rh) if portrait else (cw, y0)   # damage column
 
-        def row(x, y, label, value, minus, plus, warn=False, tile=None, partner=False):
+        def row(x, y, label, value, minus, plus, warn=False, tile=None, partner=False, fx=None):
             b = min(rh, cw // 5)
             lx = x + 14
+            pl = self.fx_pill(fx, rh * 0.42) if fx else None     # +n / -n while it's changing
+            end = x + cw - 3 * b - 10 - (pl.get_width() + 8 if pl else 0)
+            if pl:
+                v.surf.blit(pl, pl.get_rect(midright=(x + cw - 3 * b - 14, y + rh // 2)))
             if tile is not None:
                 t = self.cmd_tile(tile, value, rh * 0.82, number=False, partner=partner)
                 v.surf.blit(t, t.get_rect(midleft=(lx, y + rh // 2)))
                 lx += t.get_width() + 10
-            self.text(v.surf, label, rh * 0.42, maxw=x + cw - 3 * b - 10 - lx, shadow=False,
+            self.text(v.surf, label, rh * 0.42, maxw=max(20, end - lx), shadow=False,
                       midleft=(lx, y + rh // 2))
             self.button(v, (x + cw - 3 * b - 8, y, b, rh), "-", minus, hold=minus, size=rh * 0.7)
             self.text(v.surf, str(value), rh * 0.6, warn or WHITE, shadow=False,
@@ -3627,7 +3696,8 @@ class App:
             row(0, y0 + (k + 1) * rh, label, val,
                 lambda key=key: self.change_counter(i, key, -1),
                 lambda key=key: self.change_counter(i, key, 1),
-                warn=key == "poison" and (LETHAL if val >= poison_ko else AMBER if val >= poison_ko - 3 else None))
+                warn=key == "poison" and (LETHAL if val >= poison_ko else AMBER if val >= poison_ko - 3 else None),
+                fx=("counter", i, key))
         row(0, y0 + nc * rh, "Each opponent", "", lambda: self.change_opponents(i, -1),
             lambda: self.change_opponents(i, 1))
         if sources:
@@ -3638,7 +3708,8 @@ class App:
             dmg = (p["cmd"] if w == 1 else p["cmd2"])[j]
             row(cx, cy0 + (k + 1) * rh, name, dmg,
                 lambda j=j, w=w: self.change_cmd(i, j, -1, w), lambda j=j, w=w: self.change_cmd(i, j, 1, w),
-                warn=LETHAL if dmg >= 21 else AMBER if dmg >= 15 else None, tile=j, partner=w == 2)
+                warn=LETHAL if dmg >= 21 else AMBER if dmg >= 15 else None, tile=j, partner=w == 2,
+                fx=("cmd", i, j, w))
         v.finish()
 
     def draw_history(self, m):
@@ -3706,6 +3777,10 @@ class App:
                 (" (damage also comes off life)" if self.settings["cmd_hits_life"] else ""))
         iy = u + u * 0.35
         r = self.text(v.surf, info, u * 0.5, (255, 120, 120) if why else WHITE, shadow=False, midleft=(16, iy))
+        pl = self.fx_pill(i, u * 0.4)                 # life lost to it as it happens (damage hits life)
+        if pl:
+            pr = v.surf.blit(pl, pl.get_rect(midleft=(r.right + 10, iy)))
+            r = r.union(pr)
         self.text(v.surf, hint, u * 0.3, GREY, maxw=W - r.right - 40, shadow=False, midleft=(r.right + 24, iy))
 
         sources = self.commanders() + [("poison", 0)]      # and a poison tile, like Lifetap
@@ -3740,8 +3815,16 @@ class App:
             name = src["name"] + (" partner" if w == 2 else "") + (" (own)" if j == i else "")
             self.text(v.surf, name, max(16, min(r.h * 0.13, r.w * 0.1)), maxw=r.w * 0.9,
                       midtop=(r.centerx, r.y + r.h * 0.06))
-            self.text(v.surf, str(dmg), max(20, min(r.h * 0.45, r.w * 0.36)), WHITE,
-                      center=(r.centerx, r.centery + r.h * 0.04))
+            ns = max(20, min(r.h * 0.45, r.w * 0.36))
+            nrect = self.text(v.surf, str(dmg), ns, WHITE, center=(r.centerx, r.centery + r.h * 0.04))
+            # the running +n / -n while it's being changed, like the life totals
+            pl = self.fx_pill(("counter", i, "poison") if j == "poison" else ("cmd", i, j, w), max(16, ns * 0.42))
+            if pl:
+                pr = pl.get_rect(midleft=(nrect.right + max(4, int(ns * 0.08)), nrect.top + nrect.h // 4))
+                if pr.right > r.right - r.w * 0.12 - min(r.h * 0.22, r.w * 0.12, 44) * 0.6:   # would hit the "+"
+                    pr = pl.get_rect()
+                    pr.midbottom = (r.centerx, nrect.top + int(ns * 0.03))   # narrow tile: above the number
+                v.surf.blit(pl, pr)
             if close:                               # say it in words, not just with a colour
                 note = "LETHAL" if lethal else f"{limit - dmg} more is lethal"
                 self.text(v.surf, note, max(14, min(r.h * 0.11, r.w * 0.085)), LETHAL if lethal else AMBER,
@@ -4128,7 +4211,7 @@ class App:
                 self.poly(self.canvas, DARK, seat.poly, 2 * gap)
         self.draw_first_spin()
         self.draw_drags()
-        r = max(22, min(self.W, self.H) // 22)
+        r = self.hub_r()
         c = self.menu_pos(r)
         self.blit_round(self.round_icon("menu", r, (210, 210, 220)), c)
         hit = pygame.Rect(0, 0, int(r * 2.6), int(r * 2.6))
@@ -4169,9 +4252,9 @@ class App:
         pygame.display.flip()
 
     def undo_pos(self, r):
-        """The Undo button sits just beside the menu button (towards the screen's middle)."""
+        """The Undo button sits just right of the menu button (one player: left of it)."""
         x, y = self.menu_pos(r)
-        return (x - int(r * 2.3), y) if x > self.W // 2 or len(self.players) == 1 else (x + int(r * 2.3), y)
+        return (x - int(r * 2.3), y) if len(self.players) == 1 else (x + int(r * 2.3), y)
 
     def draw_undo_button(self, r):
         """Round Undo button: a curved arrow; dim when there's nothing to take back.
@@ -4223,21 +4306,31 @@ class App:
     def blit_round(self, img, centre):
         self.canvas.blit(img, img.get_rect(center=centre))
 
+    def hub_r(self):
+        """Radius of the round menu button (the undo button is 0.8 of it)."""
+        return max(22, min(self.W, self.H) // 22)
+
     def menu_pos(self, r):
-        """Menu button spot on the row divider, as clear of the (centred) names as possible."""
-        n = len(self.players)
-        if n == 1:
+        """Menu button spot: the menu and Undo buttons sit as a pair in the middle of the screen
+        (where the rows / wedges meet), the menu on the left. One player: bottom-right corner."""
+        if len(self.players) == 1:
             return (self.W - r - 10, self.H - r - 10)
-        if not all(s.is_rect for s in self.seats):
-            return (self.W // 2, self.H // 2)     # round table: where the wedges meet
-        # rows (and the sides of an ends layout) meet at H/2; avoid the end seats
-        sides = [s.rect for s in self.seats if s.angle in (0, 180)]
-        xs = [s.centerx for s in sides]
-        lo, hi = min(s.left for s in sides) + r + 4, max(s.right for s in sides) - r - 4
-        clear = (hi - lo) * 0.12 + r
-        mid = (lo + hi) // 2
-        x = min(range(lo, hi + 1, 2), key=lambda x: (-min(clear, min(abs(x - c) for c in xs)), abs(x - mid)))
-        return (x, self.H // 2)
+        return (self.W // 2 - int(r * 1.15), self.H // 2)
+
+    def hub_rect(self, r=None):
+        """Canvas area the middle buttons cover (menu + Undo, and the turn pill when it's on):
+        names keep out of it."""
+        r = r or self.hub_r()
+        mx, my = self.menu_pos(r)
+        ux, uy = self.undo_pos(r)
+        rect = pygame.Rect(0, 0, 2 * r + 8, 2 * r + 8)
+        rect.center = (mx, my)
+        u = pygame.Rect(0, 0, int(r * 1.6) + 8, int(r * 1.6) + 8)
+        u.center = (ux, uy)
+        rect.union_ip(u)
+        if self.turn_on() and not self.first_spinning() and len(self.players) > 1:
+            rect.union_ip(self.turn_pill_rect(r)[1])
+        return rect
 
     # ------------------------------------------------------------------ updates (installed copies)
     def update_mode(self):
@@ -4528,8 +4621,22 @@ class App:
                 self.rotate_screen()
             elif e.key == pygame.K_q and e.mod & pygame.KMOD_CTRL:
                 self.running = False
-        elif e.type in (pygame.VIDEORESIZE, getattr(pygame, "WINDOWSIZECHANGED", -1)):
-            self.make_canvas()
+        elif e.type in (pygame.VIDEORESIZE, getattr(pygame, "WINDOWSIZECHANGED", -1),
+                        getattr(pygame, "WINDOWDISPLAYCHANGED", -1)):
+            self.fit_window()
+
+    def fit_window(self):
+        """The window changed size or screen (the desktop moved it to the touchscreen, a TV came
+        or went): draw at the window's real size, not the size it started with."""
+        if not WEB:
+            try:
+                size = pygame.display.get_window_size()
+                if size[0] > 0 and size[1] > 0 and size != self.screen.get_size():
+                    flags = self.screen.get_flags() & pygame.FULLSCREEN
+                    self.screen = pygame.display.set_mode(size, flags)
+            except (pygame.error, TypeError):
+                pass
+        self.make_canvas()
 
     # ------------------------------------------------------------------ main loop
     def stop(self, *_):
@@ -4695,7 +4802,25 @@ function trackDeltas(s) {
       setTimeout(() => onState(state), 1850);
     }
     prev[p.seat] = { name: p.name, life: p.life };
+    // and commander damage / poison, for the running +n on the damage tiles
+    p.cmd.forEach((v, j) => trackVal(`c${p.seat}:${j}:1`, v || 0, now));
+    (p.cmd2 || []).forEach((v, j) => trackVal(`c${p.seat}:${j}:2`, v || 0, now));
+    trackVal(`p${p.seat}`, p.counters.poison || 0, now);
   }
+}
+const prevV = {}, valDeltas = {};
+function trackVal(key, v, now) {
+  const o = prevV[key];
+  if (o !== undefined && o !== v) {
+    const d = valDeltas[key];
+    valDeltas[key] = { d: (d && now - d.t < 1800 ? d.d : 0) + v - o, t: now };
+    setTimeout(() => onState(state), 1850);
+  }
+  prevV[key] = v;
+}
+function valDelta(key) {
+  const d = valDeltas[key];
+  return d && d.d && Date.now() - d.t < 1800 ? d.d : 0;
 }
 function deltaOf(seat) {
   const d = deltas[seat];
@@ -4855,6 +4980,10 @@ PHONE_HTML = r"""<!doctype html>
   .ctile .cname small { font-weight:500; opacity:.8; }
   .ctile .cval { font-size:46px; font-weight:800; line-height:1; text-shadow:0 2px 6px #000; font-variant-numeric:tabular-nums; }
   .ctile.lethal .cval { color:#ff8a8a; }
+  .ctile .cval { position:relative; }
+  .cdelta { position:absolute; left:100%; top:-.1em; margin-left:.25em; padding:.1em .5em; border-radius:999px; white-space:nowrap;
+            font-size:15px; font-weight:800; color:#fff; background:var(--good); text-shadow:none; pointer-events:none; }
+  .cdelta.neg { background:var(--bad); }
   .ctile .cplus { font-size:12px; font-weight:700; opacity:.75; text-shadow:0 1px 3px #000; }
   .hbtn { margin-left:auto; height:36px; padding:0 14px; border-radius:999px; border:1px solid var(--line);
           background:#22232f; font-size:14px; font-weight:600; max-width:46vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -4902,6 +5031,9 @@ PHONE_HTML = r"""<!doctype html>
           text-decoration:underline; text-decoration-color:rgba(255,255,255,.5); text-decoration-thickness:.035em;
           text-underline-offset:.06em; }
   .life.low { color:var(--amber); text-decoration-color:rgba(255,190,60,.6); }
+  .lifebtn { pointer-events:auto; display:inline-block; font:inherit; color:inherit; background:none; border:0; padding:0 .05em;
+             margin:0; line-height:1; text-decoration:inherit; text-decoration-color:inherit; text-shadow:inherit;
+             text-decoration-thickness:inherit; text-underline-offset:inherit; cursor:pointer; }
   .delta { position:absolute; left:50%; top:21%; transform:translateX(-50%); pointer-events:none; padding:.1em .6em;
            border-radius:999px; font-weight:800; font-size:min(9cqh, 7cqw); background:var(--good); }
   .delta.neg { background:var(--bad); }
@@ -5128,7 +5260,9 @@ function panel(p) {
                 () => act({ op: "life", seat, d: -10 }), 500, el("i", {}, "−")),
       pressable("button", { class: "half plus", "aria-label": "plus" }, () => act({ op: "life", seat, d: 1 }),
                 () => act({ op: "life", seat, d: 10 }), 500, el("i", {}, "+")),
-      el("div", { class: "life" + (p.life <= 5 && !p.ko ? " low" : "") }, p.life),
+      // the number itself opens commander damage (or the player sheet); beside it is -/+
+      el("div", { class: "life" + (p.life <= 5 && !p.ko ? " low" : "") },
+         tapBtn({ class: "lifebtn", "aria-label": cmdr ? "commander damage" : "player" }, openCmd, p.life)),
       d ? el("div", { class: "delta" + (d < 0 ? " neg" : "") }, fmt(d)) : null,
       p.ko ? el("div", { class: "ko" }, p.ko === "life" ? "KO" : "KO · " + p.ko) : null,
       tapBtn({ class: "strip bot" }, openCmd, bottom)));
@@ -5209,23 +5343,26 @@ function cmdSheet(seat) {
       const sub = () => act({ op: "cmd", seat, src: src.seat, which, d: -1 });
       return dmgTile(src.name, cardBg(src, "rgba(0,0,0,.25), rgba(0,0,0,.6)"), src.color, v, 21, 15,
                      [which === 2 ? el("span", { class: "p2" }, "2") : null, src.seat === seat ? el("small", {}, " (own)") : null],
-                     which === 2 ? "partner" : "", sub, add);
+                     which === 2 ? "partner" : "", sub, add, valDelta(`c${seat}:${src.seat}:${which}`));
     }), (() => {                                   // poison, like Lifetap
       const ko = s.poison_ko || 10, v = p.counters.poison;
       return dmgTile("Poison", { backgroundColor: CHIP.poison }, CHIP.poison, v, ko, ko - 3, [], "",
-                     () => act({ op: "counter", seat, key: "poison", d: -1 }), () => act({ op: "counter", seat, key: "poison", d: 1 }));
+                     () => act({ op: "counter", seat, key: "poison", d: -1 }), () => act({ op: "counter", seat, key: "poison", d: 1 }),
+                     valDelta(`p${seat}`));
     })()),
   ];
 }
 
-function dmgTile(name, bg, color, v, lethalAt, closeAt, extra, sub2, sub, add) {
+function dmgTile(name, bg, color, v, lethalAt, closeAt, extra, sub2, sub, add, delta) {
   const lethal = v >= lethalAt, close = v >= closeAt;
   const note = lethal ? "LETHAL" : close ? `${lethalAt - v} more is lethal` : sub2;
   return el("div", { class: "ctile" + (lethal ? " lethal" : close ? " close" : ""),
                      style: Object.assign({}, bg, lethal || close ? {} : { borderColor: color }) },
     el("div", { class: "face" },
       el("span", { class: "cname" }, name, ...extra),
-      el("span", { class: "cval" }, v), el("span", { class: close ? "cnote" : "cplus" }, note)),
+      el("span", { class: "cval" }, v,
+         delta ? el("span", { class: "cdelta" + (delta < 0 ? " neg" : "") }, fmt(delta)) : null),
+      el("span", { class: close ? "cnote" : "cplus" }, note)),
     pressable("button", { class: "half2 minus", "aria-label": "less from " + name }, sub, sub, 220, "−"),
     pressable("button", { class: "half2 plus", "aria-label": "more from " + name }, add, add, 220, "+"));
 }
@@ -5485,7 +5622,9 @@ function render() {
       el("div", { class: "name" }, p.name, p.seat === s.first && !p.ko ? el("span", { class: "first1" }, "1st") : null),
       firstFlash(p.seat) ? el("div", { class: "goes" }, "Goes first!") : null,
       d ? el("div", { class: "delta" + (d < 0 ? " neg" : "") }, fmt(d)) : null,
-      el("div", { class: "life" + (p.life <= 5 && !p.ko ? " low" : "") }, p.life),
+      // the number itself opens commander damage (or the player sheet); beside it is -/+
+      el("div", { class: "life" + (p.life <= 5 && !p.ko ? " low" : "") },
+         tapBtn({ class: "lifebtn", "aria-label": cmdr ? "commander damage" : "player" }, openCmd, p.life)),
       p.ko ? el("div", { class: "ko" }, p.ko === "life" ? "KO" : "KO · " + p.ko) : null,
       el("div", { class: "bottom" }, bottom),
       p.credit ? el("div", { class: "credit" }, p.credit) : null));

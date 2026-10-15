@@ -28,7 +28,8 @@ life counter — released under the MIT licence so anyone can use, fork and impr
   - **Ends `-=-`** – one player at each short end of the table (panels turned 90° to face them), the rest along the sides
   - **Round** – a slice per player from the centre, each turned to face its player, for a round table
   - **Upright** – everything upright, for a monitor on a stand
-- Tap **−/+** for 1, **hold** for 10 - anywhere on the left / right half of a panel, the life number included; running delta ("−7") while you tap; true multi-touch, so two players can tap at once
+- Tap **−/+** for 1, **hold** for 10 - anywhere on the left / right half of a panel; running delta ("−7") while you tap; true multi-touch, so two players can tap at once
+- **Tap the life number** (or the strip under it) for that player's commander damage; every damage tile shows its own running "+3" while you tap
 - **Formats:** Commander (40), 1 v 1 (20, no commander damage) and Two-Headed Giant (30, 15 poison) - picked in New game
 - Poison, commander tax, energy, experience; **commander damage per commander, your own included, partners tracked separately** - each source shows on your panel as a mini tile of that player's art (or colour) with the amount and their initials (optionally also subtracts life); warnings in amber before it's too late (life 5 or less, poison 3 from lethal, 15+ commander damage from one commander); automatic KO at 0 life / 10 poison / 21 commander damage, said in words and not just with colour; life can go below 0 and back (Platinum Angel, Phyrexian Unlife...) - the KO clears by itself if a player climbs back above 0
 - **Commander damage, Lifetap style:** tap the *Cmdr dmg* strip at the bottom of a panel and a tile for every commander pops up (their art, the damage they've dealt) plus a poison tile; left half of a tile −1, right half +1; "3 more is lethal" / "LETHAL" on the tile
@@ -195,7 +196,7 @@ Open the menu (round button) > **Phones & TV**. It shows a QR code, the address 
 
 - **Phones / tablets:** scan the QR code (or type the address and PIN). The phone shows the whole
   table, laid out exactly like the Pi (same seats, seating style and player count), on one screen
-  with no scrolling: tap a panel's left / right side for −1 / +1, hold for ±10 (the life number too), tap the
+  with no scrolling: tap a panel's left / right side for −1 / +1, hold for ±10, tap the life number or the
   *Cmdr dmg* strip at the bottom for commander damage, tap a name for that player's counters and settings (rename, colour, partner commanders). **↻** turns
   the page sideways (landscape) while the phone stays upright - handy with the rotation lock on. **Pick your seat** (asked the first time a phone joins) gives your panel
   a blue outline; **Undo** takes back the last change; **Game** starts a new game (format, 1–8 players, starting life, same or new players) and holds
@@ -306,7 +307,7 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 
 - Middle of a panel: left side −, right side + (hold for ±10)
 - **Cmdr dmg strip** at the bottom of a panel (or its damage tiles): commander damage, Lifetap style - a tile for every commander with their art, and one for poison; like a life panel, the tile's left half is −1 and its right half +1 (hold to repeat); *Counters & more* opens the full sheet. In formats without commanders the strip opens the player's sheet
-- **↶ (next to the menu button):** undo the last change; hold it for the history
+- **↶ (next to the menu button):** undo the last change; hold it for the history. The menu and ↶ always sit together in the middle of the screen; names move aside for them
 - **Turn pill** (turn tracker on): tap to pass the turn, hold to take it back
 - **Partner commanders:** switch *Partner* on in a player's sheet and their second commander gets its own tile (gold "2" badge) - damage from each partner is tracked separately, and 21 from either one is a KO
 - **Hold a player's name and drag it** onto another panel to swap seats (commander damage follows the players)
@@ -333,6 +334,7 @@ same GitHub account. Stop the codespace when you're done - free accounts get a m
 | Menu > Music says Spotify isn't set up | run `./install.sh --spotify` |
 | Music cuts out for a moment | that's audio buffers running dry, not the bit rate. LifePi 1.12.1+ asks for large buffers, and `./install.sh --spotify` stops any app forcing tiny ones (takes effect when PipeWire next starts, e.g. after a reboot). `pw-top` shows the HDMI output's QUANT - 1024 or more is good, and its ERR count shouldn't keep climbing |
 | No damage sound | menu > Sounds must not be *off*, and the Pi needs an audio output (TV with `--tv`, headphone jack, USB or Bluetooth speaker) |
+| A TV plugged in at power-on takes over the screen size | fixed in 1.14.0: LifePi opens on the smaller screen (the touchscreen) and follows the window if the desktop resizes it. To force a screen set `LIFEPI_DISPLAY=0` (or 1, ...) in the autostart entry |
 | Taps land in the wrong place | turn off any rotation set in the OS and use LifePi's own *Rotate screen*; with a TV connected, the touchscreen must stay mapped to `DSI-1` in `~/.config/labwc/rc.xml` (Pi OS does this) |
 | Menu opens facing the wrong side | tap the half of the round button nearest you, or use *Turn* in the menu's header |
 | A new release doesn't show up | it's checked at most every 6 hours - use menu > *Check for updates* |
@@ -367,7 +369,7 @@ All headless; CI runs them on every push and before every release.
 |---|---|
 | `SDL_VIDEODRIVER=dummy python3 tests/smoke_test.py` | the app itself: rotation and touch mapping, tap / hold, slides and palm brushes not counting as taps, taps after a sheet closes, every seating style for 1–8 players (each screen point belongs to one seat, clockwise order, taps on rotated seats), modals and rotated sheets, the menu facing whoever opened it, drag-to-swap, the commander damage pane (halves, hold, rotated, poison tile), partner commanders (separate tracking, KO rules, swaps, saves), undo + history (merged taps, resets, swaps, the button, saved), two-tap confirms (double taps don't count, time-out), formats, each opponent, the planar die, warnings, random first player (incl. fairness) and in the history, the turn tracker, random card art, search cache and suggestions incl. commanders first and *Search again* (mocked Scryfall), the damage sounds (grunt / clang / bubble per kind of damage, no clip twice in a row, grunts / tock / off), the knockout sound (life, commander, poison; once), Music against a stand-in speaker, the now-playing banner (no touch zones, see-through, scrolling without full redraws, hidden under sheets and when paused), Stop casting, the idle frame rate, the Android app's menu-only banner (its strip free at every rotation, Remove ads, Ad privacy), the desktop icon, the update check (toast + dot, Check for updates, bad downloads rejected, update + restart), saving / restart / crash / corrupt-save recovery, the installers' executable bits |
 | `SDL_VIDEODRIVER=dummy python3 tests/companion_test.py` | the Phones & TV server: PIN and lock-out, every phone action (undo, each opponent, formats included), bad input, live updates, seat positions matching the Pi, art serving |
-| `python tests/phone_test.py` | the phone page (QR code) in headless Chrome on a busy table (another phone tapping every 150 ms): the seat picker on first join, the life number as -/+, starting games (two taps, formats) and changing seating from the phone, scrolling sheets, the commander damage sheet (halves, hold, partner and poison tiles), undo, history, the offline banner, force landscape (needs Chrome) |
+| `python tests/phone_test.py` | the phone page (QR code) in headless Chrome on a busy table (another phone tapping every 150 ms): the seat picker on first join, the life number opening commander damage, starting games (two taps, formats) and changing seating from the phone, scrolling sheets, the commander damage sheet (halves, hold, partner and poison tiles), undo, history, the offline banner, force landscape (needs Chrome) |
 | `python web/build.py && python tests/web_test.py` | the phone app end to end in headless Chrome at phone size: boot, real touch input, holds, Scryfall in the browser, reload, the layout staying put when the phone turns, starting offline (needs Chrome and internet) |
 | `python3 tests/live_scryfall.py` | the real Scryfall API (non-blocking in CI) |
 | `python mobile/emulator_test.py <debug apk>` | the Android app in an emulator (API 35): starts and counts life with Wi-Fi and data off (the bundled runtime), no banner on the table, the banner only while the menu is open, its strip left free, Android Back closing the menu, store screenshots ([android.yml](.github/workflows/android.yml)) |

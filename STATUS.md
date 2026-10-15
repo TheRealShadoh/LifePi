@@ -3,6 +3,23 @@
 The newest dated section doubles as the Google Play release notes (scripts/play_upload.py takes
 it, up to 500 characters), so it's written for players.
 
+## 2026-10-15 LifePi 1.14.0
+
+- Tap a life total to open that player's commander damage
+- Commander damage and poison show a running +3 / -2 while you change them
+- The menu and undo buttons always sit in the middle of the screen
+- A TV plugged into the Pi at power-on no longer makes the table the TV's size
+
+### Done
+
+- Display: opens on the smallest screen (the touchscreen); $LIFEPI_DISPLAY overrides; redraws when the
+  desktop resizes or moves the window
+- Life number tap opens commander damage on the Pi, the phone app and the phone page
+- Running +/- on the damage pane, the player sheet rows and the phone page's damage tiles
+- Menu + undo centred as a pair; names step beside them, or under them on narrow seats
+- Bigger menu labels on portrait screens
+- Tests: smoke (display choice, resize, centred buttons, deltas, life-number tap), companion, phone page
+
 ## 2026-10-14 LifePi for Android
 
 - LifePi on Android: the full life counter for the whole table, free
