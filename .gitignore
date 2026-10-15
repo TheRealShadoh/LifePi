@@ -10,3 +10,8 @@ service-account*.json
 *.jks
 *.keystore
 key.properties
+*admob*.json
+*.base64.txt
+*password*.txt
+*.pem
+.env
