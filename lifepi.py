@@ -32,6 +32,7 @@ import socket
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,7 +42,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.15.0"
+VERSION = "1.16.0"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -1078,6 +1079,24 @@ def touch_display(sizes, override=None):
     return min(range(len(sizes)), key=lambda i: (sizes[i][0] * sizes[i][1], i))
 
 
+def kick_tv_mirror(restarted):
+    """The HDMI TV copy of the touchscreen (./install.sh --tv): make sure it's running, and after
+    an update or crash restart start it afresh over the new window - the old copy could be left
+    showing nothing (or the desktop) once LifePi's window closed and opened again."""
+    mirror = HOME / ".local/bin/lifepi-mirror"
+    if not mirror.exists() or not os.environ.get("WAYLAND_DISPLAY"):
+        return
+    try:
+        if restarted:                             # the mirror script starts a new one within 3 s
+            subprocess.run(["pkill", "-u", str(os.getuid()), "-x", "wl-mirror"], timeout=5,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # one copy only (it locks): this does nothing when it's already running
+        subprocess.Popen([str(mirror)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    except (OSError, subprocess.SubprocessError, AttributeError):
+        pass
+
+
 def new_player(i, life):
     return {"name": f"Player {i + 1}", "life": life, "color": i % len(PALETTE),
             "art": None, "credit": "", "art_url": None, "art_auto": False, "color_chosen": False,
@@ -1323,6 +1342,106 @@ def rank_card_names(names, text):
             return 0
         return 1 if n.startswith(q) else 2
     return sorted(names, key=group)                     # stable: keeps the order within a group
+
+
+# --------------------------------------------------------------------------- swipe typing
+KEY_ROWS = ["1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm,.-"]
+# Words a swipe can make before any are learned, most common first. Names, card names seen
+# before and words already typed are added on top (App.swipe_words).
+SWIPE_WORDS = """
+the of and to a in is it you that he was for on are with as his they be at one have this from
+or had by not but what all were we when your can said there use an each which she do how their
+if will up other about out many then them these so some her would make like him into time has
+look two more go see no way could my than first been who its now find long down day did get come
+made may part over new sound take only little work know place year live me back give most very
+after thing our just name good man think say great where help through much before line right
+too mean old any same tell boy follow came want show also around form three small set put end
+does another well large must big even such because turn here why ask went men read need land
+different home us move try kind hand picture again change off play spell air away animal house
+point page letter mother answer found study still learn should world high every near add food
+between own below country plant last school father keep tree never start city earth eye light
+thought head under story saw left few while along might close something seem next hard open
+example begin life always those both paper together got group often run important until
+children side feet car mile night walk white sea began grow took river four carry state once
+book hear stop without second later miss idea enough eat face watch far really almost let above
+girl sometimes mountain cut young talk soon list song being leave family
+yes ok okay hi hello thanks win lose lost won game player players turn draw mana deck card cards
+commander partner life damage poison counter counters energy rad monarch initiative token tokens
+attack block blocker creature creatures dragon dragons angel angels demon demons elf elves goblin
+goblins zombie zombies vampire vampires wizard wizards knight knights soldier soldiers spirit
+sliver merfolk warrior warriors cleric rogue shaman beast cat dog bird wolf giant golem horror
+lord king queen prince princess the of fire flame flames storm lightning bolt sword blade shield
+shadow shadows dark darkness light sun moon star stars night death blood bone bones soul souls
+mind dream dreams time sky sea ocean forest island swamp mountain plains wastes field tower
+temple gate city ruin ruins grave tomb crypt throne crown ring staff wand orb eye heart hand
+voice call song cry word oath pact will war peace path way road journey edge fall rise
+ancient elder eternal grand high great mighty primal savage wild sacred holy unholy cursed
+blessed hidden lost forgotten fallen risen burning frozen golden silver iron stone steel crystal
+red blue green black white colorless chaos order guild lands spell spells sorcery instant
+enchantment artifact planeswalker legendary land battlefield graveyard library exile hand mill
+sol ring signet arcane counterspell wrath cyclonic rift rhystic study smothering tithe
+""".split()
+
+
+def swipe_points(path, n):
+    """Resample a polyline to n points evenly spaced along its length."""
+    pts = [tuple(map(float, p)) for p in path]
+    if len(pts) == 1:
+        return pts * n
+    seg = [math.dist(a, b) for a, b in zip(pts, pts[1:])]
+    total = sum(seg)
+    if total <= 0:
+        return [pts[0]] * n
+    out, k, acc = [], 0, 0.0
+    for i in range(n):
+        want = total * i / (n - 1)
+        while k < len(seg) - 1 and acc + seg[k] < want:
+            acc += seg[k]
+            k += 1
+        t = 0 if seg[k] == 0 else min(1.0, (want - acc) / seg[k])
+        (x1, y1), (x2, y2) = pts[k], pts[k + 1]
+        out.append((x1 + (x2 - x1) * t, y1 + (y2 - y1) * t))
+    return out
+
+
+def swipe_decode(path, centers, words, limit=4):
+    """Best words for a swipe across the keyboard, best first. path: points in key units (a key
+    is 1 x 1); centers: {letter: (x, y)} in the same units; words: lowercase words, most likely
+    first. A word must start near where the finger went down, end near where it lifted, and pass
+    near each of its letters in order; then the closest overall shape wins, with a nudge for
+    common words."""
+    if len(path) < 2:
+        return []
+    dense = swipe_points(path, 64)
+    start, end = dense[0], dense[-1]
+    plen = sum(math.dist(a, b) for a, b in zip(dense, dense[1:]))
+    scored, seen = [], set()
+    for rank, w in enumerate(words):
+        if w in seen or len(w) < 2 or any(ch not in centers for ch in w):
+            continue
+        seen.add(w)
+        keys = [centers[ch] for ch in w]
+        if math.dist(keys[0], start) > 1.05 or math.dist(keys[-1], end) > 1.05:
+            continue
+        tpl = [keys[0]] + [b for a, b in zip(keys, keys[1:]) if a != b]   # "ll" is one key
+        tlen = sum(math.dist(a, b) for a, b in zip(tpl, tpl[1:]))
+        if tlen > plen * 1.6 + 1.2 or plen > tlen * 1.8 + 2:
+            continue
+        i, ok = 0, True                         # each letter passed, in order
+        for c in tpl:
+            while i < len(dense) and math.dist(dense[i], c) > 0.85:
+                i += 1
+            if i == len(dense):
+                ok = False
+                break
+        if not ok:
+            continue
+        a = swipe_points(tpl, 32)
+        b = swipe_points(dense, 32)
+        score = sum(math.dist(p, q) for p, q in zip(a, b)) / 32 + 0.04 * math.log(rank + 2)
+        scored.append((score, w))
+    scored.sort()
+    return [w for _, w in scored[:limit]]
 
 
 def parse_version(v):
@@ -1637,12 +1756,14 @@ class App:
             if getattr(args, "desktop_icon", False):   # main() only - tests leave $HOME alone
                 install_desktop_icon()
         self.web_turn = 0                          # phone app: rotation undoing the phone's turn
+        self.args_windowed, self.display_index = False, 0
         if WEB:                                   # the page decides: match its shape and size
             self.web_size = web_screen_size()
             self.screen = pygame.display.set_mode(self.web_size)
             self.web_checked = time.time()
             self.web_angle0 = web_screen_angle()  # the orientation to stay in
         elif args.windowed:
+            self.args_windowed = True
             w, h = (int(v) for v in args.windowed.lower().split("x"))
             self.screen = pygame.display.set_mode((w, h))
         else:
@@ -1653,10 +1774,13 @@ class App:
             except (pygame.error, AttributeError):
                 sizes = []
             self.display_index = touch_display(sizes, os.environ.get("LIFEPI_DISPLAY"))
+            self._screens_seen = (self.display_index, tuple(map(tuple, sizes)))
             try:
                 self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN, display=self.display_index)
             except (pygame.error, TypeError):
                 self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+            if getattr(args, "tv_mirror", False):   # main() only
+                kick_tv_mirror(os.environ.get("LIFEPI_RESTART", ""))
         self.clock = pygame.time.Clock()
         self.fonts, self.img_cache, self.shape_cache = {}, {}, {}
         self.zones, self.pointers, self.modals, self.fx = [], {}, [], {}
@@ -3033,6 +3157,8 @@ class App:
         self.set_text(self.modals[-1], initial)
 
     def set_text(self, m, t):
+        if m.get("alts") and not t.startswith(m.get("swiped") or "\0"):
+            m["alts"] = []                              # the swiped word was deleted
         m["text"] = t[:40]
         if m.get("local"):
             m["sugg"] = m["local"](m["text"])
@@ -4029,8 +4155,23 @@ class App:
         u, W, H = v.u, v.w, v.h
         box = pygame.Rect(12, u, W - 24, u)
         v.surf.blit(self.rrect(box.w, box.h, (36, 38, 50), 8), box)
-        self.text(v.surf, m["text"] + "|", u * 0.6, maxw=box.w - 20, shadow=False, midleft=(box.x + 12, box.centery))
-        rows = ["1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm,.-"]
+        alts = m.get("alts") or []
+        aw = 0
+        if alts:                                      # after a swipe: the other guesses, tap to swap
+            ax = box.right - 6
+            for w in reversed(alts):
+                lab = self.cap_word(m, w)
+                pill = self.make_pill(lab, u * 0.42, fg=WHITE, bg=(70, 90, 140), alpha=255)
+                pr = pill.get_rect(midright=(ax, box.centery))
+                if pr.x < box.x + box.w * 0.45:
+                    break
+                v.surf.blit(pill, pr)
+                v.zone(pr.inflate(6, 10), lambda w=w: self.swipe_swap(m, w))
+                ax = pr.x - 6
+            aw = box.right - ax
+        self.text(v.surf, m["text"] + "|", u * 0.6, maxw=box.w - 20 - aw, shadow=False,
+                  midleft=(box.x + 12, box.centery))
+        rows = KEY_ROWS
         y = 2 * u + 8
         if "pick" in m:                               # suggestion strip
             sh = int(u * 0.75)
@@ -4056,12 +4197,72 @@ class App:
             for ci, ch in enumerate(keys):
                 self.button(v, (ci * W // 10, y + ri * kh, W // 10, kh), ch.upper(), lambda ch=ch: add(ch),
                             size=kh * 0.55)
+        # swipe typing: slide a finger across the letters and lift - the word that path spells
+        # goes in (pointer_up). Remember where the keys are and which way the sheet faces.
+        m["swipe_grid"] = (v, pygame.Rect(0, y, W, 4 * kh), W / 10, kh)
+        for ptr in self.pointers.values():            # the trail under the finger
+            if ptr.get("swipe") and len(ptr["swipe"]) > 1 and ptr.get("moved"):
+                pts = [v.to_local(p) for p in ptr["swipe"][-120:]]
+                pygame.draw.lines(v.surf, (120, 190, 255), False, pts, max(4, int(kh * 0.12)))
         yb = y + 4 * kh
         self.button(v, (0, yb, W // 5, kh), "Cancel", self.pop, bg=BTN_BAD, size=kh * 0.4)
         self.button(v, (W // 5, yb, 2 * W // 5, kh), "space", lambda: add(" "), size=kh * 0.4)
         self.button(v, (3 * W // 5, yb, W // 5, kh), "DEL", back, hold=back, size=kh * 0.4)
         self.button(v, (4 * W // 5, yb, W // 5, kh), "OK", lambda: self.keyboard_ok(m), bg=BTN_OK, size=kh * 0.4)
         v.finish()
+
+    def cap_word(self, m, w, before=None):
+        """A word as the keyboard would type it: capitalised at the start or after a space."""
+        t = m["text"] if before is None else before
+        return w[:1].upper() + w[1:] if not t or t.endswith(" ") else w
+
+    def swipe_words(self):
+        """What a swipe can spell: names and card names seen on this device, then common words."""
+        words = []
+        for name in [p["name"] for p in self.players] + list(self.profiles):
+            words += name.lower().split()
+        with self.cache_lock:
+            cards = list(self.known_names)
+        cw = {}
+        for n in cards:
+            for w in n.lower().replace(",", " ").replace("-", " ").split():
+                cw[w] = cw.get(w, 0) + 1
+        words += [w for w in SWIPE_WORDS if w not in cw]
+        words += sorted(cw, key=lambda w: -cw[w])
+        return words
+
+    def swipe_end(self, m, path):
+        """A finger slid across the keys and lifted: type the word it spelled."""
+        grid = m.get("swipe_grid")
+        if not grid or len(path) < 2:
+            return
+        v, area, kw, kh = grid
+        pts = [v.to_local(p) for p in path]
+        pts = [((x - area.x) / kw, (y - area.y) / kh) for x, y in pts]
+        centers = {ch: (ci + 0.5, ri + 0.5) for ri, row in enumerate(KEY_ROWS) for ci, ch in enumerate(row)
+                   if ch.isalpha()}
+        guesses = swipe_decode(pts, centers, self.swipe_words())
+        if not guesses:
+            self.say("No word matched that swipe")
+            return
+        t = m["text"]
+        if t and not t.endswith(" "):
+            t += " "
+        m["swiped"] = t                               # the text before the word (for swaps)
+        m["alts"] = guesses[1:]
+        self.set_text(m, t + self.cap_word(m, guesses[0], t))
+
+    def swipe_swap(self, m, w):
+        """Tapped another guess: it replaces the swiped word."""
+        before = m.get("swiped")
+        if before is None:
+            return
+        old = [x for x in [m["text"][len(before):]] if m["text"].startswith(before)]
+        if not old:
+            m["alts"] = []
+            return self.set_text(m, m["text"])
+        m["alts"] = [x for x in m["alts"] if x != w] + [old[0].lower()]
+        self.set_text(m, before + self.cap_word(m, w, before))
 
     def keyboard_ok(self, m):
         self.pop()
@@ -4707,12 +4908,22 @@ class App:
             if z[0](pos):
                 self.pointers[pid] = {"zone": z, "t": time.time(), "held": False, "next": 0, "pos": pos,
                                       "start": pos, "moved": False}
+                m = self.modals[-1] if self.modals else None
+                if m and m["kind"] == "keyboard" and m.get("swipe_grid"):
+                    v, area = m["swipe_grid"][:2]
+                    lx, ly = v.to_local(pos)
+                    if area.collidepoint(lx, ly):       # on the letters: may become a swipe
+                        self.pointers[pid]["swipe"] = [pos]
                 return
 
     def pointer_move(self, pid, pos):
         ptr = self.pointers.get(pid)
         if ptr:
             ptr["pos"] = pos
+            if ptr.get("swipe") is not None:
+                ptr["swipe"].append(pos)
+                if ptr["moved"]:
+                    self.dirty = True                # draw the trail
             if ptr.get("drag") is not None:
                 self.dirty = True
             elif not ptr["moved"] and math.dist(pos, ptr.get("start", pos)) > self.slop():
@@ -4721,7 +4932,12 @@ class App:
 
     def pointer_up(self, pid, pos):
         ptr = self.pointers.pop(pid, None)
-        if ptr and ptr.get("drag") is not None:
+        if ptr and ptr.get("swipe") and ptr.get("moved") and not ptr["held"]:
+            m = self.modals[-1] if self.modals else None
+            if m and m["kind"] == "keyboard":
+                self.swipe_end(m, ptr["swipe"] + [pos])
+            self.dirty = True
+        elif ptr and ptr.get("drag") is not None:
             dst = self.seat_at(pos)
             if dst is not None and dst != ptr["drag"] and not self.modals:
                 self.swap_seats(ptr["drag"], dst)
@@ -4802,15 +5018,32 @@ class App:
 
     def fit_window(self):
         """The window changed size or screen (the desktop moved it to the touchscreen, a TV came
-        or went): draw at the window's real size, not the size it started with."""
+        or went): draw at the window's real size, not the size it started with. Full screen it
+        stays on the touchscreen: set_mode without display= means display 0, which with a TV on
+        HDMI can be the TV - the app would jump onto the TV (and off the mirrored touchscreen)."""
         if not WEB:
             try:
-                size = pygame.display.get_window_size()
-                if size[0] > 0 and size[1] > 0 and size != self.screen.get_size():
-                    flags = self.screen.get_flags() & pygame.FULLSCREEN
-                    self.screen = pygame.display.set_mode(size, flags)
-            except (pygame.error, TypeError):
-                pass
+                if self.screen.get_flags() & pygame.FULLSCREEN and not self.args_windowed:
+                    sizes = pygame.display.get_desktop_sizes()
+                    idx = touch_display(sizes, os.environ.get("LIFEPI_DISPLAY"))
+                    # only when the screens themselves changed: a resize event from our own
+                    # set_mode must not start another one (a TV that reports a rotated size)
+                    seen = (idx, tuple(map(tuple, sizes)))
+                    if sizes and seen != getattr(self, "_screens_seen", None):
+                        self._screens_seen = seen
+                        if idx != self.display_index or tuple(sizes[idx]) != self.screen.get_size():
+                            self.display_index = idx
+                            self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN, display=idx)
+                    else:
+                        size = pygame.display.get_window_size()
+                        if size[0] > 0 and size[1] > 0 and size != self.screen.get_size():
+                            self.screen = pygame.display.get_surface() or self.screen
+                else:
+                    size = pygame.display.get_window_size()
+                    if size[0] > 0 and size[1] > 0 and size != self.screen.get_size():
+                        self.screen = pygame.display.set_mode(size)
+            except (pygame.error, TypeError, IndexError, ValueError) as e:
+                print("fit_window:", e, file=sys.stderr)
         self.make_canvas()
 
     # ------------------------------------------------------------------ main loop
@@ -4863,6 +5096,22 @@ class App:
                     or self.banner_scrolling())
 
     def step(self):
+        """One frame; a screen that went away under us (a TV plugged in or out, the desktop
+        starting up after a reboot) is picked up again instead of ending the app."""
+        try:
+            self.frame()
+            self.screen_errors = 0
+        except pygame.error as e:
+            self.screen_errors = getattr(self, "screen_errors", 0) + 1
+            print("screen error:", e, file=sys.stderr)
+            if self.screen_errors > 30:              # not getting better: let main() restart us
+                raise
+            time.sleep(0.1)
+            self._screens_seen = None
+            self.fit_window()
+            self.dirty = True
+
+    def frame(self):
         """One frame: input, timers, phones, drawing, autosave. Idle (nothing moving, no finger
         down) it runs at IDLE_FPS instead of the full frame rate; the first touch starts full
         speed again. (pygame.event.wait would be nicer, but SDL polls under Wayland and that
@@ -5990,10 +6239,81 @@ def main():
     args.update_check = not args.no_update_check
     if args.no_companion:
         args.companion_port = None
-    app = App(args)
-    app.run()
-    if app.restart_after:                         # updated: start the new version in this process
-        os.execv(sys.executable, [sys.executable, str(app.install_path)] + sys.argv[1:])
+    args.tv_mirror = True
+    if not os.environ.get("LIFEPI_CHILD") and not os.environ.get("LIFEPI_NO_SUPERVISOR"):
+        sys.exit(supervise(sys.argv[1:]))
+    try:
+        app = App(args)
+        app.run()
+    except Exception:
+        log_crash(traceback.format_exc())
+        raise
+    if app.restart_after:                         # updated: the supervisor starts the new version
+        sys.exit(RESTART_CODE)
+
+
+RESTART_CODE = 75                                 # "start me again" (after an update)
+CRASH_LOG = CONFIG_DIR / "crash.log"
+
+
+def log_crash(text):
+    """Keep the last few crashes in ~/.config/lifepi/crash.log (newest last, ~50 KB at most)."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        old = CRASH_LOG.read_text(errors="replace")[-40000:] if CRASH_LOG.exists() else ""
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        CRASH_LOG.write_text(f"{old}\n--- {stamp} LifePi {VERSION}\n{text.rstrip()}\n")
+    except OSError:
+        pass
+
+
+def supervise(argv, cmd=None):
+    """Run LifePi in a child process and keep it running: start it again after an update (the
+    new file), and after a crash - a TV plugged in at the wrong moment, the desktop not quite up
+    after a reboot - instead of leaving a blank screen until someone restarts it by hand. Gives
+    up after 5 crashes in 2 minutes. Quit, Ctrl+C, docker stop and shutdown still end it."""
+    path = Path(__file__).resolve()
+    env = dict(os.environ, LIFEPI_CHILD="1")
+    state = {"child": None, "stopping": False}
+
+    def forward(sig, _frame):
+        state["stopping"] = True
+        c = state["child"]
+        if c and c.poll() is None:
+            try:
+                c.send_signal(sig)
+            except OSError:
+                pass
+    for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), forward)
+    # just updated by a version that restarted itself in place (before this supervisor existed)?
+    prev = path.with_name(path.name + ".previous")
+    reason = "update" if prev.exists() and time.time() - prev.stat().st_mtime < 120 else ""
+    crashes = []
+    outside = {-getattr(signal, n) for n in ("SIGTERM", "SIGKILL", "SIGINT", "SIGHUP") if hasattr(signal, n)}
+    while True:
+        env["LIFEPI_RESTART"] = reason
+        try:
+            state["child"] = subprocess.Popen((cmd or [sys.executable, str(path)]) + argv, env=env)
+        except OSError as e:
+            log_crash(f"couldn't start: {e}")
+            return 1
+        code = state["child"].wait()
+        if state["stopping"] or code == 0:
+            return 0 if code in outside else code
+        if code == RESTART_CODE:
+            reason = "update"
+            continue
+        if code in outside:                       # killed from outside: that was on purpose
+            return 0
+        now = time.time()
+        crashes = [t for t in crashes if now - t < 120] + [now]
+        log_crash(f"exited with code {code}; " + ("starting again" if len(crashes) < 5 else "giving up"))
+        if len(crashes) >= 5:
+            return code
+        reason = "crash"
+        time.sleep(1)
 
 
 if __name__ == "__main__":

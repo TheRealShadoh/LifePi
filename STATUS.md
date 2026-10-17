@@ -3,6 +3,30 @@
 The newest dated section doubles as the Google Play release notes (scripts/play_upload.py takes
 it, up to 500 characters), so it's written for players.
 
+## 2026-10-17 LifePi 1.16.0
+
+- Swipe typing: slide across the on-screen keyboard to type a word; tap a guess to swap it
+- Pi: the TV copy of the screen comes back after an update
+- Pi: no more crash when a TV is plugged in or after a reboot; if LifePi ever stops it starts again
+
+### Done
+
+- Swipe decoding (swipe_decode): word must start/end at the finger's ends and pass each letter in order,
+  then nearest shape wins with a nudge for common words; vocabulary = player / profile names, words
+  from card names seen, then a built-in list. Trail drawn under the finger; up to 3 other guesses
+  shown in the text box, tap to swap. Works on rotated sheets
+- fit_window full screen: picks the touchscreen again and passes display= (set_mode without it went
+  to display 0 = the TV when listed first); only when the screens change, so no resize loop
+- A frame that hits a pygame screen error re-fits the window instead of ending the app (30 in a row:
+  give up and let the supervisor restart)
+- main() runs the app in a child process (supervise): restarts after a crash (logged to
+  ~/.config/lifepi/crash.log, gives up after 5 in 2 minutes) and after an update (exit code 75,
+  replaces the in-process execv); Quit / SIGTERM / Ctrl+C end both. LIFEPI_NO_SUPERVISOR=1 turns it off
+- After an update or crash restart, wl-mirror is restarted (the mirror script brings it back in 3 s)
+  and the mirror script is started if it isn't running
+- Tests: swipe decode + keyboard swipes at 4 sheet angles, TV plug/unplug display choice, frame
+  screen errors, supervisor restart/give-up
+
 ## 2026-10-16 LifePi 1.15.0
 
 - Commander damage now lays each player's tile where they sit at the table, on the phone too

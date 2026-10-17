@@ -1191,6 +1191,109 @@ pygame.display.set_mode((800, 480)); a.screen = pygame.display.set_mode((800, 48
 assert (a.W, a.H) == (800, 480); a.render()
 print("display choice and resize ok")
 
+# full screen, a TV coming or going keeps LifePi on the touchscreen: set_mode is always told
+# which display (without it SDL uses display 0 - the TV when it's listed first)
+calls = []
+real_sizes, real_set_mode = pygame.display.get_desktop_sizes, pygame.display.set_mode
+try:
+    a = lifepi.App(NS(windowed="800x480", rotate=None, fps=30)); a.args_windowed = False
+    class FS:                                              # the dummy driver has no real full screen
+        def __init__(s, size): s.size = size
+        def get_flags(s): return pygame.FULLSCREEN
+        def get_size(s): return s.size
+    a.screen = FS((800, 480)); a.display_index = 0; a._screens_seen = (0, ((800, 480),))
+    def fake_set_mode(size=(0, 0), flags=0, depth=0, display=0, vsync=0):
+        calls.append(display); real_set_mode((800, 480)); return FS((800, 480))
+    pygame.display.set_mode = fake_set_mode
+    pygame.display.get_desktop_sizes = lambda: [(1920, 1080), (800, 480)]     # TV plugged in, listed first
+    a.fit_window()
+    assert calls == [1] and a.display_index == 1, calls
+    a.fit_window(); assert calls == [1], "a resize from our own set_mode must not loop"
+    pygame.display.get_desktop_sizes = lambda: [(800, 480)]                    # TV unplugged
+    a.fit_window(); assert calls == [1, 0], calls
+    def broken(): raise pygame.error("no displays")
+    pygame.display.get_desktop_sizes = broken
+    a._screens_seen = None; a.fit_window()                                     # logged, not a crash
+finally:
+    pygame.display.get_desktop_sizes, pygame.display.set_mode = real_sizes, real_set_mode
+# a frame that hits a screen error (the window lost while a TV comes or goes) carries on
+a = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
+real_render, fails = a.render, [2]
+def flaky():
+    if fails[0]:
+        fails[0] -= 1; raise pygame.error("display Surface quit")
+    real_render()
+a.render = flaky
+for _ in range(4):
+    a.dirty = True; a.step()
+assert fails[0] == 0 and a.running and a.screen_errors == 0
+print("TV plug / unplug ok")
+
+# LifePi runs under a supervisor: started again after a crash (logged) or an update, not after
+# a normal quit
+sup = lifepi.Path(tempfile.mkdtemp())
+script = sup / "child.py"
+script.write_text(
+    "import os, sys, pathlib\n"
+    f"d = pathlib.Path({str(sup)!r})\n"
+    "runs = d / 'runs'; n = len(runs.read_text().split()) if runs.exists() else 0\n"
+    "runs.write_text((runs.read_text() if runs.exists() else '') + (os.environ['LIFEPI_RESTART'] or '-') + ' ')\n"
+    "sys.exit([1, 75, 0][n])\n")
+saved = {n: signal.getsignal(getattr(signal, n)) for n in ("SIGTERM", "SIGINT", "SIGHUP") if hasattr(signal, n)}
+try:
+    lifepi.CRASH_LOG.unlink(missing_ok=True)
+    code = lifepi.supervise([], cmd=[sys.executable, str(script)])
+finally:
+    for n, h in saved.items(): signal.signal(getattr(signal, n), h)
+assert code == 0 and (sup / "runs").read_text().split() == ["-", "crash", "update"], (code, (sup / "runs").read_text())
+assert "exited with code 1; starting again" in lifepi.CRASH_LOG.read_text()
+# ...and gives up on a crash loop instead of spinning forever
+script.write_text("import sys; sys.exit(3)\n")
+real_sleep = lifepi.time.sleep; lifepi.time.sleep = lambda s: None
+try:
+    assert lifepi.supervise([], cmd=[sys.executable, str(script)]) == 3
+finally:
+    lifepi.time.sleep = real_sleep
+    for n, h in saved.items(): signal.signal(getattr(signal, n), h)
+assert "giving up" in lifepi.CRASH_LOG.read_text()
+print("supervisor: restart after crash / update, give up on a crash loop ok")
+
+# swipe typing: slide across the letters and lift - the word goes in, other guesses can swap in
+K = {ch: (ci + .5, ri + .5) for ri, row in enumerate(lifepi.KEY_ROWS) for ci, ch in enumerate(row) if ch.isalpha()}
+def keypath(word):
+    pts = [K[c] for c in word]
+    return [(p[0] + (q[0] - p[0]) * t / 6, p[1] + (q[1] - p[1]) * t / 6) for p, q in zip(pts, pts[1:]) for t in range(6)] + [pts[-1]]
+for w in ("the", "hello", "commander", "dragon", "poison"):
+    assert lifepi.swipe_decode(keypath(w), K, lifepi.SWIPE_WORDS)[0] == w, w
+assert lifepi.swipe_decode([(0.5, 1.5)], K, lifepi.SWIPE_WORDS) == []
+for ang in (0, 90, 180, 270):
+    a = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
+    a.players[0]["name"] = "Atraxa"
+    got = []
+    a.ask_text("Name", "", got.append, angle=ang); a.render()
+    m = a.modals[-1]; v, area, kw, kh = m["swipe_grid"]
+    (rx, ry), (dx, dy) = lifepi.frame_axes(v.angle)
+    def to_canvas(ch):                        # a key's centre on the screen (inverse of to_local)
+        x, y = area.x + K[ch][0] * kw - v.w / 2, area.y + K[ch][1] * kh - v.h / 2
+        det = rx * dy - ry * dx
+        return (v.cx + (x * dy - y * ry) / det, v.cy + (y * rx - x * dx) / det)
+    for word in ("atraxa", "game"):
+        pts = [to_canvas(c) for c in word]
+        a.pointer_down("mouse", pts[0])
+        for p, q in zip(pts, pts[1:]):
+            for t in range(1, 7):
+                a.pointer_move("mouse", (p[0] + (q[0] - p[0]) * t / 6, p[1] + (q[1] - p[1]) * t / 6))
+        a.render()                             # the trail is drawn
+        a.pointer_up("mouse", pts[-1])
+    assert m["text"] == "Atraxa Game", (ang, m["text"])
+    if m["alts"]:
+        alt = m["alts"][0]; a.render(); a.swipe_swap(m, alt)
+        assert m["text"] == "Atraxa " + alt.capitalize() and "game" in m["alts"], m["text"]
+    p = to_canvas("x"); a.pointer_down("mouse", p); a.pointer_up("mouse", p)
+    assert m["text"].endswith("x"), "a tap still types one letter"
+    a.set_text(m, ""); assert not m["alts"], "the guesses go once the word is deleted"
+print("swipe typing ok")
+
 # the menu and Undo buttons sit as a pair in the middle of the screen; names step aside
 for seating in lifepi.SEATINGS:
     for n in range(2, lifepi.MAX_PLAYERS + 1):
