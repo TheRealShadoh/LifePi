@@ -191,7 +191,8 @@ def main():
         b.js("closeSheet()"); time.sleep(0.3)
         tap(".cell .strip.bot", target)              # "+ Cmdr dmg" opens commander damage
         assert b.js("!!document.querySelector('#box .cmdgrid')"), "the strip did not open commander damage"
-        assert b.js("document.querySelectorAll('#box .ctile').length") == 6 + 1      # 6 commanders + poison
+        assert b.js("document.querySelectorAll('#box .ctile').length") == 6          # 6 commanders, no poison tile
+        assert b.js("document.querySelectorAll('#box .hubrow .hubbtn').length") == 4  # poison, rad, monarch, initiative
         b.shot("phone_cmd.png")
         tap("#box .ctile .half2.plus", 3)          # right half of seat 3's tile: +1
         p = state()["players"][target]
@@ -219,15 +220,22 @@ def main():
         assert state()["players"][1]["partner"], "partner switch from the phone"
         tap("#box .chipbtn.go")
         tap(".cell .strip.bot", target)
-        assert b.js("document.querySelectorAll('#box .ctile').length") == 7 + 1  # 6 commanders + 1 partner + poison
+        assert b.js("document.querySelectorAll('#box .ctile').length") == 7      # 6 commanders + 1 partner
         main_before = state()["players"][target]["cmd"][1]
         tap("#box .ctile .half2.plus", 2)          # seat 1's partner tile is right after seat 1's
         p = state()["players"][target]
         assert p["cmd2"][1] == 1 and p["cmd"][1] == main_before, (p["cmd"], p["cmd2"], main_before)
         b.shot("phone_cmd_partner.png")
         poison0 = state()["players"][target]["counters"]["poison"]
-        tap("#box .ctile .half2.plus", 7)          # the poison tile
+        tap("#box .hubrow .hubbtn", 0)             # poison: tap +1
         assert state()["players"][target]["counters"]["poison"] == poison0 + 1
+        tap("#box .hubrow .hubbtn", 0, ms=900)     # hold: -1
+        assert state()["players"][target]["counters"]["poison"] == poison0
+        tap("#box .hubrow .hubbtn", 2)             # monarch: this player takes it
+        assert state()["players"][target]["monarch"] is True
+        assert b.js("document.querySelectorAll('#box .hubrow .hubbtn')[2].classList.contains('on')")
+        tap("#box .hubrow .hubbtn", 2)             # tap again: given up
+        assert state()["players"][target]["monarch"] is False
         tap("#box .chipbtn.go")
         print(f"commander damage sheet ok (left half -1, right half +1, hold +{held}, partner tile, strip)")
 

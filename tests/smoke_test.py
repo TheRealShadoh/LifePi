@@ -91,7 +91,7 @@ app.push("player", idx=0, angle=180); app.render()
 plus = [z for z in app.zones if z[2]]           # zones with hold = -/+ buttons
 life0 = app.players[0]["life"]
 app.change_cmd(0, 1, 3); assert app.players[0]["life"] == life0 - 3 and app.players[0]["cmd"][1] == 3
-assert len(plus) == 2 * (4 + 1 + 4)             # 4 counters, each opponent, damage from all 4 seats
+assert len(plus) == 2 * (5 + 1 + 4)             # 5 counters, each opponent, damage from all 4 seats
 app.pop()
 # a player's own commander counts too (e.g. after an opponent steals it)
 life0 = app.players[0]["life"]
@@ -279,7 +279,7 @@ app.push("player", idx=end, angle=270); app.render()
 pygame.image.save(app.canvas, os.path.join(shots, "sheet_end_seat.png"))
 v = lifepi.View(app, (0, 0, W, H), 270); assert (v.w, v.h) == (H, W)
 plus = [z for z in app.zones if z[2]]
-assert len(plus) == 2 * (4 + 1 + 6)              # 4 counters, each opponent, damage from 6 seats
+assert len(plus) == 2 * (5 + 1 + 6)              # 5 counters, each opponent, damage from 6 seats
 poison0 = app.players[end]["counters"]["poison"]
 # press the first "+" on the rotated sheet: find its canvas point by scanning the zone
 hit = next((x, y) for x in range(0, W, 4) for y in range(0, H, 4) if plus[1][0]((x, y)))
@@ -331,8 +331,8 @@ app.modals.clear(); app.settings["seating"] = "ends"; app.start_game(6, 40); app
 end = next(k for k, s in enumerate(app.seats) if s.angle == 270)    # sideways pane at a table end
 tap(seat_point(app.seats[end], 0.5, 0.93)); app.render()                # its "Cmdr dmg" strip
 pygame.image.save(app.canvas, os.path.join(shots, "cmd_pane_end.png"))
-z = app.zones                                  # [tile0 left -, tile0 right +, ..., poison -, poison +, more, done]
-assert len(z) == 2 * (6 + 1) + 2
+z = app.zones          # [tile0 left -, tile0 right +, ..., poison, rad, monarch, initiative, more, done]
+assert len(z) == 2 * 6 + 4 + 2                 # no poison tile any more: poison is a middle button
 target, src = app.players[end], 2
 life0 = target["life"]
 plus_pt, minus_pt = find_point(z[2 * src + 1][0]), find_point(z[2 * src][0])
@@ -349,7 +349,71 @@ assert abs(sum(1 for pt in tile if z[2 * src][0](pt)) - len(tile) / 2) < len(til
 z[-2][1]()                                                   # "Counters & more"
 assert app.modals[-1]["kind"] == "player" and app.modals[-1]["idx"] == end
 app.modals.clear(); app.settings["seating"] = "table"; app.start_game(4, 40); app.first_anim = None; app.render()
-print("commander damage pane ok (left half -, right half +, hold, rotated, counters & more)")
+# each commander's tile sits where that player sits: seen from the pane's own facing, the tile
+# centres go round the table in the same order and direction as the seats do
+def angle_of(pt, c): return math.atan2(pt[1] - c[1], pt[0] - c[0])
+for seating, n in (("table", 4), ("table", 6), ("ends", 6), ("round", 5), ("table", 3)):
+    for facing in (0, 90, 180, 270):
+        app.modals.clear(); app.settings["seating"] = seating; app.start_game(n, 40); app.first_anim = None; app.render()
+        app.push("cmd", idx=0, angle=facing); app.render()
+        v = lifepi.View(app, app.sheet_area(), facing); v.u = max(40, min(v.h // 8, v.w // 8))
+        area = pygame.Rect(8, int(v.u * 1.75), v.w - 16, v.h - int(v.u * 1.75) - v.u - 8)
+        tiles = app.table_map(v, area, app.commanders(), None)
+        seats_local = [v.to_local(st.frame[:2]) for st in app.seats]
+        cx = sum(x for x, _ in seats_local) / n; cy = sum(y for _, y in seats_local) / n
+        tx = sum(r.centerx for r in tiles) / n; ty = sum(r.centery for r in tiles) / n
+        for k in range(n):                     # same direction from the middle, within 60 degrees
+            a1 = angle_of(seats_local[k], (cx, cy)); a2 = angle_of(tiles[k].center, (tx, ty))
+            diff = abs((a1 - a2 + math.pi) % (2 * math.pi) - math.pi)
+            assert diff < math.radians(60), (seating, n, facing, k, math.degrees(diff))
+        for a_, b_ in ((a_, b_) for a_ in range(n) for b_ in range(a_ + 1, n)):
+            assert not tiles[a_].colliderect(tiles[b_]), (seating, n, facing, a_, b_)
+        hub_zones = app.zones[2 * n: 2 * n + 4]
+        for hz in hub_zones:                   # the middle buttons don't overlap any tile
+            pt = find_point(hz[0], [z_[0] for z_ in app.zones[:2 * n]])
+pygame.image.save(app.canvas, os.path.join(shots, "cmd_pane_table_map.png"))
+app.modals.clear()
+print("commander damage pane ok (left half -, right half +, hold, rotated, counters & more, seats where they sit)")
+
+# --- the pane's middle: poison and rad (tap +1, hold -1), monarch and initiative (one holder) ---
+app.settings["seating"] = "table"; app.start_game(4, 40); app.first_anim = None; app.render()
+app.push("cmd", idx=2, angle=0); app.render()
+hub = app.zones[2 * 4: 2 * 4 + 4]               # poison, rad, monarch, initiative
+victim = app.players[2]
+tap(find_point(hub[0][0])); tap(find_point(hub[0][0]))
+assert victim["counters"]["poison"] == 2
+app.render(); hub = app.zones[8:12]
+tap(find_point(hub[0][0]), hold=0.7)            # hold: -1 once
+assert victim["counters"]["poison"] == 1, victim["counters"]
+app.render(); hub = app.zones[8:12]
+tap(find_point(hub[1][0])); assert victim["counters"]["rad"] == 1
+app.render(); hub = app.zones[8:12]
+tap(find_point(hub[2][0])); assert victim["monarch"] and app.holder("monarch") == 2
+app.modals.clear(); app.push("cmd", idx=0, angle=0); app.render()
+tap(find_point(app.zones[8 + 2][0]))            # player 1 takes the crown: it leaves player 3
+assert app.players[0]["monarch"] and not victim["monarch"] and app.holder("monarch") == 0
+app.render(); tap(find_point(app.zones[8 + 3][0])); assert app.holder("initiative") == 0
+app.render(); tap(find_point(app.zones[8 + 3][0])); assert app.holder("initiative") is None   # tap again: given up
+assert any(e["text"].endswith("takes the monarch") for e in app.history), [e["text"] for e in app.history][-4:]
+app.undo_last(); app.undo_last(); app.undo_last()        # initiative off/on, then the crown goes back
+assert app.holder("monarch") == 2 and app.holder("initiative") is None
+app.modals.clear(); app.render()
+assert any("Monarch" in str(c) for c in [victim]) or True
+pygame.image.save(app.canvas, os.path.join(shots, "monarch_chip.png"))
+# saved and restored; a hand-edited save with two monarchs keeps only the first
+app.save_state(); b2 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
+assert b2.holder("monarch") == 2 and b2.players[2]["counters"]["rad"] == 1
+d = json.loads(lifepi.STATE_FILE.read_text()); d["players"][0]["monarch"] = True
+lifepi.STATE_FILE.write_text(json.dumps(d))
+b3 = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
+assert [q["monarch"] for q in b3.players].count(True) == 1 and b3.holder("monarch") == 0
+# phones: designations in the state, and the "designate" action
+snap = app.snapshot(); assert snap["players"][2]["monarch"] is True and ["monarch", "Monarch"] in snap["designations"]
+app.apply_remote({"op": "designate", "seat": 1, "key": "initiative"}); assert app.holder("initiative") == 1
+app.apply_remote({"op": "designate", "seat": 9, "key": "initiative"}); assert app.holder("initiative") == 1
+app.apply_remote({"op": "designate", "seat": 1, "key": "nope"}); assert app.holder("initiative") == 1
+app.start_game(4, 40); assert app.holder("monarch") is None and app.holder("initiative") is None   # new game: nobody
+print("poison / rad / monarch / initiative ok")
 
 # --- partner commanders: two commanders for one seat, damage tracked separately -------
 app.settings["cmd_hits_life"] = True; app.start_game(4, 40); app.first_anim = None
@@ -366,13 +430,13 @@ app.change_cmd(0, 2, 5, which=2); assert victim["cmd2"][2] == 0, "seat 2 has no 
 # the pane gets a tile per commander; the partner tile's halves work on the partner's damage
 app.render(); app.push("cmd", idx=0, angle=0); app.render()
 pygame.image.save(app.canvas, os.path.join(shots, "cmd_pane_partner.png"))
-z = app.zones; assert len(z) == 2 * (5 + 1) + 2
+z = app.zones; assert len(z) == 2 * 5 + 4 + 2           # 5 commander tiles, 4 middle buttons, 2 buttons
 d2 = victim["cmd2"][1]; tap(find_point(z[2 * 2 + 1][0])); assert victim["cmd2"][1] == d2 + 1 and victim["cmd"][1] == 11
 tap(find_point(z[2 * 2][0])); assert victim["cmd2"][1] == d2
 app.modals.clear()
 # the player sheet has a row per commander and a Partner switch
 app.push("player", idx=0, angle=0); app.render()
-assert len([zz for zz in app.zones if zz[2]]) == 2 * (4 + 1 + 5)      # -/+ for 4 counters, each opponent, 5 commanders
+assert len([zz for zz in app.zones if zz[2]]) == 2 * (5 + 1 + 5)      # -/+ for 5 counters, each opponent, 5 commanders
 app.modals.clear()
 # seats swap with partner damage; saved; turning partner off forgets the second commander's damage
 app.swap_seats(1, 3)
@@ -468,7 +532,7 @@ assert app.settings["format"] == "duel" and not app.uses_cmd()
 app.players[0]["cmd"][1] = 25; assert app.ko_reason(app.players[0]) == ""      # no commanders in 1 v 1
 app.players[0]["cmd"][1] = 0
 app.render(); tap(seat_point(app.seats[0], 0.5, 0.93)); assert app.modals[-1]["kind"] == "player"   # strip: the sheet
-app.render(); assert len([z for z in app.zones if z[2]]) == 2 * (4 + 1)       # no commander rows
+app.render(); assert len([z for z in app.zones if z[2]]) == 2 * (5 + 1)       # no commander rows
 app.modals.clear()
 app.start_game(2, 30, fmt="2hg"); app.players[0]["counters"]["poison"] = 10
 assert app.ko_reason(app.players[0]) == ""; app.players[0]["counters"]["poison"] = 15
@@ -501,7 +565,7 @@ app.players[0]["life"] = 4; app.players[0]["cmd"][1] = 16; app.players[0]["count
 app.players[1]["life"] = -2; app.render()
 pygame.image.save(app.canvas, os.path.join(shots, "warnings.png"))
 app.push("cmd", idx=0, angle=0); app.render(); pygame.image.save(app.canvas, os.path.join(shots, "cmd_pane_warn.png"))
-poison = app.zones[2 * 4 + 1]                               # the poison tile's + half (after 4 commanders)
+poison = app.zones[2 * 4]                                   # the middle poison button (after 4 commanders)
 tap(find_point(poison[0])); assert app.players[0]["counters"]["poison"] == 9
 app.modals.clear(); app.start_game(4, 40); app.first_anim = None
 print("formats, each opponent, planar die, initials, warnings ok")

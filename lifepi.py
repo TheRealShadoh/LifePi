@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.14.0"
+VERSION = "1.15.0"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -82,9 +82,12 @@ PALETTE = [(36, 84, 176), (196, 72, 20), (200, 80, 140), (78, 82, 96),
 AMBER = (255, 190, 60)                              # "getting close": low life, poison, commander damage
 LETHAL = (255, 90, 90)
 COUNTERS = [("poison", "Poison", "Poison"), ("tax", "Cmdr tax", "Tax"),
-            ("energy", "Energy", "Energy"), ("exp", "Experience", "Exp")]
+            ("energy", "Energy", "Energy"), ("exp", "Experience", "Exp"), ("rad", "Rad", "Rad")]
+# one player at a time holds each of these; taking it moves it (combat damage steals both)
+DESIGNATIONS = [("monarch", "Monarch"), ("initiative", "Initiative")]
 CHIP_COLORS = {"poison": (40, 130, 70), "tax": (150, 110, 40), "energy": (175, 135, 20),
-               "exp": (80, 85, 175), "cmd": (165, 45, 45)}
+               "exp": (80, 85, 175), "rad": (120, 150, 25), "cmd": (165, 45, 45),
+               "monarch": (190, 140, 25), "initiative": (60, 110, 165)}
 MAX_PLAYERS = 8
 ROWS = {1: [1], 2: [1, 1], 3: [2, 1], 4: [2, 2], 5: [3, 2], 6: [3, 3], 7: [4, 3], 8: [4, 4]}
 SEATINGS = {"table": "Table  ===", "ends": "Ends  -=-", "round": "Round", "upright": "Upright"}
@@ -1080,7 +1083,8 @@ def new_player(i, life):
             "art": None, "credit": "", "art_url": None, "art_auto": False, "color_chosen": False,
             "counters": {k: 0 for k, _, _ in COUNTERS}, "cmd": [0] * MAX_PLAYERS,
             # partner commanders: damage from each seat's second commander, tracked on its own
-            "partner": False, "cmd2": [0] * MAX_PLAYERS}
+            "partner": False, "cmd2": [0] * MAX_PLAYERS,
+            **{k: False for k, _ in DESIGNATIONS}}
 
 
 def initials(name):
@@ -1797,6 +1801,8 @@ class App:
                 b["cmd"] = [max(0, as_int(x)) for x in (list(p.get("cmd") or []) + [0] * MAX_PLAYERS)[:MAX_PLAYERS]]
                 b["cmd2"] = [max(0, as_int(x)) for x in (list(p.get("cmd2") or []) + [0] * MAX_PLAYERS)[:MAX_PLAYERS]]
                 b["partner"] = p.get("partner") is True
+                for k, _ in DESIGNATIONS:              # one holder at most: the first one counts
+                    b[k] = p.get(k) is True and not any(q[k] for q in players)
                 players.append(b)
 
         profiles = {}
@@ -1909,6 +1915,7 @@ class App:
                         "art": art, "credit": p["credit"] if art else "",
                         "counters": dict(p["counters"]), "cmd": p["cmd"][:n], "ko": self.ko_reason(p),
                         "cmd2": p["cmd2"][:n], "partner": bool(p.get("partner")),
+                        **{k: bool(p.get(k)) for k, _ in DESIGNATIONS},
                         "pos": rects[i], "poly": polys[i]})
         fmt = self.settings["format"]
         return {"players": out, "start_life": self.settings["start_life"],
@@ -1922,6 +1929,7 @@ class App:
                 "cmd_hits_life": self.settings["cmd_hits_life"], "seating": self.settings["seating"],
                 "seatings": [[k, label] for k, label in SEATINGS.items()], "max_players": MAX_PLAYERS,
                 "counters": [[k, label] for k, label, _ in COUNTERS],
+                "designations": [[k, label] for k, label in DESIGNATIONS],
                 "join": self.companion_base() if self.companion and self.companion.running else ""}
 
     def publish(self):
@@ -1972,6 +1980,10 @@ class App:
             which = 2 if a.get("which") == 2 else 1
             if 0 <= src < n:
                 self.change_cmd(seat, src, num("d", -99, 99), which)
+        elif op == "designate" and a.get("key") in dict(DESIGNATIONS):
+            seat = num("seat", -1, 99)
+            if 0 <= seat < n:
+                self.set_designation(seat, a["key"], a["on"] if isinstance(a.get("on"), bool) else None)
         elif op == "partner" and isinstance(a.get("on"), bool):
             seat = num("seat", -1, 99)
             if 0 <= seat < n:
@@ -2328,6 +2340,9 @@ class App:
             return f"{name}: each opponent {d:+d} life"
         if k == "partner":
             return f"{name}: partner commanders {'on' if new else 'off'}"
+        if k in dict(DESIGNATIONS):
+            label = dict(DESIGNATIONS)[k]
+            return f"{name} {'takes' if new else 'loses'} {'the ' if k == 'monarch' else ''}{label.lower()}"
         if k == "swap":
             return f"{name} and {e.get('src', '')} swapped seats"
         if k == "turn":
@@ -2398,6 +2413,7 @@ class App:
     def game_in_progress(self):
         life = self.settings["start_life"]
         return any(p["life"] != life or any(p["counters"].values()) or any(p["cmd"]) or any(p["cmd2"])
+                   or any(p.get(k) for k, _ in DESIGNATIONS)
                    for p in self.players)
 
     def format(self):
@@ -2474,6 +2490,22 @@ class App:
             for q in self.players:
                 q["cmd2"][i] = 0
         self.changed()
+
+    def set_designation(self, i, key, on=None):
+        """Seat i becomes the monarch / takes the initiative (on=None: toggle). Only one player
+        holds each at a time, so it leaves whoever had it."""
+        p = self.players[i]
+        on = not p[key] if on is None else bool(on)
+        if p[key] == on:
+            return
+        self.record(("designate", key), i, key, 0, on, merge=False)
+        for q in self.players:
+            q[key] = False
+        p[key] = on
+        self.changed()
+
+    def holder(self, key):
+        return next((j for j, q in enumerate(self.players) if q.get(key)), None)
 
     def change_cmd(self, i, src, d, which=1):
         """Commander damage to player i from seat src's commander (which=2: its partner)."""
@@ -3113,9 +3145,10 @@ class App:
             s.blit(pl, pl.get_rect(center=(w // 2, h // 2 - int(size * 0.5))))
 
         poison_ko = self.format()[2]
-        chips = [(f"{short} {p['counters'][k]}", CHIP_COLORS[k],
-                  AMBER if k == "poison" and p["counters"][k] >= poison_ko - 3 else None)
-                 for k, _, short in COUNTERS if p["counters"][k]]
+        chips = [(label, CHIP_COLORS[k], (255, 230, 150)) for k, label in DESIGNATIONS if p.get(k)]
+        chips += [(f"{short} {p['counters'][k]}", CHIP_COLORS[k],
+                   AMBER if k == "poison" and p["counters"][k] >= poison_ko - 3 else None)
+                  for k, _, short in COUNTERS if p["counters"][k]]
         cmds = [(j, d, w) for j, w in self.commanders()                         # includes self
                 for d in [(p["cmd"] if w == 1 else p["cmd2"])[j]] if d] if self.uses_cmd() else []
         cy = h - bot // 2 - bot // 8
@@ -3760,10 +3793,154 @@ class App:
                 best = (size, cols)
         return best[1]
 
+    def table_map(self, v, area, sources, hub):
+        """Where each commander tile goes on the damage pane: where that player sits at the table,
+        as seen by whoever the pane faces. Rectangular seats keep their shape (scaled into area);
+        round-table wedges get equal tiles at their centres. A seat with partners is split in two.
+        The tiles keep out of `hub` (the counter buttons in the middle). Returns [Rect]."""
+        seats = self.seats if len(self.seats) == len(self.players) else layout(
+            len(self.players), self.W, self.H, self.settings["seating"])
+        boxes = []
+        for s in seats:
+            pts = [v.to_local(c) for c in (s.rect.topleft, s.rect.topright, s.rect.bottomleft, s.rect.bottomright)]
+            x0, y0 = min(x for x, _ in pts), min(y for _, y in pts)
+            x1, y1 = max(x for x, _ in pts), max(y for _, y in pts)
+            boxes.append((x0, y0, x1, y1, v.to_local(s.frame[:2])))
+        bx0, by0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+        bx1, by1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+        # stretched to fill the pane: where each seat is matters, not the table's exact shape
+        sx, sy = area.w / max(1, bx1 - bx0), area.h / max(1, by1 - by0)
+        ox, oy = area.x - bx0 * sx, area.y - by0 * sy
+        gap = max(6, int(min(area.w, area.h) * 0.012))
+        if all(s.is_rect for s in seats):
+            rects = [pygame.Rect(round(ox + b[0] * sx), round(oy + b[1] * sy),
+                                 round((b[2] - b[0]) * sx), round((b[3] - b[1]) * sy)).inflate(-gap, -gap)
+                     for b in boxes]
+        else:                                       # round table: a tile per wedge centre
+            cs = [(ox + b[4][0] * sx, oy + b[4][1] * sy) for b in boxes]
+            d = min((math.dist(a, c) for k, a in enumerate(cs) for c in cs[k + 1:]), default=area.h)
+            t = int(min(d * 0.78, area.h * 0.42, area.w * 0.42))
+            aspect = 1.25
+            for _ in range(12):                     # smaller until no two tiles touch
+                rects = []
+                for cx, cy in cs:
+                    r = pygame.Rect(0, 0, int(t * aspect), t)
+                    r.center = (round(cx), round(cy))
+                    rects.append(r.clamp(area))
+                if not any(a.inflate(gap, gap).colliderect(b) for k, a in enumerate(rects) for b in rects[k + 1:]):
+                    break
+                t = int(t * 0.88)
+        # out of the hub: cut each tile back on whichever side loses the least of it
+        if hub:
+            for k, r in enumerate(rects):
+                if r.colliderect(hub):
+                    cuts = [pygame.Rect(r.x, r.y, r.w, hub.top - gap - r.y),            # keep above
+                            pygame.Rect(r.x, hub.bottom + gap, r.w, r.bottom - hub.bottom - gap),
+                            pygame.Rect(r.x, r.y, hub.left - gap - r.x, r.h),          # keep left
+                            pygame.Rect(hub.right + gap, r.y, r.right - hub.right - gap, r.h)]
+                    rects[k] = max(cuts, key=lambda c: (min(c.w, c.h * 1.4) if c.w > 0 and c.h > 0 else -1))
+        out = []
+        for j, w in sources:
+            r = rects[j]
+            if self.players[j].get("partner"):      # partners: the seat's box split in two
+                if r.w >= r.h:
+                    half = (r.w - gap) // 2
+                    r = pygame.Rect(r.x, r.y, half, r.h) if w == 1 else pygame.Rect(r.right - half, r.y, half, r.h)
+                else:
+                    half = (r.h - gap) // 2
+                    r = pygame.Rect(r.x, r.y, r.w, half) if w == 1 else pygame.Rect(r.x, r.bottom - half, r.w, half)
+            out.append(r)
+        return out
+
+    def counter_icon(self, kind, size, on=True):
+        """Small drawn icons for the damage pane's buttons: poison drop, rad trefoil, crown,
+        initiative (a dungeon door). Drawn 4x and scaled down; cached."""
+        key = ("cicon", kind, size, on)
+        if key in self.img_cache:
+            return self.img_cache[key]
+        S = 4
+        n = size * S
+        big = pygame.Surface((n, n), pygame.SRCALPHA)
+        col = CHIP_COLORS.get(kind, (120, 120, 130))
+        fg = (255, 255, 255) if on else (150, 150, 160)
+        c = n // 2
+        if kind == "poison":                         # a drop
+            r = int(n * 0.26)
+            pygame.draw.circle(big, fg, (c, int(n * 0.6)), r)
+            pygame.draw.polygon(big, fg, [(c, int(n * 0.12)), (c - r + S, int(n * 0.56)), (c + r - S, int(n * 0.56))])
+        elif kind == "rad":                          # trefoil: three blades round a dot
+            r = int(n * 0.38)
+            for k in range(3):
+                a0 = math.radians(90 + k * 120 - 30)
+                pts = [(c, c)] + [(c + r * math.cos(a0 + t * math.radians(60) / 8),
+                                   c - r * math.sin(a0 + t * math.radians(60) / 8)) for t in range(9)]
+                pygame.draw.polygon(big, fg, pts)
+            pygame.draw.circle(big, (0, 0, 0, 0), (c, c), int(n * 0.12))
+            pygame.draw.circle(big, fg, (c, c), int(n * 0.08))
+        elif kind == "monarch":                      # crown
+            x0, x1, y0, y1 = n * 0.16, n * 0.84, n * 0.28, n * 0.72
+            pts = [(x0, y1), (x0, y0 + n * 0.08), (n * 0.33, n * 0.48), (c, y0 - n * 0.04),
+                   (n * 0.67, n * 0.48), (x1, y0 + n * 0.08), (x1, y1)]
+            pygame.draw.polygon(big, fg, pts)
+            for x in (x0, c, x1):
+                pygame.draw.circle(big, fg, (int(x), int((y0 - n * 0.06) if x == c else y0)), int(n * 0.06))
+        elif kind == "initiative":                   # a dungeon door: arch, planks, ring
+            w, h = int(n * 0.5), int(n * 0.62)
+            door = pygame.Rect(c - w // 2, int(n * 0.2), w, h)
+            pygame.draw.rect(big, fg, door, border_top_left_radius=w // 2, border_top_right_radius=w // 2)
+            for k in (1, 2):
+                x = door.x + door.w * k // 3
+                pygame.draw.line(big, col, (x, door.y + w // 4), (x, door.bottom - S), S * 2)
+            pygame.draw.circle(big, col, (door.x + door.w * 2 // 3 + S * 3, door.centery + h // 8), S * 3, S)
+        img = pygame.transform.smoothscale(big, (size, size))
+        self.img_cache[key] = img
+        return img
+
+    def draw_hub_buttons(self, v, i, hub):
+        """The damage pane's middle: what else a hit can do to this player - poison, rad, the
+        monarch, the initiative. Counters: tap +1, hold -1. Monarch / initiative: tap to give it
+        to this player (or take it back)."""
+        p = self.players[i]
+        poison_ko = self.format()[2]
+        items = [("poison", "Poison"), ("rad", "Rad"), ("monarch", "Monarch"), ("initiative", "Initiative")]
+        n = len(items)
+        gap = max(6, hub.w // 60)
+        bw = (hub.w - gap * (n - 1)) // n
+        for k, (key, label) in enumerate(items):
+            r = pygame.Rect(hub.x + k * (bw + gap), hub.y, bw, hub.h)
+            flag = key in dict(DESIGNATIONS)
+            val = p.get(key) if flag else p["counters"][key]
+            on = bool(val)
+            col = CHIP_COLORS[key]
+            bg = col if on else (40, 42, 54)
+            edge = tuple(min(255, c + 70) for c in col)
+            if key == "poison" and val >= poison_ko - 3:
+                edge = LETHAL if val >= poison_ko else AMBER
+            rad = max(6, min(r.w, r.h) // 6)
+            v.surf.blit(self.rrect(r.w, r.h, edge, rad, max(2, min(r.w, r.h) // 30), inner=bg), r)
+            isz = int(min(r.h * 0.5, r.w * 0.42))
+            icon = self.counter_icon(key, max(12, isz), on)
+            ir = icon.get_rect(center=(r.centerx if flag else r.x + r.w * 0.36, r.y + r.h * 0.42))
+            v.surf.blit(icon, ir)
+            if not flag:
+                self.text(v.surf, str(val), isz * 0.95, WHITE if on else GREY, shadow=False,
+                          midleft=(ir.right + max(3, isz // 8), ir.centery))
+                pl = self.fx_pill(("counter", i, key), max(14, isz * 0.5))
+                if pl:
+                    v.surf.blit(pl, pl.get_rect(midtop=(r.centerx, r.y + 3)))
+            self.text(v.surf, label, max(12, min(r.h * 0.2, r.w * 0.16)),
+                      WHITE if on else GREY, maxw=r.w - 6, shadow=False, midbottom=(r.centerx, r.bottom - r.h * 0.06))
+            if flag:
+                v.zone(r, lambda key=key: self.set_designation(i, key))
+            else:
+                v.zone(r, lambda key=key: self.change_counter(i, key, 1),
+                       lambda key=key: self.change_counter(i, key, -1), 10 ** 6)
+
     def draw_cmd(self, m):
-        """Commander damage to one player: a tile per commander (their art; partners get their
-        own tile). Like a life panel: left half -1, right half +1, hold repeats. Opened by
-        tapping a player's life total."""
+        """Commander damage to one player. Each commander's tile sits where that player sits at
+        the table (partners split their seat's tile), as seen from this pane. Tile: left half -1,
+        right half +1, hold repeats. In the middle: poison, rad, monarch and initiative - the rest
+        of what a hit can do. Opened by tapping a player's life total or damage strip."""
         i = m["idx"]
         if i >= len(self.players):
             return self.pop()
@@ -3773,8 +3950,9 @@ class App:
         u, W, H = v.u, v.w, v.h
         why = self.ko_reason(p)
         info = f"Life {p['life']}" + (f"   KO - {why}" if why else "")
-        hint = ("Left side -1, right side +1 - hold to repeat" +
-                (" (damage also comes off life)" if self.settings["cmd_hits_life"] else ""))
+        hint = ("Tiles: left -1, right +1, hold to repeat" +
+                (" (damage also comes off life)" if self.settings["cmd_hits_life"] else "") +
+                ".  Middle: tap +1, hold -1")
         iy = u + u * 0.35
         r = self.text(v.surf, info, u * 0.5, (255, 120, 120) if why else WHITE, shadow=False, midleft=(16, iy))
         pl = self.fx_pill(i, u * 0.4)                 # life lost to it as it happens (damage hits life)
@@ -3783,21 +3961,17 @@ class App:
             r = r.union(pr)
         self.text(v.surf, hint, u * 0.3, GREY, maxw=W - r.right - 40, shadow=False, midleft=(r.right + 24, iy))
 
-        sources = self.commanders() + [("poison", 0)]      # and a poison tile, like Lifetap
-        n = len(sources)
-        poison_ko = self.format()[2]
-        area = pygame.Rect(0, int(u * 1.75), W, H - int(u * 1.75) - u)
-        cols = self.cmd_layout(n, area.w, area.h)
-        rows = -(-n // cols)
-        tw, th = area.w // cols, area.h // rows
-        for k, (j, w) in enumerate(sources):
-            r = pygame.Rect(area.x + k % cols * tw, area.y + k // cols * th, tw, th).inflate(-10, -10)
-            if j == "poison":
-                src = {"name": "Poison", "color": 0, "art": None}
-                dmg, col, limit = p["counters"]["poison"], CHIP_COLORS["poison"], poison_ko
-            else:
-                src = self.players[j]
-                dmg, col, limit = (p["cmd"] if w == 1 else p["cmd2"])[j], PALETTE[src["color"] % len(PALETTE)], 21
+        sources = self.commanders()
+        area = pygame.Rect(8, int(u * 1.75), W - 16, H - int(u * 1.75) - u - 8)
+        hw = min(area.w * 0.62, u * 6.4)
+        hh = min(area.h * 0.24, hw / 4 * 0.9, u * 1.5)
+        hub = pygame.Rect(0, 0, int(hw), int(hh))
+        hub.center = area.center
+        for k, (r, (j, w)) in enumerate(zip(self.table_map(v, area, sources, hub), sources)):
+            src = self.players[j]
+            dmg, col, limit = (p["cmd"] if w == 1 else p["cmd2"])[j], PALETTE[src["color"] % len(PALETTE)], 21
+            if r.w < 8 or r.h < 8:
+                continue
             art = self.cover(src["art"], r.w, r.h) if src["art"] else None
             tile = pygame.Surface(r.size)
             if art:
@@ -3809,16 +3983,18 @@ class App:
             rad = max(6, min(r.w, r.h) // 10)
             v.surf.blit(tile, r)
             v.surf.blit(self.corners(r.w, r.h, rad), r)      # round the tile's corners
-            lethal, close = dmg >= limit, dmg >= limit - (3 if j == "poison" else 6)
+            lethal, close = dmg >= limit, dmg >= limit - 6
             edge = LETHAL if lethal else AMBER if close else tuple(min(255, c + 70) for c in col)
-            v.surf.blit(self.rrect(r.w, r.h, edge, rad, max(2, min(r.w, r.h) // 40) + (2 if close else 0)), r)
+            if j == i:                              # this player's own seat: outlined in white
+                edge = edge if close else WHITE
+            v.surf.blit(self.rrect(r.w, r.h, edge, rad, max(2, min(r.w, r.h) // 40) + (2 if close or j == i else 0)), r)
             name = src["name"] + (" partner" if w == 2 else "") + (" (own)" if j == i else "")
-            self.text(v.surf, name, max(16, min(r.h * 0.13, r.w * 0.1)), maxw=r.w * 0.9,
-                      midtop=(r.centerx, r.y + r.h * 0.06))
-            ns = max(20, min(r.h * 0.45, r.w * 0.36))
-            nrect = self.text(v.surf, str(dmg), ns, WHITE, center=(r.centerx, r.centery + r.h * 0.04))
+            self.text(v.surf, name, max(14, min(r.h * 0.15, r.w * 0.1)), maxw=r.w * 0.9,
+                      midtop=(r.centerx, r.y + r.h * 0.05))
+            ns = max(18, min(r.h * 0.45, r.w * 0.36))
+            nrect = self.text(v.surf, str(dmg), ns, WHITE, center=(r.centerx, r.centery + r.h * 0.05))
             # the running +n / -n while it's being changed, like the life totals
-            pl = self.fx_pill(("counter", i, "poison") if j == "poison" else ("cmd", i, j, w), max(16, ns * 0.42))
+            pl = self.fx_pill(("cmd", i, j, w), max(14, ns * 0.42))
             if pl:
                 pr = pl.get_rect(midleft=(nrect.right + max(4, int(ns * 0.08)), nrect.top + nrect.h // 4))
                 if pr.right > r.right - r.w * 0.12 - min(r.h * 0.22, r.w * 0.12, 44) * 0.6:   # would hit the "+"
@@ -3827,21 +4003,19 @@ class App:
                 v.surf.blit(pl, pr)
             if close:                               # say it in words, not just with a colour
                 note = "LETHAL" if lethal else f"{limit - dmg} more is lethal"
-                self.text(v.surf, note, max(14, min(r.h * 0.11, r.w * 0.085)), LETHAL if lethal else AMBER,
-                          maxw=r.w * 0.9, midbottom=(r.centerx, r.bottom - r.h * 0.05))
+                self.text(v.surf, note, max(12, min(r.h * 0.12, r.w * 0.085)), LETHAL if lethal else AMBER,
+                          maxw=r.w * 0.9, midbottom=(r.centerx, r.bottom - r.h * 0.04))
             if w == 2:
                 self.partner_badge(v.surf, (r.right - 6, r.y + 6), max(14, int(min(r.w, r.h) * 0.16)))
             gs = min(r.h * 0.22, r.w * 0.12, 44)              # - / + hints on the two halves
             for plus, gx in ((False, r.x + r.w * 0.12), (True, r.right - r.w * 0.12)):
                 g = self.sign(plus, gs)
                 v.surf.blit(g, g.get_rect(center=(int(gx), r.centery)))
-            if j == "poison":
-                sub, add = (lambda: self.change_counter(i, "poison", -1)), (lambda: self.change_counter(i, "poison", 1))
-            else:
-                sub = lambda j=j, w=w: self.change_cmd(i, j, -1, w)
-                add = lambda j=j, w=w: self.change_cmd(i, j, 1, w)
+            sub = lambda j=j, w=w: self.change_cmd(i, j, -1, w)
+            add = lambda j=j, w=w: self.change_cmd(i, j, 1, w)
             v.zone((r.x, r.y, r.w // 2, r.h), sub, sub, 0.25)            # left half: -1
             v.zone((r.x + r.w // 2, r.y, r.w - r.w // 2, r.h), add, add, 0.25)   # right half: +1
+        self.draw_hub_buttons(v, i, hub)
 
         y = H - u
         angle = m.get("angle", 0)
@@ -4806,6 +4980,7 @@ function trackDeltas(s) {
     p.cmd.forEach((v, j) => trackVal(`c${p.seat}:${j}:1`, v || 0, now));
     (p.cmd2 || []).forEach((v, j) => trackVal(`c${p.seat}:${j}:2`, v || 0, now));
     trackVal(`p${p.seat}`, p.counters.poison || 0, now);
+    trackVal(`r${p.seat}`, p.counters.rad || 0, now);
   }
 }
 const prevV = {}, valDeltas = {};
@@ -4984,6 +5159,13 @@ PHONE_HTML = r"""<!doctype html>
   .cdelta { position:absolute; left:100%; top:-.1em; margin-left:.25em; padding:.1em .5em; border-radius:999px; white-space:nowrap;
             font-size:15px; font-weight:800; color:#fff; background:var(--good); text-shadow:none; pointer-events:none; }
   .cdelta.neg { background:var(--bad); }
+  .hubrow { display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; margin-top:6px; }
+  .hubbtn { position:relative; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
+            min-height:64px; border-radius:14px; border:1px solid var(--line); background:#22232f; color:#fff; }
+  .hubbtn b { font-size:24px; line-height:1; }
+  .hubbtn small { font-size:12px; opacity:.85; }
+  .hubbtn.warn { box-shadow:0 0 0 2px var(--amber) inset; }
+  .hubbtn .cdelta { left:auto; right:4px; top:4px; margin:0; font-size:12px; }
   .ctile .cplus { font-size:12px; font-weight:700; opacity:.75; text-shadow:0 1px 3px #000; }
   .hbtn { margin-left:auto; height:36px; padding:0 14px; border-radius:999px; border:1px solid var(--line);
           background:#22232f; font-size:14px; font-weight:600; max-width:46vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -5172,8 +5354,9 @@ async function keepAwake() {
 }
 addEventListener("pointerdown", keepAwake);
 document.addEventListener("visibilitychange", keepAwake);
-const CHIP = { poison: "#2f8a4a", tax: "#97702a", energy: "#ae8716", exp: "#5459ad" };
-const SHORT = { poison: "Poison", tax: "Tax", energy: "Energy", exp: "Exp" };
+const CHIP = { poison: "#2f8a4a", tax: "#97702a", energy: "#ae8716", exp: "#5459ad", rad: "#78961a",
+               monarch: "#be8c19", initiative: "#3c6ea5" };
+const SHORT = { poison: "Poison", tax: "Tax", energy: "Energy", exp: "Exp", rad: "Rad" };
 
 function setMe(seat) {
   me = seat; myName = seat >= 0 && state && state.players[seat] ? state.players[seat].name : "";
@@ -5242,6 +5425,8 @@ function panel(p) {
       v, el("i", {}, src.initials || ""), which === 2 ? el("span", { class: "p2" }, "2") : null));
   });
   const poisonKo = state.poison_ko || 10;
+  for (const [key, label] of state.designations || [])
+    if (p[key]) bottom.push(el("span", { class: "pill crown", style: { background: CHIP[key] || "#444" } }, label));
   for (const [key] of state.counters)
     if (p.counters[key]) bottom.push(el("span", { class: "pill" + (key === "poison" && p.counters[key] >= poisonKo - 3 ? " warn" : ""),
                                                   style: { background: CHIP[key] || "#444" } },
@@ -5344,12 +5529,21 @@ function cmdSheet(seat) {
       return dmgTile(src.name, cardBg(src, "rgba(0,0,0,.25), rgba(0,0,0,.6)"), src.color, v, 21, 15,
                      [which === 2 ? el("span", { class: "p2" }, "2") : null, src.seat === seat ? el("small", {}, " (own)") : null],
                      which === 2 ? "partner" : "", sub, add, valDelta(`c${seat}:${src.seat}:${which}`));
-    }), (() => {                                   // poison, like Lifetap
-      const ko = s.poison_ko || 10, v = p.counters.poison;
-      return dmgTile("Poison", { backgroundColor: CHIP.poison }, CHIP.poison, v, ko, ko - 3, [], "",
-                     () => act({ op: "counter", seat, key: "poison", d: -1 }), () => act({ op: "counter", seat, key: "poison", d: 1 }),
-                     valDelta(`p${seat}`));
-    })()),
+    })),
+    // what else a hit does: poison and rad (tap +1, hold -1), the monarch and the initiative (tap)
+    el("p", { class: "muted" }, "Poison and rad: tap +1, hold \u22121. Monarch and initiative: tap to give or take back."),
+    el("div", { class: "hubrow" },
+      ...[["poison", "Poison"], ["rad", "Rad"]].map(([key, label]) => {
+        const v = p.counters[key] || 0, ko = s.poison_ko || 10, dd = valDelta(key === "poison" ? `p${seat}` : `r${seat}`);
+        return pressable("button", { class: "hubbtn" + (v ? " on" : "") + (key === "poison" && v >= ko - 3 ? " warn" : ""),
+                                     style: v ? { background: CHIP[key] } : {}, "aria-label": label + " +1" },
+          () => act({ op: "counter", seat, key, d: 1 }), () => act({ op: "counter", seat, key, d: -1 }), 1e9,
+          el("b", {}, v), el("small", {}, label), dd ? el("span", { class: "cdelta" + (dd < 0 ? " neg" : "") }, fmt(dd)) : null);
+      }),
+      ...(s.designations || []).map(([key, label]) =>
+        tapBtn({ class: "hubbtn flag" + (p[key] ? " on" : ""), style: p[key] ? { background: CHIP[key] } : {},
+                 "aria-label": label }, () => act({ op: "designate", seat, key }),
+               el("b", {}, key === "monarch" ? "\u265B" : "\u2690"), el("small", {}, label)))),
   ];
 }
 
@@ -5486,7 +5680,10 @@ function sheetKey() {
   const looks = s.players.map((p) => [p.name, p.color, p.art, p.partner]);
   if (sheet.kind === "seat") return JSON.stringify([base, looks]);
   const p = s.players[sheet.seat];
-  return JSON.stringify([base, looks, s.cmd_hits_life, s.format, p.life, p.ko, p.counters, p.cmd, p.cmd2]);
+  // the running +n pills fade by themselves: which ones are showing is part of the picture
+  const showing = Object.keys(valDeltas).filter((k) => valDelta(k));
+  return JSON.stringify([base, looks, s.cmd_hits_life, s.format, p.life, p.ko, p.counters, p.cmd, p.cmd2,
+                         (s.designations || []).map(([k]) => p[k]), showing]);
 }
 document.getElementById("seatbtn").onclick = () => openSheet({ kind: "seat" });
 document.getElementById("undobtn").addEventListener("pointerdown", (e) => press(e, undo, null, 0));
@@ -5596,8 +5793,9 @@ TV_HTML = r"""<!doctype html>
 <div id="off">Connecting to LifePi...</div>
 <script>
 /*CLIENT*/
-const CHIP = { poison: "#2f8a4a", tax: "#97702a", energy: "#ae8716", exp: "#5459ad" };
-const SHORT = { poison: "Poison", tax: "Tax", energy: "Energy", exp: "Exp" };
+const CHIP = { poison: "#2f8a4a", tax: "#97702a", energy: "#ae8716", exp: "#5459ad", rad: "#78961a",
+               monarch: "#be8c19", initiative: "#3c6ea5" };
+const SHORT = { poison: "Poison", tax: "Tax", energy: "Energy", exp: "Exp", rad: "Rad" };
 function render() {
   if (!state) return;
   const s = state;
@@ -5612,6 +5810,8 @@ function render() {
                                                           { borderColor: src.color }) },
                             v, el("i", {}, src.initials || ""), which === 2 ? el("span", { class: "p2" }, "2") : null));
     });
+    for (const [key, label] of s.designations || [])
+      if (p[key]) bottom.push(el("span", { class: "pill", style: { background: CHIP[key] || "#444" } }, label));
     for (const [key] of s.counters)
       if (p.counters[key]) bottom.push(el("span", { class: "pill", style: { background: CHIP[key] || "#444" } },
                                           `${SHORT[key] || key} ${p.counters[key]}`));
