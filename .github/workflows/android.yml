@@ -158,7 +158,17 @@ jobs:
         with:
           name: lifepi-play-bundle
           path: bundle
+      - name: Play hold?
+        id: hold
+        run: |
+          # a .play-hold file in the repo pauses uploads (e.g. while Google reviews the first release);
+          # everything else about the release still happens
+          if [ -f .play-hold ]; then
+            echo "::notice title=Not uploaded to Play::.play-hold is in the repo: $(head -1 .play-hold)"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
       - name: Check the bundle is releasable
+        if: steps.hold.outputs.skip != '1'
         env:
           HAS_KEYSTORE: ${{ secrets.LIFEPI_UPLOAD_KEYSTORE_B64 != '' }}
           HAS_ADMOB: ${{ secrets.ADMOB_APP_ID != '' && secrets.ADMOB_BANNER_ID != '' }}
@@ -170,10 +180,12 @@ jobs:
       # project lifepi-play, pool "github", provider "lifepi-repo"), and lets it act as the service
       # account below, which Play Console allows to release LifePi to testing tracks and nothing else.
       - uses: google-github-actions/auth@v2
+        if: steps.hold.outputs.skip != '1'
         with:
           workload_identity_provider: projects/1067872504029/locations/global/workloadIdentityPools/github/providers/lifepi-repo
           service_account: lifepi-play-release@lifepi-play.iam.gserviceaccount.com
       - name: Upload to the closed testing track
+        if: steps.hold.outputs.skip != '1'
         env:
           LIFEPI_PLAY_ACCOUNT: lifepi-play-release@lifepi-play.iam.gserviceaccount.com
         run: |
