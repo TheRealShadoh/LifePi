@@ -186,12 +186,27 @@ def main():
         assert state()["players"][target]["life"] == l0
         assert lr[5] < lr[2] * 0.75, lr                    # the number button leaves room for -/+
         tap(".cell .lifebtn", target)
-        assert b.js("!!document.querySelector('#box .cmdgrid')"), "the life number did not open commander damage"
+        assert b.js("!!document.querySelector('#box .cmdmap')"), "the life number did not open commander damage"
         assert state()["players"][target]["life"] == l0
         b.js("closeSheet()"); time.sleep(0.3)
         tap(".cell .strip.bot", target)              # "+ Cmdr dmg" opens commander damage
-        assert b.js("!!document.querySelector('#box .cmdgrid')"), "the strip did not open commander damage"
+        assert b.js("!!document.querySelector('#box .cmdmap')"), "the strip did not open commander damage"
         assert b.js("document.querySelectorAll('#box .ctile').length") == 6          # 6 commanders, no poison tile
+        # laid out like the table, turned so the player being hit (target) is at the bottom - and the
+        # writing isn't turned: every tile's name reads left to right
+        geo = b.js(f"""(() => {{ const m = document.querySelector('#box .cmdmap').getBoundingClientRect();
+            return [...document.querySelectorAll('#box .ctile')].map((t) => {{ const r = t.getBoundingClientRect();
+              return [r.left - m.left, r.top - m.top, r.width, r.height, m.width, m.height,
+                      getComputedStyle(t).transform, t.classList.contains('own')]; }}); }})()""")
+        own = [g for g in geo if g[7]]
+        assert len(own) == 1 and abs(own[0][1] + own[0][3] - own[0][5]) < 12, own   # target's tile touches the bottom
+        assert all(g[6] in ("none", "") for g in geo), geo                          # nothing rotated
+        assert all(g[2] > 40 and g[3] > 40 for g in geo), geo                       # big enough to tap
+        for a_ in range(len(geo)):                                                   # no overlaps
+            for b_ in range(a_ + 1, len(geo)):
+                A, B = geo[a_], geo[b_]
+                assert A[0] + A[2] <= B[0] + 1 or B[0] + B[2] <= A[0] + 1 or A[1] + A[3] <= B[1] + 1 or B[1] + B[3] <= A[1] + 1, (A, B)
+        b.shot("phone_cmd_map.png")
         assert b.js("document.querySelectorAll('#box .hubrow .hubbtn').length") == 4  # poison, rad, monarch, initiative
         b.shot("phone_cmd.png")
         tap("#box .ctile .half2.plus", 3)          # right half of seat 3's tile: +1
@@ -291,7 +306,7 @@ def main():
         assert st["format"] == "duel" and len(st["players"]) == 2 and st["players"][0]["life"] == 20, st["format"]
         assert b.js("document.querySelector('.cell .pill.empty').textContent") == "+ Counters"
         tap(".cell .strip.bot", 0)
-        assert b.js("!document.querySelector('#box .cmdgrid') && !!document.querySelector('#box .lifebig')")
+        assert b.js("!document.querySelector('#box .cmdmap') && !!document.querySelector('#box .lifebig')")
         b.shot("phone_duel.png")
         tap("#box .chipbtn.go")
         print("formats from the phone ok")

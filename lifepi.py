@@ -1916,7 +1916,8 @@ class App:
                         "counters": dict(p["counters"]), "cmd": p["cmd"][:n], "ko": self.ko_reason(p),
                         "cmd2": p["cmd2"][:n], "partner": bool(p.get("partner")),
                         **{k: bool(p.get(k)) for k, _ in DESIGNATIONS},
-                        "pos": rects[i], "poly": polys[i]})
+                        "pos": rects[i], "poly": polys[i],
+                        "angle": round(seats[i].angle / 90) * 90 % 360})   # which way the seat faces
         fmt = self.settings["format"]
         return {"players": out, "start_life": self.settings["start_life"],
                 "format": fmt, "formats": [[k, f[0], f[1]] for k, f in FORMATS.items()],
@@ -5132,6 +5133,16 @@ PHONE_HTML = r"""<!doctype html>
   .cmdto .life2 { margin-left:auto; font-size:34px; font-weight:800; font-variant-numeric:tabular-nums; }
   .cmdto .life2.dead { color:#ff7a7a; }
   .cmdgrid { display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; }
+  .cmdmap { position:relative; height:min(58vh, 150vw, 560px); margin:2px -4px 6px; }
+  .ctile.placed { aspect-ratio:auto; container-type:size; }
+  .ctile.placed .face { padding:4px 4px 6px; }
+  .ctile.placed .cname { font-size:clamp(10px, min(15cqh, 11cqw), 15px); }
+  .ctile.placed .cval { font-size:clamp(18px, min(42cqh, 30cqw), 46px); }
+  .ctile.placed .half2 { font-size:clamp(16px, min(22cqh, 14cqw), 26px); padding:0 6px; }
+  .ctile.placed .cnote, .ctile.placed .cplus { font-size:clamp(9px, min(11cqh, 8cqw), 13px); }
+  .ctile.own { border-width:4px; }
+  .ctile.placed .cdelta { left:50%; top:auto; bottom:100%; transform:translateX(-50%); margin:0 0 2px;
+                          font-size:clamp(10px, min(12cqh, 9cqw), 15px); }
   .ctile { position:relative; aspect-ratio:1.25; border-radius:16px; overflow:hidden; background-size:cover;
            background-position:center; border:3px solid rgba(255,255,255,.35); }
   .ctile.lethal { border-color:#ff4a4a; }
@@ -5522,14 +5533,28 @@ function cmdSheet(seat) {
     el("div", { class: "cmdto" }, el("span", { class: "stile", style: cardBg(p, "rgba(0,0,0,.1), rgba(0,0,0,.1)") }),
        el("b", {}, "to " + p.name), el("span", { class: "life2" + (p.ko ? " dead" : "") }, p.life)),
     el("p", { class: "muted" }, `Left side \u22121, right side +1, hold to repeat.${hit}`),
-    el("div", { class: "cmdgrid" }, commanders(s).map(([src, which]) => {
-      const v = dmgFrom(p, src, which);
-      const add = () => act({ op: "cmd", seat, src: src.seat, which, d: 1 });
-      const sub = () => act({ op: "cmd", seat, src: src.seat, which, d: -1 });
-      return dmgTile(src.name, cardBg(src, "rgba(0,0,0,.25), rgba(0,0,0,.6)"), src.color, v, 21, 15,
-                     [which === 2 ? el("span", { class: "p2" }, "2") : null, src.seat === seat ? el("small", {}, " (own)") : null],
-                     which === 2 ? "partner" : "", sub, add, valDelta(`c${seat}:${src.seat}:${which}`));
-    })),
+    // each commander where that player sits at the table, turned so the player being hit is at the
+    // bottom (nearest whoever holds this phone); the writing stays upright
+    (() => {
+      const spots = tableSpots(s, seat);
+      return el("div", { class: "cmdmap" }, commanders(s).map(([src, which]) => {
+        const v = dmgFrom(p, src, which);
+        const add = () => act({ op: "cmd", seat, src: src.seat, which, d: 1 });
+        const sub = () => act({ op: "cmd", seat, src: src.seat, which, d: -1 });
+        let b = spots[src.seat];
+        if (src.partner) {                         // partners split their seat's box in two
+          const wide = b.w >= b.h;                 // along the longer side (the map is about square)
+          b = wide ? { x: which === 1 ? b.x : b.x + b.w / 2, y: b.y, w: b.w / 2, h: b.h }
+                   : { x: b.x, y: which === 1 ? b.y : b.y + b.h / 2, w: b.w, h: b.h / 2 };
+        }
+        const place = { position: "absolute", left: `calc(${b.x * 100}% + 4px)`, top: `calc(${b.y * 100}% + 4px)`,
+                        width: `calc(${b.w * 100}% - 8px)`, height: `calc(${b.h * 100}% - 8px)` };
+        return dmgTile(src.name, cardBg(src, "rgba(0,0,0,.25), rgba(0,0,0,.6)"), src.color, v, 21, 15,
+                       [which === 2 ? el("span", { class: "p2" }, "2") : null, src.seat === seat ? el("small", {}, " (own)") : null],
+                       which === 2 ? "partner" : "", sub, add, valDelta(`c${seat}:${src.seat}:${which}`), place,
+                       src.seat === seat);
+      }));
+    })(),
     // what else a hit does: poison and rad (tap +1, hold -1), the monarch and the initiative (tap)
     el("p", { class: "muted" }, "Poison and rad: tap +1, hold \u22121. Monarch and initiative: tap to give or take back."),
     el("div", { class: "hubrow" },
@@ -5547,11 +5572,40 @@ function cmdSheet(seat) {
   ];
 }
 
-function dmgTile(name, bg, color, v, lethalAt, closeAt, extra, sub2, sub, add, delta) {
+// Where each seat goes on the damage sheet: the device's layout (p.pos, fractions of its screen),
+// turned in quarter turns so `target` sits at the bottom, then stretched to fill the box.
+// Returns {seat: {x, y, w, h}} in fractions of the map.
+function tableSpots(s, target) {
+  const ps = s.players.map((q) => q.pos || [0, 0, 1, 1]);
+  const cen = ps.map(([x, y, w, h]) => [x + w / 2, y + h / 2]);
+  const mx = cen.reduce((a, c) => a + c[0], 0) / cen.length, my = cen.reduce((a, c) => a + c[1], 0) / cen.length;
+  const t = cen[target] || [mx, my + 1];
+  const rots = [([dx, dy]) => [dx, dy], ([dx, dy]) => [-dy, dx], ([dx, dy]) => [-dx, -dy], ([dx, dy]) => [dy, -dx]];
+  // quarter turns that bring the target's side of the table to the bottom: from the way their seat
+  // faces (top row 180, table ends 90 / 270), checked against where it lands; older Pis send no angle
+  const q = (((Math.round(((s.players[target] || {}).angle || 0) / 90)) % 4) + 4) % 4;
+  const lands = (k) => rots[k]([t[0] - mx, t[1] - my])[1];
+  const turn = "angle" in (s.players[target] || {}) ? (lands(q) >= lands((4 - q) % 4) ? q : (4 - q) % 4)
+             : [0, 1, 2, 3].reduce((best, k) => (lands(k) > lands(best) + 1e-9 ? k : best), 0);
+  const rot = ([x, y]) => rots[turn]([x - mx, y - my]);   // about the middle, screen axes (y down)
+  const boxes = ps.map(([x, y, w, h]) => {
+    const pts = [[x, y], [x + w, y], [x, y + h], [x + w, y + h]].map(rot);
+    const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+  });
+  const x0 = Math.min(...boxes.map((b) => b[0])), y0 = Math.min(...boxes.map((b) => b[1]));
+  const x1 = Math.max(...boxes.map((b) => b[2])), y1 = Math.max(...boxes.map((b) => b[3]));
+  const W = x1 - x0 || 1, H = y1 - y0 || 1;
+  const out = {};
+  boxes.forEach((b, k) => { out[k] = { x: (b[0] - x0) / W, y: (b[1] - y0) / H, w: (b[2] - b[0]) / W, h: (b[3] - b[1]) / H }; });
+  return out;
+}
+
+function dmgTile(name, bg, color, v, lethalAt, closeAt, extra, sub2, sub, add, delta, place, own) {
   const lethal = v >= lethalAt, close = v >= closeAt;
   const note = lethal ? "LETHAL" : close ? `${lethalAt - v} more is lethal` : sub2;
-  return el("div", { class: "ctile" + (lethal ? " lethal" : close ? " close" : ""),
-                     style: Object.assign({}, bg, lethal || close ? {} : { borderColor: color }) },
+  return el("div", { class: "ctile" + (lethal ? " lethal" : close ? " close" : "") + (place ? " placed" : "") + (own ? " own" : ""),
+                     style: Object.assign({}, bg, lethal || close ? {} : { borderColor: own ? "#fff" : color }, place || {}) },
     el("div", { class: "face" },
       el("span", { class: "cname" }, name, ...extra),
       el("span", { class: "cval" }, v,

@@ -5,7 +5,7 @@ it, up to 500 characters), so it's written for players.
 
 ## 2026-10-16 LifePi 1.15.0
 
-- Commander damage now lays each player's tile where they sit at the table
+- Commander damage now lays each player's tile where they sit at the table, on the phone too
 - Poison, Rad, Monarch and Initiative buttons in the middle of the commander damage screen
 - New: Rad counters, and the Monarch and the Initiative - one holder each, shown on their panel
 
@@ -14,6 +14,8 @@ it, up to 500 characters), so it's written for players.
 - Damage pane: tiles mapped from the seat layout as seen by whoever the pane faces (stretched to fit,
   partners split the seat's tile, round tables get a tile per wedge, nothing overlaps the middle)
 - Poison tile gone; middle buttons poison / rad (tap +1, hold -1), monarch / initiative (tap toggles)
+- Phone page damage sheet: tiles where players sit, turned (quarter turns, from the seat's facing,
+  now in the state as "angle") so the player being hit is at the bottom; text never rotated
 - Monarch / initiative: saved, undoable, in history, swap with seats, cleared by a new game, sent to
   phones (op "designate"); phone page and TV view show the chips; phone damage sheet has the buttons
 - Tests: smoke (tile positions for 5 layouts x 4 facings, no overlaps, buttons, one holder, save
