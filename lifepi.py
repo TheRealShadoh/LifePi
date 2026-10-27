@@ -42,7 +42,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.16.0"
+VERSION = "1.17.0"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -91,7 +91,10 @@ CHIP_COLORS = {"poison": (40, 130, 70), "tax": (150, 110, 40), "energy": (175, 1
                "monarch": (190, 140, 25), "initiative": (60, 110, 165)}
 MAX_PLAYERS = 8
 ROWS = {1: [1], 2: [1, 1], 3: [2, 1], 4: [2, 2], 5: [3, 2], 6: [3, 3], 7: [4, 3], 8: [4, 4]}
-SEATINGS = {"table": "Table  ===", "ends": "Ends  -=-", "round": "Round", "upright": "Upright"}
+SEATINGS = {"table": "Table  ===", "ends": "Ends  -=-", "round": "Round", "upright": "Upright",
+            "custom": "Custom"}
+SIDES = ("Far side", "Right end", "Near side", "Left end")   # custom seating: players per side
+SIDE_MAX = (MAX_PLAYERS, 3, MAX_PLAYERS, 3)
 HOLD_DELAY = 0.45
 IDLE_FPS = 10                                        # frame rate while nothing is happening
 BANNER_SPEED = 60                                    # now-playing marquee, pixels a second
@@ -1269,9 +1272,110 @@ def round_layout(n, w, h):
     return out
 
 
+def default_sides(n):
+    """Players per side [far, right end, near, left end] - the same table as "Ends"."""
+    if n <= 2:
+        return [n - 1, 0, 1, 0] if n else [0, 0, 0, 0]
+    ends = 2 if n >= 4 else 1
+    top = (n - ends + 1) // 2
+    return [top, 1 if ends == 2 else 0, n - ends - top, 1]
+
+
+def fit_sides(sides, n):
+    """Saved side counts made to add up to n players: seats are added to (or taken from) the
+    long sides first, keeping the ends as they were where possible."""
+    try:
+        out = [max(0, min(SIDE_MAX[k], int(sides[k]))) for k in range(4)]
+    except (TypeError, ValueError, IndexError):
+        return default_sides(n)
+    while sum(out) < n:
+        k = 2 if out[2] <= out[0] else 0
+        if out[k] >= SIDE_MAX[k]:
+            k = next(j for j in (0, 2, 1, 3) if out[j] < SIDE_MAX[j])
+        out[k] += 1
+    while sum(out) > n:
+        k = max((0, 2), key=lambda j: (out[j], j == 0))
+        if out[k] == 0:
+            k = max((1, 3), key=lambda j: out[j])
+        out[k] -= 1
+    return out
+
+
+def move_seat(sides, k, d):
+    """Custom seating +/-: one more (d=1) or one fewer (-1) player on side k, keeping the number
+    of players: the seat comes from (or goes to) the side with the most (fewest) players,
+    the opposite side first on a tie."""
+    out = list(sides)
+    order = [(k + 2) % 4, (k + 1) % 4, (k + 3) % 4]           # opposite side, then the ends
+    if d > 0:
+        if out[k] >= SIDE_MAX[k]:
+            return out
+        src = [j for j in order if out[j] > 0]
+        if not src:
+            return out
+        j = max(src, key=lambda j: (out[j], -order.index(j)))
+        out[j] -= 1
+        out[k] += 1
+    else:
+        if out[k] <= 0:
+            return out
+        dst = [j for j in order if out[j] < SIDE_MAX[j]]
+        if not dst:
+            return out
+        j = min(dst, key=lambda j: (out[j] if j % 2 == 0 else out[j] + 1, order.index(j)))
+        out[j] += 1
+        out[k] -= 1
+    return out
+
+
+def sides_layout(sides, w, h):
+    """Custom seating: sides = players on the [far side, right end, near side, left end].
+    Each end is a column (players there stacked along it, facing that end); the long sides
+    share what's left, one row each - all of the height when the other long side is empty."""
+    top, right, bot, left = sides
+    out = []
+    if not top and not bot:                       # only ends: they share the screen
+        ends = [k for k, c in ((1, right), (3, left)) if c]
+        ew = w / len(ends)
+        col = {k: (round(i * ew), round((i + 1) * ew)) for i, k in enumerate(sorted(ends, reverse=True))}
+        x_left, x_right = col.get(3, (0, 0)), col.get(1, (0, 0))
+    else:
+        e = round(min(h / 2 if max(right, left) < 2 else h * 0.6, w / (max(top, bot) + bool(right) + bool(left))))
+        x_left = (0, e if left else 0)
+        x_right = (w - e if right else w, w)
+
+    def column(cnt, x, angle, upward):
+        x0, x1 = x
+        cells = [Seat(pygame.Rect(x0, round(c * h / cnt), x1 - x0, round((c + 1) * h / cnt) - round(c * h / cnt)),
+                      angle) for c in range(cnt)]
+        return cells[::-1] if upward else cells
+    mx0, mx1 = x_left[1], x_right[0]
+    one = not (top and bot)
+    half = h if one else round(h / 2)
+
+    def row(cnt, y, hh, angle):
+        mid = mx1 - mx0
+        return [Seat(pygame.Rect(mx0 + round(c * mid / cnt), y, round((c + 1) * mid / cnt) - round(c * mid / cnt), hh),
+                     angle) for c in range(cnt)]
+    if top:
+        out += row(top, 0, half, 180)             # clockwise: far side L->R,
+    if right:
+        out += column(right, x_right, 90, False)  # right end top to bottom,
+    if bot:
+        y = 0 if one else half
+        out += row(bot, y, h - y, 0)[::-1]        # near side R->L,
+    if left:
+        out += column(left, x_left, 270, True)    # left end bottom to top
+    return out
+
+
 @functools.lru_cache(maxsize=32)
 def layout(n, w, h, seating):
-    """Seats in clockwise order for a seating style (see SEATINGS)."""
+    """Seats in clockwise order for a seating style (see SEATINGS). Custom seating is given as
+    "custom:far,right,near,left" (App.seating_key)."""
+    if seating.startswith("custom:"):
+        sides = fit_sides([int(x) for x in seating[7:].split(",")], n)
+        return tuple(sides_layout(sides, w, h))
     if seating == "round" and n >= 3:
         return tuple(round_layout(n, w, h))
     if seating == "ends" and n >= 3:
@@ -1715,7 +1819,7 @@ class App:
         self.args = args
         for d in (CONFIG_DIR, CACHE_DIR, SEARCH_DIR, IMAGE_DIR):
             d.mkdir(parents=True, exist_ok=True)
-        self.settings = {"rotation": 0, "seating": "table", "cmd_hits_life": True,
+        self.settings = {"rotation": 0, "seating": "table", "sides": [], "cmd_hits_life": True,
                          "start_life": 40, "format": "commander", "companion": True, "companion_pin": "", "random_first": True,
                          "turn_tracker": False,   # optional: whose turn it is + the turn number
                          "sounds": True,          # a sound when someone takes damage...
@@ -1873,6 +1977,9 @@ class App:
             settings["rotation"] = as_int(s["rotation"])
         if s.get("seating") in SEATINGS:
             settings["seating"] = s["seating"]
+        if isinstance(s.get("sides"), list) and len(s["sides"]) == 4 and all(
+                isinstance(x, int) and 0 <= x <= SIDE_MAX[k] for k, x in enumerate(s["sides"])):
+            settings["sides"] = list(s["sides"])
         if s.get("format") in FORMATS:
             settings["format"] = s["format"]
         if isinstance(s.get("cmd_hits_life"), bool):
@@ -2023,7 +2130,7 @@ class App:
         # TV put players exactly where the device does (clockwise, seating style, rotation):
         # pos = upright box for the panel, poly = outline (a wedge on a round table)
         W, H = self.W, self.H
-        seats = layout(n, W, H, self.settings["seating"])
+        seats = layout(n, W, H, self.seating_key(n))
 
         def frac(x, y):
             return [round(x / W, 4), round(y / H, 4)]
@@ -2052,6 +2159,8 @@ class App:
                 "first": -1 if self.first_spinning() else self.first, "game": self.game_id,
                 "random_first": self.settings["random_first"],
                 "cmd_hits_life": self.settings["cmd_hits_life"], "seating": self.settings["seating"],
+                "sides": [int(x) for x in self.seating_key(n)[7:].split(",")] if self.settings["seating"] == "custom"
+                else default_sides(n),
                 "seatings": [[k, label] for k, label in SEATINGS.items()], "max_players": MAX_PLAYERS,
                 "counters": [[k, label] for k, label, _ in COUNTERS],
                 "designations": [[k, label] for k, label in DESIGNATIONS],
@@ -2126,6 +2235,8 @@ class App:
             self.start_game(n, self.settings["start_life"], reset=True)
         elif op == "seating":
             self.set_seating(a.get("value"))
+        elif op == "sides":
+            self.set_sides(a.get("value"))
         elif op == "random_first" and isinstance(a.get("on"), bool):
             self.settings["random_first"] = a["on"]
             self.changed()
@@ -2484,7 +2595,8 @@ class App:
     def game_copy(self):
         return {"players": json.loads(json.dumps(self.players)), "first": self.first,
                 "turn": dict(self.turn) if self.turn else None,
-                "settings": {k: self.settings[k] for k in ("start_life", "format", "seating")},
+                "settings": {k: json.loads(json.dumps(self.settings[k]))
+                             for k in ("start_life", "format", "seating", "sides")},
                 "game_id": self.game_id}
 
     def undo_label(self):
@@ -2508,7 +2620,7 @@ class App:
         self.players = players
         self.first, self.game_id = g["first"], g["game_id"]
         self.turn = dict(g["turn"]) if g.get("turn") else None
-        seating_changed = self.settings["seating"] != g["settings"]["seating"]
+        seating_changed = any(self.settings[k] != g["settings"].get(k, self.settings[k]) for k in ("seating", "sides"))
         self.settings.update(g["settings"])
         del self.history[u["hist"]:]
         self.fx.clear()
@@ -3457,7 +3569,7 @@ class App:
             ("History / undo", lambda: self.push("history"), BTN),
             ("Dice / coin", lambda: self.push("dice", result="", sub=""), BTN),
             (f"Rotate screen ({st['rotation']} deg)", self.rotate_screen, BTN_ON),
-            (f"Seating: {SEATINGS[st['seating']]}", self.toggle_seating, BTN),
+            (f"Seating: {SEATINGS[st['seating']]}", self.open_seating, BTN),
             (f"Cmdr dmg hits life: {'on' if st['cmd_hits_life'] else 'off'}", self.toggle_cmd, BTN),
             (f"Turn tracker: {'on' if st['turn_tracker'] else 'off'}", self.toggle_turn_tracker,
              BTN_ON if st["turn_tracker"] else BTN),
@@ -3655,6 +3767,110 @@ class App:
             self.settings["seating"] = seating
             self.changed()
 
+    def set_sides(self, sides):
+        """Custom seating: players per side [far, right end, near, left end] for this game."""
+        n = len(self.players)
+        if isinstance(sides, list) and len(sides) == 4 and all(isinstance(x, int) for x in sides) \
+                and sum(sides) == n and fit_sides(sides, n) == sides:
+            self.settings["sides"], self.settings["seating"] = list(sides), "custom"
+            self.changed()
+
+    def seating_key(self, n=None):
+        """The layout() key for the current seating: custom seating carries its side counts."""
+        n = len(self.players) if n is None else n
+        st = self.settings["seating"]
+        if st != "custom":
+            return st
+        return "custom:" + ",".join(map(str, fit_sides(self.settings["sides"] or default_sides(n), n)))
+
+    def open_seating(self, target=None):
+        """The seating sheet: pick a style, or set how many players sit on each side. target:
+        the New game sheet it was opened from (applies when that game starts), else this game."""
+        self.push("seating", target=target)
+
+    def draw_seating(self, m):
+        v = self.modal_view(m, "Seating")
+        u, W, H = v.u, v.w, v.h
+        t = m.get("target")
+        n = t["n"] if t else len(self.players)
+        style = t["seating"] if t else self.settings["seating"]
+        saved = (t.get("sides") if t else None) or self.settings["sides"] or default_sides(n)
+        sides = fit_sides(saved, n)
+
+        def choose(key):
+            if t:
+                t["seating"] = key
+                if key == "custom":
+                    t["sides"] = sides
+            elif key == "custom":
+                self.set_sides(sides)
+            else:
+                self.set_seating(key)
+            self.dirty = True
+
+        def step(k, d):
+            new = move_seat(sides, k, d)
+            if t:
+                t["seating"], t["sides"] = "custom", new
+            else:
+                self.set_sides(new)
+            self.dirty = True
+        keys = list(SEATINGS)
+        bh = int(u * 0.95)
+        for k, key in enumerate(keys):
+            x0, x1 = k * W // len(keys), (k + 1) * W // len(keys)
+            self.button(v, (x0, u + 6, x1 - x0, bh), SEATINGS[key], lambda key=key: choose(key),
+                        bg=BTN_ON if style == key else BTN, size=min(bh * 0.4, W * 0.036))
+        top = u + 6 + bh + 8
+        bottom = H - u - int(u * 0.55)
+        custom = style == "custom"
+        mx, my = (int(u * 1.25), int(u * 0.85)) if custom else (16, 4)
+        area = pygame.Rect(mx, top + my, W - 2 * mx, bottom - top - 2 * my)
+        aspect = self.W / max(1, self.H)          # the preview has the table's shape
+        pw = min(area.w, area.h * aspect)
+        pr = pygame.Rect(0, 0, int(pw), int(pw / aspect))
+        pr.center = area.center
+        key = style if not custom else "custom:" + ",".join(map(str, sides))
+        seats = layout(n, pr.w, pr.h, key)
+        pygame.draw.rect(v.surf, (30, 32, 42), pr)
+        names = [p["name"] for p in self.players] if not t or t.get("keep", True) else []
+        for k, seat in enumerate(seats):
+            col = PALETTE[(self.players[k]["color"] if k < len(self.players) else k) % len(PALETTE)]
+            pts = [(pr.x + x, pr.y + y) for x, y in seat.poly]
+            self.poly(v.surf, col, pts)
+            self.poly(v.surf, DARK, pts, 2)
+            cx, cy, fw, fh = seat.frame
+            label = names[k] if k < len(names) else f"Player {k + 1}"
+            img = self.font(max(12, min(fw * 0.16, fh * 0.3, u * 0.42))).render(label, True, WHITE)
+            if img.get_width() > fw * 0.92:
+                img = pygame.transform.smoothscale(img, (int(fw * 0.92), max(1, int(img.get_height() * fw * 0.92 / img.get_width()))))
+            if seat.angle:
+                img = pygame.transform.rotate(img, seat.angle) if seat.angle % 90 == 0 else \
+                    pygame.transform.rotozoom(img, seat.angle, 1)
+            v.surf.blit(img, img.get_rect(center=(pr.x + round(cx), pr.y + round(cy))))
+        if custom:                                # - n + on each side of the table
+            sz = int(min(u * 0.8, mx * 0.9, my * 1.1 if my else u))
+            spots = [((pr.centerx, pr.y - my // 2), False), ((pr.right + mx // 2, pr.centery), True),
+                     ((pr.centerx, pr.bottom + my // 2), False), ((pr.x - mx // 2, pr.centery), True)]
+            for k, ((x, y), vertical) in enumerate(spots):
+                cells = [(-1, "-"), (0, str(sides[k])), (1, "+")]
+                for j, (d, lab) in enumerate(cells):
+                    off = (j - 1) * int(sz * 1.15)
+                    r = pygame.Rect(0, 0, sz, sz)
+                    r.center = (x, y + (-off if vertical else 0)) if vertical else (x + off, y)
+                    if d:
+                        able = move_seat(sides, k, d) != sides
+                        self.button(v, r, lab, lambda k=k, d=d: step(k, d), bg=BTN if able else (40, 40, 48),
+                                    fg=WHITE if able else GREY, size=sz * 0.6)
+                    else:
+                        self.text(v.surf, lab, sz * 0.62, shadow=False, center=r.center)
+        hint = ("+ / - move a seat to or from another side. " if custom else "") + \
+            "To swap players, hold a name on the table and drag it onto another seat."
+        self.text(v.surf, hint, u * 0.3, GREY, maxw=W - 24, shadow=False, center=(W // 2, bottom + int(u * 0.28)))
+        self.button(v, (W // 2, H - u, W - W // 2, u), "Done", self.pop, bg=BTN_ON)
+        self.button(v, (0, H - u, W // 2, u), f"{n} player{'s' if n != 1 else ''}", lambda: None, bg=(40, 40, 48))
+        v.finish()
+
     def toggle_auto_rotate(self):
         """Phone app: follow the phone turning, or stay in the orientation it's in now."""
         self.settings["auto_rotate"] = not self.settings["auto_rotate"]
@@ -3716,14 +3932,20 @@ class App:
                     bg=BTN_ON if custom else BTN)
         y += rh
         self.text(v.surf, "Seating", rh * 0.3, GREY, shadow=False, midleft=(16, y + 10))
+        ns = len(SEATINGS)
         for k, key in enumerate(SEATINGS):
-            self.button(v, (k * W // 4, y + rh // 5, W // 4, rh - rh // 5), SEATINGS[key],
-                        lambda key=key: setv("seating", key), bg=BTN_ON if m["seating"] == key else BTN,
-                        size=min((rh - rh // 5) * 0.4, W * 0.04))
+            x0, x1 = k * W // ns, (k + 1) * W // ns
+            act = (lambda: (setv("seating", "custom"), self.open_seating(m))) if key == "custom" else \
+                (lambda key=key: setv("seating", key))
+            self.button(v, (x0, y + rh // 5, x1 - x0, rh - rh // 5), SEATINGS[key] + ("..." if key == "custom" else ""),
+                        act, bg=BTN_ON if m["seating"] == key else BTN,
+                        size=min((rh - rh // 5) * 0.4, W * 0.036))
         y = v.h - rh
 
         def start():
             self.settings["seating"] = m["seating"]
+            if m.get("sides"):
+                self.settings["sides"] = fit_sides(m["sides"], m["n"])
             self.start_game(m["n"], m["life"], fresh=not m["keep"], fmt=m["format"])
         rf, small = self.settings["random_first"], min(rh * 0.36, W * 0.032)
         self.button(v, (0, y, W // 4, rh), "Cancel", self.pop)
@@ -3926,7 +4148,7 @@ class App:
         round-table wedges get equal tiles at their centres. A seat with partners is split in two.
         The tiles keep out of `hub` (the counter buttons in the middle). Returns [Rect]."""
         seats = self.seats if len(self.seats) == len(self.players) else layout(
-            len(self.players), self.W, self.H, self.settings["seating"])
+            len(self.players), self.W, self.H, self.seating_key())
         boxes = []
         for s in seats:
             pts = [v.to_local(c) for c in (s.rect.topleft, s.rect.topright, s.rect.bottomleft, s.rect.bottomright)]
@@ -4578,7 +4800,7 @@ class App:
         self.zones = []
         self.canvas.fill(DARK)
         n = len(self.players)
-        self.seats = layout(n, self.W, self.H, self.settings["seating"])
+        self.seats = layout(n, self.W, self.H, self.seating_key(n))
         for i, seat in enumerate(self.seats):
             self.draw_panel(i, seat)
         gap = max(2, min(self.W, self.H) // 160)

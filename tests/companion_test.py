@@ -50,7 +50,7 @@ print("auth / state ok")
 # phones and the TV place every seat exactly where the device draws it
 def device_rects(a):
     return [(s.box.x / a.W, s.box.y / a.H, s.box.w / a.W, s.box.h / a.H)
-            for s in lifepi.layout(len(a.players), a.W, a.H, a.settings["seating"])]
+            for s in lifepi.layout(len(a.players), a.W, a.H, a.seating_key())]
 def published(a):
     return [tuple(p["pos"]) for p in json.loads(comp.snap)["players"]]
 def close(xs, ys): return all(abs(a - b) < 1e-3 for x, y in zip(xs, ys) for a, b in zip(x, y))
@@ -68,7 +68,7 @@ for seating in lifepi.SEATINGS:
                 assert lifepi.point_in_poly((x + w / 2, y + h / 2), [tuple(q) for q in p["poly"]])
             else:
                 assert p["poly"] is None
-act(op="seating", value="nonsense"); assert app.settings["seating"] == "upright"
+act(op="seating", value="nonsense"); assert app.settings["seating"] == list(lifepi.SEATINGS)[-1]
 act(op="seating", value="table")
 act(op="newgame", n=8, life=30, seating="ends")
 assert len(app.players) == 8 and app.settings["seating"] == "ends" and len(state()["players"][7]["cmd"]) == 8

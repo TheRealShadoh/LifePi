@@ -272,6 +272,89 @@ for seating in lifepi.SEATINGS:
             app.modals.clear(); app.render()
 print("seating layouts: coverage, clockwise order, rotated taps ok")
 
+# custom seating: any number of players on each side (far, right end, near, left end)
+import itertools
+combos = [list(c) for c in itertools.product(range(9), range(4), range(9), range(4))
+          if 1 <= sum(c) <= lifepi.MAX_PLAYERS]
+for sides in combos:
+    n = sum(sides)
+    seats = lifepi.sides_layout(sides, W, H)
+    assert len(seats) == n, sides
+    for gx in range(7, W, 53):
+        for gy in range(5, H, 47):
+            owners = [k for k, s in enumerate(seats) if s.contains((gx + 0.37, gy + 0.41))]
+            assert len(owners) == 1, (sides, (gx, gy), owners)
+    want = [180] * sides[0] + [90] * sides[1] + [0] * sides[2] + [270] * sides[3]
+    assert [s.angle for s in seats] == want, (sides, [s.angle for s in seats])
+    if sides[0] and sides[2] and n >= 3:          # all the way round the table: clockwise
+        ang = [math.degrees(math.atan2(s.frame[1] - H / 2, s.frame[0] - W / 2)) % 360 for s in seats]
+        steps = [(b - a) % 360 for a, b in zip(ang, ang[1:] + ang[:1])]
+        assert all(0 < st < 180 for st in steps) and abs(sum(steps) - 360) < 1e-6, (sides, ang)
+assert lifepi.fit_sides([1, 1, 1, 0], 3) == [1, 1, 1, 0] and sum(lifepi.fit_sides([1, 1, 1, 0], 6)) == 6
+assert lifepi.fit_sides([4, 2, 4, 2], 4)[1::2] == [2, 2] and lifepi.fit_sides("junk", 4) == lifepi.default_sides(4)
+assert all(sum(lifepi.default_sides(n)) == n for n in range(1, 9))
+assert lifepi.move_seat([2, 0, 2, 0], 1, 1) == [2, 1, 1, 0]      # +1 on the right end: from a long side
+assert lifepi.move_seat([1, 1, 1, 0], 1, -1) == [1, 0, 1, 1]     # -1 there: to the empty left end
+assert lifepi.move_seat([0, 0, 3, 0], 2, 1) == [0, 0, 3, 0]      # nothing to take
+# two facing each other and one on an end, played: taps land on the right player
+for sides in ([1, 1, 1, 0], [1, 0, 1, 1], [2, 0, 1, 0], [2, 1, 2, 1], [1, 2, 1, 2], [0, 2, 0, 1], [3, 0, 3, 2]):
+    n = sum(sides)
+    app.modals.clear(); app.start_game(n, 40); app.set_sides(sides); app.first_anim = None; app.render()
+    assert app.settings["seating"] == "custom" and [s.angle for s in app.seats] == \
+        [180] * sides[0] + [90] * sides[1] + [0] * sides[2] + [270] * sides[3], sides
+    for k, s in enumerate(app.seats):
+        for fx, d in ((0.25, -1), (0.75, 1)):
+            pos = seat_point(s, fx, 0.5)
+            if near_buttons(pos):
+                pos = seat_point(s, 0.15 if d < 0 else 0.85, 0.42)
+            before = [p["life"] for p in app.players]; tap(pos)
+            after = [p["life"] for p in app.players]
+            assert after[k] == before[k] + d and sum(after) == sum(before) + d, (sides, k, d)
+app.set_sides([5, 0, 0, 0]); assert app.settings["sides"] == [3, 0, 3, 2], "wrong total ignored"
+# the seating sheet from the menu: styles, and +/- per side, live
+app.modals.clear(); app.start_game(3, 40); app.set_seating("table")
+app.push("menu"); app.render()
+seat_btn = [z for z in app.zones if z[1] == app.open_seating]; assert len(seat_btn) == 1
+seat_btn[0][1](); app.render(); assert app.modals[-1]["kind"] == "seating"
+pygame.image.save(app.canvas, os.path.join(shots, "seating_sheet.png"))
+def sheet_buttons():
+    app.render(); return [z for z in app.zones if z[1]]
+before = len(sheet_buttons())
+next(z for z in app.zones if z[1] and z[1].__defaults__ == ("custom",))[1]()
+assert app.settings["seating"] == "custom" and sum(app.settings["sides"]) == 3
+steps = [z for z in sheet_buttons() if z[1].__qualname__.endswith("<lambda>") and z[1].__defaults__ and len(z[1].__defaults__) == 2]
+assert len(steps) == 8, len(steps)                 # - and + on four sides
+sides0 = list(app.settings["sides"])
+right_plus = next(z for z in steps if z[1].__defaults__ == (1, 1)); right_plus[1]()
+assert app.settings["sides"] != sides0 and app.settings["sides"][1] == sides0[1] + 1 and sum(app.settings["sides"]) == 3
+app.render(); pygame.image.save(app.canvas, os.path.join(shots, "seating_custom.png"))
+# saved and restored; a reset can be undone back to the same seating
+app.modals.clear(); app.save_state()
+again = lifepi.App(NS(windowed="800x480", rotate=None, fps=30))
+assert again.settings["seating"] == "custom" and again.settings["sides"] == app.settings["sides"]
+assert again.seating_key() == app.seating_key()
+# from a New game sheet: applies when that game starts, fitted to its player count
+app.push("newgame", n=4, life=40, seating="table"); app.render()
+ng = app.modals[-1]
+app.open_seating(ng); app.render()
+next(z for z in app.zones if z[1] and z[1].__defaults__ == ("custom",))[1]()
+assert ng["seating"] == "custom" and sum(ng["sides"]) == 4
+next(z for z in sheet_buttons() if z[1].__defaults__ == (3, 1))[1]()       # + on the left end
+assert ng["sides"][3] == lifepi.fit_sides(app.settings["sides"], 4)[3] + 1 or ng["sides"][3] == 2
+app.pop(); app.render()
+for _ in range(2):                                       # a game in progress: Start takes two taps
+    if app.modals and app.modals[-1]["kind"] == "newgame":
+        app.render()
+        next(z for z in app.zones if z[1] and z[1].__qualname__.split(".")[-1] in ("start", "tap")
+             and z[1].__qualname__.split(".<locals>")[0] in ("App.draw_newgame", "App.confirm"))[1]()
+assert len(app.players) == 4 and app.settings["seating"] == "custom" and app.settings["sides"] == ng["sides"], \
+    (app.settings["sides"], ng["sides"])
+# phones can set it too, and see it
+app.apply_remote({"op": "sides", "value": [1, 1, 1, 1]})
+assert app.settings["sides"] == [1, 1, 1, 1] and app.snapshot()["sides"] == [1, 1, 1, 1]
+app.settings["seating"] = "table"; app.start_game(4, 40); app.render()
+print("custom seating: any count per side, sheet, new game, save, phones ok")
+
 # a sheet opened at a table end is laid out portrait and its buttons still hit
 app.settings["seating"] = "ends"; app.start_game(6, 40); app.render()
 end = next(k for k, s in enumerate(app.seats) if s.angle == 270)
@@ -449,7 +532,7 @@ print("partner commanders ok (separate tracking, 21 from one partner, pane, shee
 
 # --- undo + history ---------------------------------------------------------------------
 app.settings["cmd_hits_life"] = True; app.modals.clear(); app.start_game(4, 40); app.first_anim = None
-app.undo.clear(); n_hist = len(app.history)
+app.undo.clear(); del app.history[:-1]; n_hist = len(app.history)   # (well under the 300 kept)
 for _ in range(5): app.change_life(1, -1)                    # quick taps: one entry, one undo step
 assert app.players[1]["life"] == 35 and len(app.history) == n_hist + 1 and len(app.undo) == 1
 assert app.history[-1]["d"] == -5 and "life -5" in app.undo_label() and "now 35" in app.undo_label(), app.undo_label()

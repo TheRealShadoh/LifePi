@@ -3,6 +3,23 @@
 The newest dated section doubles as the Google Play release notes (scripts/play_upload.py takes
 it, up to 500 characters), so it's written for players.
 
+## 2026-10-26 LifePi 1.17.0
+
+- Custom seating: choose how many players sit on each side of the table and at each end
+- Menu > Seating opens a sheet with a picture of the table, so you can see where everyone sits
+- Hold a player's name and drag it onto another seat to swap them
+
+### Done
+
+- "custom" style: settings["sides"] = [far, right end, near, left end] (ends up to 3), fitted to the
+  player count (fit_sides); sides_layout lays ends as columns (stacked, facing that end) and the long
+  sides in the rest (a lone long side gets the full height); layout() key "custom:a,b,c,d"
+- Seating sheet (menu > Seating, New game > Custom...): five styles, a scaled preview with names
+  facing their way, - n + on each side (move_seat keeps the player count), drag hint
+- Saved, restored, undo of a new game / reset restores it; snapshot carries "sides"; phone op "sides"
+- Tests: every side combination up to 8 players (coverage, facing, clockwise), taps on 7 custom
+  tables, the sheet live and from New game, save, phones; companion test uses seating_key
+
 ## 2026-10-17 LifePi 1.16.0
 
 - Swipe typing: slide across the on-screen keyboard to type a word; tap a guess to swap it
