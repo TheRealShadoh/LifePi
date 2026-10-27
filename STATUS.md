@@ -3,6 +3,19 @@
 The newest dated section doubles as the Google Play release notes (scripts/play_upload.py takes
 it, up to 500 characters), so it's written for players.
 
+## 2026-10-26 LifePi 1.17.1
+
+- Custom seating with two players side by side and one at the end: the menu and undo buttons now
+  sit between seats instead of on top of a life total
+- The "1st" badge no longer runs off a narrow panel
+
+### Done
+
+- hub_spot(): the screen centre when seats meet there (all built-in styles), else the nearest seam
+  between two seats; on an up-and-down seam the buttons stack (undo below the menu)
+- draw_panel: the name + "1st" badge are kept inside the panel
+- Tests: every custom side combination puts the buttons on a seam; they open the menu / undo
+
 ## 2026-10-26 LifePi 1.17.0
 
 - Custom seating: choose how many players sit on each side of the table and at each end

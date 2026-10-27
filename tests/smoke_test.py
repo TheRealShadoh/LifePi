@@ -311,6 +311,22 @@ for sides in ([1, 1, 1, 0], [1, 0, 1, 1], [2, 0, 1, 0], [2, 1, 2, 1], [1, 2, 1, 
             after = [p["life"] for p in app.players]
             assert after[k] == before[k] + d and sum(after) == sum(before) + d, (sides, k, d)
 app.set_sides([5, 0, 0, 0]); assert app.settings["sides"] == [3, 0, 3, 2], "wrong total ignored"
+# the menu / undo buttons sit where seats meet - never on top of one wide panel's life total
+for sides in combos:
+    n = sum(sides)
+    if n < 2:
+        continue
+    app.players = [lifepi.new_player(i, 40) for i in range(n)]
+    app.settings.update(seating="custom", sides=lifepi.fit_sides(sides, n)); app.seats = list(lifepi.layout(n, W, H, app.seating_key()))
+    r = app.hub_r(); m, u = app.menu_pos(r), app.undo_pos(r)
+    mid = ((m[0] + u[0]) / 2, (m[1] + u[1]) / 2)
+    near = {k for dx in (-5, 5) for dy in (-5, 5) for k, st in enumerate(app.seats) if st.contains((mid[0] + dx, mid[1] + dy))}
+    assert len(near) >= 2, (sides, mid)
+app.start_game(3, 40); app.set_sides([0, 1, 2, 0]); app.first_anim = None; app.render()
+assert app.hub_spot()[2] == "v" and app.undo_pos(app.hub_r())[1] > app.menu_pos(app.hub_r())[1]
+tap(app.menu_pos(app.hub_r())); assert app.modals and app.modals[-1]["kind"] == "menu"; app.modals.clear()
+app.modal_seen = 0; app.change_life(0, -1); app.render(); tap(app.undo_pos(app.hub_r())); assert app.players[0]["life"] == 40, "undo button works"
+app.render(); pygame.image.save(app.canvas, os.path.join(shots, "custom_two_side_by_side_one_end.png"))
 # the seating sheet from the menu: styles, and +/- per side, live
 app.modals.clear(); app.start_game(3, 40); app.set_seating("table")
 app.push("menu"); app.render()
@@ -1377,7 +1393,9 @@ for ang in (0, 90, 180, 270):
     a.set_text(m, ""); assert not m["alts"], "the guesses go once the word is deleted"
 print("swipe typing ok")
 
-# the menu and Undo buttons sit as a pair in the middle of the screen; names step aside
+# the menu and Undo buttons sit as a pair in the middle of the screen (custom: its default sides,
+# which meet there too); names step aside
+a.settings["sides"] = []
 for seating in lifepi.SEATINGS:
     for n in range(2, lifepi.MAX_PLAYERS + 1):
         a.modals.clear(); a.settings["seating"] = seating; a.start_game(n, 40); a.first_anim = None; a.render()

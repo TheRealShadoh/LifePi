@@ -42,7 +42,7 @@ from pathlib import Path
 
 import pygame
 
-VERSION = "1.17.0"
+VERSION = "1.17.1"
 APP = "lifepi"
 WEB = sys.platform == "emscripten"                  # running in a browser (pygbag / WebAssembly)
 HOME = Path.home()
@@ -3360,6 +3360,10 @@ class App:
             else:
                 tw = min(tw, max(30, room_l - bw))
                 cx, maxw = int(bx0 - pad - bw - tw / 2), tw
+        if first and cx + tw / 2 + bw > w - edge:   # the "1st" badge would run off a narrow panel
+            if tw + bw > w - 2 * edge:
+                tw = maxw = max(30, w - 2 * edge - bw)
+            cx = int(min(cx, w - edge - bw - tw / 2))
         nr = self.text(s, p["name"], nsize, maxw=maxw, alpha=fade, center=(cx, ny))
         if first:                                   # who went first, for the rest of the game
             badge = self.make_pill("1st", max(16, top * 0.36), fg=(30, 24, 0), bg=(255, 220, 90), alpha=240)
@@ -4850,9 +4854,12 @@ class App:
         pygame.display.flip()
 
     def undo_pos(self, r):
-        """The Undo button sits just right of the menu button (one player: left of it)."""
+        """The Undo button sits just right of the menu button (one player: left of it; on an
+        up-and-down seam: below it)."""
         x, y = self.menu_pos(r)
-        return (x - int(r * 2.3), y) if len(self.players) == 1 else (x + int(r * 2.3), y)
+        if len(self.players) == 1:
+            return (x - int(r * 2.3), y)
+        return (x, y + int(r * 2.3)) if self.hub_spot()[2] == "v" else (x + int(r * 2.3), y)
 
     def draw_undo_button(self, r):
         """Round Undo button: a curved arrow; dim when there's nothing to take back.
@@ -4913,7 +4920,49 @@ class App:
         (where the rows / wedges meet), the menu on the left. One player: bottom-right corner."""
         if len(self.players) == 1:
             return (self.W - r - 10, self.H - r - 10)
-        return (self.W // 2 - int(r * 1.15), self.H // 2)
+        x, y, axis = self.hub_spot()
+        return (x, y - int(r * 1.15)) if axis == "v" else (x - int(r * 1.15), y)
+
+    def hub_spot(self):
+        """Where the middle buttons go: the screen centre when seats meet there (every built-in
+        style), else the nearest seam between two seats - custom seating can put one wide panel
+        across the middle, and the buttons would sit on its life total. (x, y, axis): axis "v"
+        for a seam running up and down (the buttons stack along it), else "h"."""
+        seats = self.seats if len(self.seats) == len(self.players) else layout(
+            len(self.players), self.W, self.H, self.seating_key())
+        key = (self.W, self.H, tuple(tuple(s.rect) for s in seats))
+        if getattr(self, "_hub_spot", (None,))[0] == key:
+            return self._hub_spot[1]
+        cx, cy = self.W / 2, self.H / 2
+        around = [(cx + dx, cy + dy) for dx in (-4, 4) for dy in (-4, 4)]
+        owners = {k for pt in around for k, st in enumerate(seats) if st.contains(pt)}
+        spot = (self.W // 2, self.H // 2, "h")
+        if len(owners) < 2 and all(st.is_rect for st in seats):
+            best = None
+            for a in seats:
+                for b in seats:
+                    ra, rb = a.rect, b.rect
+                    if abs(ra.right - rb.left) <= 1:                     # side by side
+                        y0, y1 = max(ra.top, rb.top), min(ra.bottom, rb.bottom)
+                        if y1 - y0 > 0:
+                            p, axis = (ra.right, min(max(cy, y0), y1)), "v"
+                        else:
+                            continue
+                    elif abs(ra.bottom - rb.top) <= 1:                   # one above the other
+                        x0, x1 = max(ra.left, rb.left), min(ra.right, rb.right)
+                        if x1 - x0 > 0:
+                            p, axis = (min(max(cx, x0), x1), ra.bottom), "h"
+                        else:
+                            continue
+                    else:
+                        continue
+                    d = (math.dist(p, (cx, cy)), axis != "h")
+                    if best is None or d < best[0]:
+                        best = (d, (round(p[0]), round(p[1]), axis))
+            if best:
+                spot = best[1]
+        self._hub_spot = (key, spot)
+        return spot
 
     def hub_rect(self, r=None):
         """Canvas area the middle buttons cover (menu + Undo, and the turn pill when it's on):
